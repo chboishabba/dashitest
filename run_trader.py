@@ -31,6 +31,7 @@ START_CASH = 100000.0      # starting cash to give non-zero risk budget
 HOLD_DECAY = 0.6           # exposure decay factor when action -> HOLD
 VEL_EXIT = 3.0             # exit if latent velocity exceeds this while in position
 PERSIST_RAMP = 0.05        # ramp factor for size in new regime
+VETO_SIGMA = 5.0           # if realized sigma > VETO_SIGMA * sigma_target -> shrink size
 
 
 def find_btc_csv():
@@ -169,6 +170,9 @@ def main(
     pos = 0.0
     z_prev = 0.0
     prev_action = 0
+    thesis_age = 0      # how long we've held a non-zero thesis
+    state_age = 0       # how long the field state has persisted
+    align_age = 0       # how long state and thesis have been aligned
     dz_min = 5e-5  # minimum dead-zone
     cost = 0.0005
     rows = []
@@ -202,6 +206,8 @@ def main(
         # volatility targeting (risk parity style)
         if sigma_target and sigma_target > 0:
             cap *= sigma_target / max(sigma, 1e-9)
+            if sigma > VETO_SIGMA * sigma_target:
+                cap *= 0.2  # shrink size aggressively in chaotic regimes
         # optional risk budget (futures-style)
         equity = cash + pos * price[t]
         if risk_frac:
@@ -209,7 +215,18 @@ def main(
             cap = min(cap, risk_cap)
         cap = max(0.0, min(cap, CAP_HARD_MAX))
 
-        # Triadic control: decay on HOLD, exit on high velocity, ramp size when new regime persists
+        # Update persistence clocks
+        state_age = state_age + 1 if desired == prev_action else 0 if desired == 0 else 1
+        if pos != 0:
+            thesis_age += 1
+        else:
+            thesis_age = 0
+        if pos != 0 and desired != 0 and np.sign(pos) == np.sign(desired):
+            align_age += 1
+        else:
+            align_age = 0
+
+        # Triadic control: decay on HOLD, exit on high velocity, ramp size when aligned persists
         if desired == 0:
             # decay exposure toward zero
             cap = cap * (1.0 - HOLD_DECAY) + 1e-9  # keep a tiny ability to act
@@ -219,10 +236,10 @@ def main(
             if z_vel > VEL_EXIT and pos != 0:
                 fill = np.clip(-pos, -cap, cap)
             else:
-                # ramp toward target with persistence factor
-                # If switching direction, reset target; otherwise ramp toward it.
+                # ramp toward target with persistence factor; faster if align_age large
                 target = desired * cap
-                step = PERSIST_RAMP * (target - pos)
+                ramp = PERSIST_RAMP * (1.0 + align_age * 0.01)
+                step = ramp * (target - pos)
                 fill = np.clip(step, -cap, cap)
 
         slippage = IMPACT_COEFF * abs(fill / max(cap, 1e-9))
@@ -246,6 +263,9 @@ def main(
             "cap": cap,
             "equity": equity,
             "prev_action": prev_action,
+            "thesis_age": thesis_age,
+            "state_age": state_age,
+            "align_age": align_age,
         }
         rows.append(row)
         pd.DataFrame([row]).to_csv(LOG, mode="a", header=not LOG.exists(), index=False)
@@ -256,6 +276,13 @@ def main(
     # print summary stats
     total_pnl = rows[-1]["pnl"] if rows else 0.0
     trades = sum(1 for r in rows if r["fill"] != 0)
+    hold_pct = sum(1 for r in rows if r["action"] == 0) / len(rows) if rows else 0.0
+    max_drawdown = 0.0
+    if rows:
+        equity_curve = pd.Series([r["pnl"] for r in rows])
+        running_max = equity_curve.cummax()
+        drawdown = (equity_curve - running_max).min()
+        max_drawdown = float(drawdown)
     print(f"Run complete: source={source}, steps={len(rows)}, trades={trades}, pnl={total_pnl:.4f}")
 
     # append run history
@@ -265,6 +292,8 @@ def main(
         "steps": len(rows),
         "trades": trades,
         "pnl": total_pnl,
+        "hold_pct": hold_pct,
+        "max_drawdown": max_drawdown,
     }
     pd.DataFrame([summary]).to_csv(RUN_HISTORY, mode="a", header=not RUN_HISTORY.exists(), index=False)
 
