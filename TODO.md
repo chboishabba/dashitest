@@ -32,3 +32,10 @@
   - Build ternary/p-adic encoding, baseline binary model, ternary model, walk-forward backtest with costs; compare accuracy and trading metrics.
   - Optionally add a regime-gated MoE (trend/mean-revert/chop).
 
+- **Downloader robustness**
+  - Stooq: handle DNS/offline detection gracefully; skip on failure instead of retrying forever.
+  - Yahoo: optional install; add Parquet output option in downloader.
+
+- **Visualization**
+  - Wire training_dashboard to actual log format from `ternary_trading_demo.py`.
+  - Add action/HOLD overlays; add Hamming divergence/motif detection for CA visualiser.
