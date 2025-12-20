@@ -22,6 +22,7 @@ class BarExecution(BaseExecution):
                 "pnl": 0.0,
                 "exposure": self.exposure,
                 "slippage": 0.0,
+                "urgency": getattr(intent, "urgency", 0.0),
             }
 
         target = intent.target_exposure * intent.direction
@@ -35,6 +36,7 @@ class BarExecution(BaseExecution):
                 "pnl": 0.0,
                 "exposure": self.exposure,
                 "slippage": 0.0,
+                "urgency": getattr(intent, "urgency", 0.0),
             }
 
         # simulate fill with simple slippage
@@ -52,4 +54,5 @@ class BarExecution(BaseExecution):
             "pnl": pnl,
             "exposure": self.exposure,
             "slippage": slip,
+            "urgency": getattr(intent, "urgency", 0.0),
         }

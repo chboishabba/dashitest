@@ -9,14 +9,24 @@ from execution.intent import Intent
 
 
 class TriadicStrategy:
-    def __init__(self, symbol: str, base_size: float = 0.05, confidence_fn=None, tau_conf: float = 0.0):
+    def __init__(
+        self,
+        symbol: str,
+        base_size: float = 0.05,
+        confidence_fn=None,
+        tau_on: float = 0.0,
+        tau_off: float = 0.0,
+    ):
         self.symbol = symbol
         self.base_size = base_size
         self.position = 0  # current thesis (direction)
         self.align_age = 0
         self.prev_state = 0
         self.confidence_fn = confidence_fn
-        self.tau_conf = tau_conf
+        self.tau_on = tau_on
+        self.tau_off = tau_off
+        self._is_holding = False
+        assert self.tau_on >= self.tau_off, "Require tau_on >= tau_off for hysteresis"
 
     def step(self, ts: int, state: int):
         """
@@ -34,14 +44,16 @@ class TriadicStrategy:
         if self.confidence_fn is not None:
             conf = max(0.0, min(1.0, float(self.confidence_fn(ts, state))))
 
-        if state == 0 or conf <= self.tau_conf:
-            direction = 0
-            target_exposure = 0.0
-            urgency = 0.0
-            ttl = 0
-            hold_flag = True
-        elif conf <= 0.0:
-            # abstain when confidence says so
+        # Hysteresis HOLD gate: turn ACT on at tau_on, off at tau_off
+        hold_by_conf = False
+        if not self._is_holding:
+            if conf < self.tau_on:
+                hold_by_conf = True
+        else:
+            if conf < self.tau_off:
+                hold_by_conf = True
+
+        if state == 0 or hold_by_conf or conf <= 0.0:
             direction = 0
             target_exposure = 0.0
             urgency = 0.0
@@ -60,6 +72,7 @@ class TriadicStrategy:
         # update internal thesis
         self.position = direction if target_exposure > 0 else 0
         self.prev_state = state
+        self._is_holding = hold_flag
 
         return Intent(
             ts=int(ts),
@@ -69,4 +82,5 @@ class TriadicStrategy:
             urgency=max(0.0, min(1.0, urgency)),
             ttl_ms=int(ttl),
             hold=hold_flag,
+            actionability=conf,
         )
