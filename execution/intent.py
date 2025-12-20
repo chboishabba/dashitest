@@ -20,3 +20,4 @@ class Intent:
     target_exposure: float
     urgency: float
     ttl_ms: int
+    hold: bool = False  # when True, executor should not change exposure

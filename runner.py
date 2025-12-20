@@ -33,15 +33,16 @@ def get_executor(symbol: str, mode: str = "auto", lob_symbols=None):
     return BarExecution()
 
 
-def run_bars(bars: pd.DataFrame, symbol: str, mode: str = "auto", log_path: str = None):
+def run_bars(bars: pd.DataFrame, symbol: str, mode: str = "auto", log_path: str = None, confidence_fn=None):
     """
     bars: DataFrame with columns [ts, close, state] (state ∈ {-1,0,+1})
     symbol: symbol string
     mode: "auto" | "bar" | "lob"
     log_path: optional CSV path for dashboard compatibility (logs/trading_log.csv)
+    confidence_fn: optional callable(ts, state) -> confidence in [0,1]
     """
     # strategy emits intents from triadic state
-    strategy = TriadicStrategy(symbol=symbol)
+    strategy = TriadicStrategy(symbol=symbol, confidence_fn=confidence_fn)
     executor = get_executor(symbol, mode)
     logs = []
     equity = 1.0
