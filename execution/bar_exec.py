@@ -14,6 +14,16 @@ class BarExecution(BaseExecution):
         self.min_trade = min_trade
 
     def execute(self, intent, price: float):
+        if getattr(intent, "hold", False):
+            return {
+                "filled": 0.0,
+                "fill_price": price,
+                "fee": 0.0,
+                "pnl": 0.0,
+                "exposure": self.exposure,
+                "slippage": 0.0,
+            }
+
         target = intent.target_exposure * intent.direction
         delta = target - self.exposure
 
