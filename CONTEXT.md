@@ -39,3 +39,10 @@
 - **User prefs / safety:** Keep fish-safe commands; HOLD must stay epistemic (not flatten). Regime/acceptable is PnL-free; use precision/recall of acceptable vs ACT for diagnostics. Hysteresis maintained.
 
 - **Dashboard:** `training_dashboard.py` shows equity/latent/price; optional `--pr logs/pr_curve.csv` adds a tiny tau_off → (precision, recall) sparkline (from sweep script).
+
+## Latest diagnostics (Dec 21)
+
+- Engagement sweep: acceptable% invariant at 0.831; precision=1.0 across tau_off ∈ {0.45…0.15}; recall rises smoothly (0.305→0.493); engagement surface exported (`surface.png` trader vs motif).
+- Acceptable manifold: time×actionability heatmap (`acceptable.png`); RegimeSpec sweep (min_run_length × vol cap × flip cap) with acceptable% (`regime_surface.png`, `logs/accept_surface.csv`); legitimacy margin heatmap (distance to RegimeSpec failure) (`margin.png`).
+- Confusion surfaces: false-positive/false-negative density over (actionability × tau_off) (`confusion.png`, `logs/confusion_surface.csv`); FP stays ~0, FN surface shows missed engagement regions.
+- Engagement overlay: dashboard plots P(ACT|actionability, acceptable) vs P(ACT|actionability, unacceptable) to catch legitimacy leakage (red curve pinned at ~0 when healthy).
