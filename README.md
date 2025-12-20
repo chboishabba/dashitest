@@ -55,4 +55,181 @@ triadic_nn_bench2: baseline NumPy vs packed SWAR dot_product_swar
 N=     1000, M=  8: baseline    79.37 µs/call ( 1209.54 Mop/s) SWAR   202.35 µs/call (  474.42 Mop/s) speedup x 0.39
 N=   100000, M= 16: baseline 13097.40 µs/call ( 1465.94 Mop/s) SWAR 17307.89 µs/call ( 1109.32 Mop/s) speedup x 0.76
 
+epoch 997: loss=  1.9975  time= 26.89 ms
+epoch 998: loss=  1.9957  time= 29.09 ms
+epoch 999: loss=  1.9940  time= 25.70 ms
+epoch 1000: loss=  1.9922  time= 26.41 ms
+MoE-style sparse ternary benchmark (gate + route + dot) on CPU.
+N=4096, M=8, iters=128: baseline   581.39 ms/epoch   SWAR     8.70 ms/epoch   speedup x66.83
+Motif CA (M4/M7/M9) rule learning via count-based log-reg
+Train acc: 79.64%  Test acc: 79.94%  time=8932.4 ms
+Engagement (pred==1 vs acceptable): Train precision=0.793 recall=0.802 | Test precision=0.796 recall=0.803
+[train] logreg trained in 34015.6 ms | N=819200 D=10
+tau_off=0.45  k_off=1  acceptable=0.012  precision=1.000  recall=0.000  act_cells=0  hold%=1.000
+tau_off=0.40  k_off=1  acceptable=0.012  precision=1.000  recall=0.000  act_cells=0  hold%=1.000
+tau_off=0.35  k_off=1  acceptable=0.012  precision=1.000  recall=0.000  act_cells=0  hold%=1.000
+tau_off=0.30  k_off=1  acceptable=0.012  precision=1.000  recall=0.000  act_cells=0  hold%=1.000
+tau_off=0.25  k_off=1  acceptable=0.012  precision=1.000  recall=0.000  act_cells=0  hold%=1.000
+tau_off=0.20  k_off=1  acceptable=0.012  precision=1.000  recall=0.000  act_cells=0  hold%=1.000
+tau_off=0.15  k_off=1  acceptable=0.012  precision=1.000  recall=0.000  act_cells=0  hold%=1.000
+tau_off=0.45  k_off=2  acceptable=0.012  precision=1.000  recall=0.000  act_cells=0  hold%=1.000
+tau_off=0.40  k_off=2  acceptable=0.012  precision=1.000  recall=0.000  act_cells=0  hold%=1.000
+tau_off=0.35  k_off=2  acceptable=0.012  precision=1.000  recall=0.000  act_cells=0  hold%=1.000
+tau_off=0.30  k_off=2  acceptable=0.012  precision=1.000  recall=0.000  act_cells=0  hold%=1.000
+tau_off=0.25  k_off=2  acceptable=0.012  precision=1.000  recall=0.000  act_cells=0  hold%=1.000
+tau_off=0.20  k_off=2  acceptable=0.012  precision=1.000  recall=0.000  act_cells=0  hold%=1.000
+tau_off=0.15  k_off=2  acceptable=0.012  precision=1.000  recall=0.000  act_cells=0  hold%=1.000
+tau_off=0.45  k_off=3  acceptable=0.012  precision=1.000  recall=0.000  act_cells=0  hold%=1.000
+tau_off=0.40  k_off=3  acceptable=0.012  precision=1.000  recall=0.000  act_cells=0  hold%=1.000
+tau_off=0.35  k_off=3  acceptable=0.012  precision=1.000  recall=0.000  act_cells=0  hold%=1.000
+tau_off=0.30  k_off=3  acceptable=0.012  precision=1.000  recall=0.000  act_cells=0  hold%=1.000
+tau_off=0.25  k_off=3  acceptable=0.012  precision=1.000  recall=0.000  act_cells=0  hold%=1.000
+tau_off=0.20  k_off=3  acceptable=0.012  precision=1.000  recall=0.000  act_cells=0  hold%=1.000
+tau_off=0.15  k_off=3  acceptable=0.012  precision=1.000  recall=0.000  act_cells=0  hold%=1.000
+Wrote sweep metrics to logs/ca_pr_curve.csv
+k  b_min  spares        efficiency
+ 1     2        1     79.25%
+ 2     4        7     79.25%
+ 3     5        5     95.10%
+ 4     7       47     90.57%
+ 5     8       13     99.06%
+ 6    10      295     95.10%
+ 7    12     1909     92.46%
+ 8    13     1631     97.54%
+ 9    15    13085     95.10%
+10    16     6487     99.06%
+11    18    84997     96.86%
+12    20   517135     95.10%
+13    21   502829     98.12%
+14    23  3605639     96.48%
+15    24  2428309     99.06%
+16    26 24062143     97.54%
+17    27  5077565     99.79%
+18    29 149450423     98.38%
+19    31 985222181     97.14%
+20    32 808182895     99.06%
+21    34 6719515981     97.89%
+22    35 2978678759     99.63%
+23    37 43295774645     98.52%
+24    39 267326277407     97.54%
+25    40 252223018333     99.06%
+26    42 1856180682775     98.12%
+27    43 1170495537221     99.52%
+28    45 12307579633871     98.62%
+29    46 1738366812781     99.92%
+30    48 75583844616007     99.06%
+31    50 508226510558677     98.27%
+32    51 398779624833407     99.45%
+33    53 3448138688185469     98.69%
+34    54 1337216809815415     99.79%
+35    56 22026048938928229     99.06%
+36    58 138135740854712623     98.38%
+37    59 126176846412426125     99.40%
+38    61 954991291540701863     98.74%
+39    62 559130865408411637     99.70%
+40    64 6289078614652622815     99.06%
+
+Byte-aligned (b multiple of 8):
+ 5     8       13     99.06%
+10    16     6487     99.06%
+15    24  2428309     99.06%
+20    32 808182895     99.06%
+25    40 252223018333     99.06%
+30    48 75583844616007     99.06%
+35    56 22026048938928229     99.06%
+40    64 6289078614652622815     99.06%
+
+Per-byte optimal packing (5 trits/byte):
+5 trits in 8 bits: spares=13, efficiency=99.06% (~95% entropy efficiency)
+Packing ablation: N=4096, iters=64, threshold=1
+Unpacked:     15.85 ms/call (  595.38 Mop/s)
+Radix (pack/unpack):    50.55 ms/call (  186.68 Mop/s)
+Packed SWAR:    34.50 ms/call (  273.57 Mop/s)
+Speedup SWAR vs unpacked: x 0.46, vs radix: x 1.47
+Potts/3-state 1D lattice update (center+left+right mod3):
+N=4096, iters=256: baseline     0.72 ms/iter   SWAR     0.15 ms/iter   speedup x 4.84
+/home/c/Documents/code/dashitest/training_dashboard.py:113: FutureWarning: The default of observed=False is deprecated and will be changed to True in a future version of pandas. Pass observed=False to retain current behavior or observed=True to adopt the future default and silence this warning.
+  grouped = y.groupby(cat).mean()
+/home/c/Documents/code/dashitest/training_dashboard.py:113: FutureWarning: The default of observed=False is deprecated and will be changed to True in a future version of pandas. Pass observed=False to retain current behavior or observed=True to adopt the future default and silence this warning.
+  grouped = y.groupby(cat).mean()
+Using BTC data: data/raw/stooq/btc_intraday.csv
+^CUsing BTC data: data/raw/stooq/btc_intraday.csv
+Run complete: source=btc, steps=7698, trades=972, pnl=228710.5639
+       t   ts   symbol  acceptable  state  intent_direction  intent_target  urgency  actionability  fill  fill_price  fee  pnl  exposure  slippage      price  action  hold  z_vel
+995  995  995  BTCUSDT       False      1                 1       0.000000      0.3            1.0   0.0   95.675962  0.0  0.0       0.0       0.0  95.675962       1     0    0.0
+996  996  996  BTCUSDT       False      1                 1       0.002439      0.4            1.0   0.0   95.730597  0.0  0.0       0.0       0.0  95.730597       1     0    0.0
+997  997  997  BTCUSDT       False     -1                -1       0.000000      0.3            1.0   0.0   95.656653  0.0  0.0       0.0       0.0  95.656653      -1     0    0.0
+998  998  998  BTCUSDT       False      1                 1       0.000000      0.3            1.0   0.0   95.721089  0.0  0.0       0.0       0.0  95.721089       1     0    0.0
+999  999  999  BTCUSDT       False     -1                -1       0.000000      0.3            1.0   0.0   95.584756  0.0  0.0       0.0       0.0  95.584756      -1     0    0.0
+Snapshot benchmark (hot P/N compute, optional 5-trit/byte snapshots):
+N=8192, iters=128, snap_every=16
+Hot only:    23.15 ms/call ( 1630.89 Mop/s)
+Hot+snap:   166.44 ms/call (  226.80 Mop/s), snapshots=128.00 KiB
+Sparse iterative classifier loop (XOR -> threshold -> dot) on cache-resident data.
+K= 128: baseline    75.14 ms/epoch   SWAR    13.72 ms/epoch   speedup x 5.48
+K= 512: baseline   310.74 ms/epoch   SWAR    48.99 ms/epoch   speedup x 6.34
+Ternary SVO traversal (8-ary, depth=4, random states 0/1/2):
+Nodes=585: baseline   662.51 µs/traversal   SWAR  1788.96 µs/traversal   speedup x 0.37
+Numba SWAR:     0.99 µs/traversal   speedup vs baseline x670.33
+Compiling Numba kernels (first call)...
+OK: no_specials_small (N=10000, p_special=0.0)
+OK: rare_specials (N=200000, p_special=0.0001)
+OK: some_specials (N=200000, p_special=0.01)
+OK: many_specials (N=50000, p_special=0.2)
+BENCH (SWAR candidate): N=     1000     17.95 µs/call     55.70 Mwords/s
+BENCH (SWAR candidate): N=   100000    817.64 µs/call    122.30 Mwords/s
+BENCH (SWAR candidate): N=  5000000  25563.97 µs/call    195.59 Mwords/s
+All tests passed.
+Ternary ALU microkernel (iterative XOR with specials):
+N=4096, iters=128: SWAR     0.05 ms/iter   Emulator   390.88 ms/iter   speedup x7163.9
+Cyclic ternary CA (0→1→2→0, no HOLD)
+Grid: 64x64, Steps: 30, k=2, wrap=True
+t=00: 0 34.30%  1 32.25%  2 33.45%
+t=01: 0 35.94%  1 31.98%  2 32.08%
+t=02: 0 35.35%  1 31.84%  2 32.81%
+t=03: 0 34.69%  1 32.35%  2 32.96%
+t=04: 0 33.62%  1 32.28%  2 34.11%
+t=05: 0 33.54%  1 32.35%  2 34.11%
+t=06: 0 33.91%  1 32.01%  2 34.08%
+t=07: 0 34.06%  1 32.74%  2 33.20%
+t=08: 0 33.23%  1 33.57%  2 33.20%
+t=09: 0 33.13%  1 33.20%  2 33.67%
+t=10: 0 33.30%  1 33.54%  2 33.15%
+t=11: 0 32.89%  1 33.64%  2 33.47%
+t=12: 0 33.40%  1 32.93%  2 33.67%
+t=13: 0 33.67%  1 33.40%  2 32.93%
+t=14: 0 32.93%  1 33.67%  2 33.40%
+t=15: 0 33.40%  1 32.93%  2 33.67%
+t=16: 0 33.67%  1 33.40%  2 32.93%
+t=17: 0 32.93%  1 33.67%  2 33.40%
+t=18: 0 33.40%  1 32.93%  2 33.67%
+t=19: 0 33.67%  1 33.40%  2 32.93%
+t=20: 0 32.93%  1 33.67%  2 33.40%
+t=21: 0 33.40%  1 32.93%  2 33.67%
+t=22: 0 33.67%  1 33.40%  2 32.93%
+t=23: 0 32.93%  1 33.67%  2 33.40%
+t=24: 0 33.40%  1 32.93%  2 33.67%
+t=25: 0 33.67%  1 33.40%  2 32.93%
+t=26: 0 32.93%  1 33.67%  2 33.40%
+t=27: 0 33.40%  1 32.93%  2 33.67%
+t=28: 0 33.67%  1 33.40%  2 32.93%
+t=29: 0 32.93%  1 33.67%  2 33.40%
+kf.kio.filewidgets.kfilefiltercombo: KFileFilterCombo::setCurrentFilter: Could not find file filter KFileFilter(MIME patterns: QList() File patterns: QList("*.png") label: "Portable Network Graphics")
+Ternary trading demo (no API keys, local/synthetic data)
+Close series length: 1000
+Trades executed    : 677
+Ternary cum return : 760.06%   Sharpe: 58.87   Hit rate: 62.4%
+Baseline (binary)  : 881.08%   Sharpe: 79.26   Hit rate: 99.6%
+Runtime            : 19.72 ms
+
+To use real data, provide prices.csv with columns: date, close.
+Using BTC data: data/raw/stooq/btc_intraday.csv
+Run complete: source=btc, steps=10, trades=8, pnl=99862.1562
+PASS: run_trader used cached real data and produced a non-empty log.
+Tiled dot product (same blocking, different algebra)
+M=N=K=256, block=32
+int8 dot :  1109.67 ms       0.03 Gops/s     0.00 GB/s   ops/byte=85.33
+GF3 dot  :  1552.04 ms       0.02 Gops/s     0.00 GB/s   ops/byte=170.67   speedup x 0.71
+
+
 ```
