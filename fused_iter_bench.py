@@ -14,6 +14,7 @@ from swar_test_harness import (
     dot_product_swar,
     threshold_count_swar,
     random_words,
+    extract_lanes,
 )
 
 
@@ -38,6 +39,17 @@ def fused_step(state, inp, thresh, tmp_flags, tmp_word, tmp_counts):
     return state
 
 
+def fused_step_baseline(lanes_state, lanes_inp, thresh):
+    """
+    Unpacked baseline on lanes (N,12) uint8.
+    """
+    lanes_state = (lanes_state + lanes_inp) % 3
+    counts = (lanes_state > thresh).sum(axis=1)
+    _ = counts  # unused
+    _ = np.sum(lanes_state * lanes_state, axis=1)
+    return lanes_state
+
+
 def bench_fused(N=1024, iters=256, thresh=10, seed=0):
     state = random_words(N, p_special=0.0, seed=seed)
     inp = random_words(N, p_special=0.0, seed=seed + 1)
@@ -57,7 +69,18 @@ def bench_fused(N=1024, iters=256, thresh=10, seed=0):
     dt = (t1 - t0) / iters
     # effective trit operations ~ (XOR + threshold + dot) per word
     ops = N * 12 * 3
-    print(f"Fused iter bench: N={N}, iters={iters}, {dt*1e6:8.2f} µs/iter, {ops/dt/1e6:8.2f} Mop/s")
+    # baseline unpacked
+    lanes_state = extract_lanes(state)
+    lanes_inp = extract_lanes(inp)
+    t0b = time.perf_counter()
+    ls = lanes_state
+    for _ in range(iters):
+        ls = fused_step_baseline(ls, lanes_inp, thresh)
+    t1b = time.perf_counter()
+    dt_base = (t1b - t0b) / iters
+    print(f"Fused iter bench: N={N}, iters={iters}, baseline {dt_base*1e6:8.2f} µs/iter, "
+          f"SWAR {dt*1e6:8.2f} µs/iter, speedup x{dt_base/dt:5.2f}, "
+          f"ops {ops/dt/1e6:8.2f} Mop/s")
 
 
 def main():
