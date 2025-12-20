@@ -46,6 +46,12 @@
   - State-stop exit (exit/reduce if latent velocity exceeds threshold mid-position).
   - Persistence ramp on size (slow ramp in new regime; clamp by vol target and hard cap).
   - Explicit thesis/persistence policy: learn/control {reinforce, hold, decay} separately from direction; add hazard/age inputs.
+  - Add explicit persistence clocks (thesis_age, state_age, align_age) and feed them into the control decisions.
+- **Execution realism**
+  - Add execution layer interface: intent → fills/slippage/queue delay.
+  - Implement BarExecution (existing) vs LOBReplayExecution (hftbacktest) switch.
+  - Prepare Binance BTC/ETH book+trade schema for hftbacktest; integrate adapter.
+  - Keep AUD/USD on bar execution (no L2 available).
 
 - **Triadic exits/controls (trader)**
   - Exposure decay on HOLD (fast exit when field re-pins).
