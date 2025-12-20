@@ -39,3 +39,16 @@
 - **Visualization**
   - Wire training_dashboard to actual log format from `ternary_trading_demo.py`.
   - Add action/HOLD overlays; add Hamming divergence/motif detection for CA visualiser.
+
+- **Triadic exits/controls (trader)**
+  - Exposure decay on HOLD (fast exit when field re-pins).
+  - Volatility veto on size (shrink size when realized vol/latent velocity spikes).
+  - State-stop exit (exit/reduce if latent velocity exceeds threshold mid-position).
+  - Persistence ramp on size (slow ramp in new regime; clamp by vol target and hard cap).
+  - Explicit thesis/persistence policy: learn/control {reinforce, hold, decay} separately from direction; add hazard/age inputs.
+
+- **Triadic exits/controls (trader)**
+  - Exposure decay on HOLD (fast exit when field re-pins).
+  - Volatility veto on size (shrink size when realized vol/latent velocity spikes).
+  - State-stop exit (exit/reduce if latent velocity exceeds threshold mid-position).
+  - Persistence ramp on size (slow ramp in new regime; clamp by vol target and hard cap).
