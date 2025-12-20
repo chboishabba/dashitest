@@ -9,13 +9,14 @@ from execution.intent import Intent
 
 
 class TriadicStrategy:
-    def __init__(self, symbol: str, base_size: float = 0.05, confidence_fn=None):
+    def __init__(self, symbol: str, base_size: float = 0.05, confidence_fn=None, tau_conf: float = 0.0):
         self.symbol = symbol
         self.base_size = base_size
         self.position = 0  # current thesis (direction)
         self.align_age = 0
         self.prev_state = 0
         self.confidence_fn = confidence_fn
+        self.tau_conf = tau_conf
 
     def step(self, ts: int, state: int):
         """
@@ -33,7 +34,7 @@ class TriadicStrategy:
         if self.confidence_fn is not None:
             conf = max(0.0, min(1.0, float(self.confidence_fn(ts, state))))
 
-        if state == 0:
+        if state == 0 or conf <= self.tau_conf:
             direction = 0
             target_exposure = 0.0
             urgency = 0.0

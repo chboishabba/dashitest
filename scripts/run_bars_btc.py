@@ -27,6 +27,9 @@ def confidence_from_disagreement(states: np.ndarray, window: int = 50, ret_vol=N
 
 
 def main():
+    # confidence threshold sweep hook (set here)
+    tau_conf = 0.5
+
     csv = Path("data/raw/stooq/btc_intraday.csv")
     if not csv.exists():
         raise SystemExit("btc_intraday.csv not found; run data_downloader.py first.")
@@ -55,6 +58,7 @@ def main():
         mode="bar",
         log_path="logs/trading_log.csv",
         confidence_fn=conf_fn,
+        tau_conf=tau_conf,
     )
     print("Wrote", len(bars), "rows to logs/trading_log.csv")
 
