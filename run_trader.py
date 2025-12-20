@@ -19,8 +19,18 @@ LOG = pathlib.Path("logs/trading_log.csv")
 LOG.parent.mkdir(parents=True, exist_ok=True)
 RUN_HISTORY = pathlib.Path("data/run_history.csv")
 RUN_HISTORY.parent.mkdir(parents=True, exist_ok=True)
-PARTICIPATION_CAP = 0.1  # max fraction of bar volume we can trade
-IMPACT_COEFF = 0.0001    # slippage per unit participation
+PARTICIPATION_CAP = 0.05   # max fraction of bar volume we can trade
+IMPACT_COEFF = 0.0001      # slippage per unit participation
+SIGMA_TARGET = 0.01        # target vol for basic risk parity sizing
+DEFAULT_RISK_FRAC = None   # optional: fraction of equity to risk per trade (futures-style)
+CONTRACT_MULT = 1.0        # notional per contract; leave at 1 unless using real futures
+CAP_HARD_MAX = 100.0       # absolute cap on per-step size (after all scaling)
+START_CASH = 100000.0      # starting cash to give non-zero risk budget
+
+# Controls
+HOLD_DECAY = 0.6           # exposure decay factor when action -> HOLD
+VEL_EXIT = 3.0             # exit if latent velocity exceeds this while in position
+PERSIST_RAMP = 0.05        # ramp factor for size in new regime
 
 
 def find_btc_csv():
@@ -129,7 +139,13 @@ def load_prices(path: pathlib.Path):
     raise ValueError(f"Could not parse prices from {path}")
 
 
-def main(max_steps=None, sleep_s=0.05):
+def main(
+    max_steps=None,
+    sleep_s=0.0,
+    risk_frac: float = DEFAULT_RISK_FRAC,
+    contract_mult: float = CONTRACT_MULT,
+    sigma_target: float = SIGMA_TARGET,
+):
     source = "stooq"
     try:
         csv_path = find_btc_csv()
@@ -149,9 +165,10 @@ def main(max_steps=None, sleep_s=0.05):
         price = 100 + np.cumsum(steps)
         volume = np.ones_like(price) * 1e6
     LOG.unlink(missing_ok=True)
-    cash = 0.0
+    cash = START_CASH
     pos = 0.0
     z_prev = 0.0
+    prev_action = 0
     dz_min = 5e-5  # minimum dead-zone
     cost = 0.0005
     rows = []
@@ -181,8 +198,33 @@ def main(max_steps=None, sleep_s=0.05):
         order = desired - pos
         base_cap = PARTICIPATION_CAP * volume[t]
         vel_term = 1.0 + 10.0 * max(abs(ret), z_vel)
-        cap = max(1.0, min(base_cap * vel_term, 1000.0))
-        fill = np.clip(order, -cap, cap)
+        cap = base_cap * vel_term
+        # volatility targeting (risk parity style)
+        if sigma_target and sigma_target > 0:
+            cap *= sigma_target / max(sigma, 1e-9)
+        # optional risk budget (futures-style)
+        equity = cash + pos * price[t]
+        if risk_frac:
+            risk_cap = (equity * risk_frac) / (price[t] * contract_mult + 1e-9)
+            cap = min(cap, risk_cap)
+        cap = max(0.0, min(cap, CAP_HARD_MAX))
+
+        # Triadic control: decay on HOLD, exit on high velocity, ramp size when new regime persists
+        if desired == 0:
+            # decay exposure toward zero
+            cap = cap * (1.0 - HOLD_DECAY) + 1e-9  # keep a tiny ability to act
+            fill = np.clip(-pos, -cap, cap)
+        else:
+            # exit if latent velocity too high while in position
+            if z_vel > VEL_EXIT and pos != 0:
+                fill = np.clip(-pos, -cap, cap)
+            else:
+                # ramp toward target with persistence factor
+                # If switching direction, reset target; otherwise ramp toward it.
+                target = desired * cap
+                step = PERSIST_RAMP * (target - pos)
+                fill = np.clip(step, -cap, cap)
+
         slippage = IMPACT_COEFF * abs(fill / max(cap, 1e-9))
         price_exec = price[t] * (1 + slippage * np.sign(fill))
         cash -= fill * price_exec
@@ -202,10 +244,13 @@ def main(max_steps=None, sleep_s=0.05):
             "pos": pos,
             "fill": fill,
             "cap": cap,
+            "equity": equity,
+            "prev_action": prev_action,
         }
         rows.append(row)
         pd.DataFrame([row]).to_csv(LOG, mode="a", header=not LOG.exists(), index=False)
         z_prev = z
+        prev_action = desired
         time.sleep(sleep_s)  # slow enough to watch in dashboard
 
     # print summary stats
