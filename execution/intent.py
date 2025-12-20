@@ -12,6 +12,8 @@ class Intent:
     target_exposure: desired portfolio fraction [0, 1]
     urgency: [0, 1] hint for executor (0=passive, 1=aggressive). Executor may ignore.
     ttl_ms: time-to-live for passive intents. Executor may ignore.
+    hold: when True, executor should not change exposure
+    actionability: scalar in [0,1] describing legitimacy to act (logged only)
     """
 
     ts: int
@@ -21,3 +23,4 @@ class Intent:
     urgency: float
     ttl_ms: int
     hold: bool = False  # when True, executor should not change exposure
+    actionability: float = 1.0  # logged; executor ignores
