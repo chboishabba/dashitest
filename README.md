@@ -1,3 +1,4 @@
+```
 balanced_pn_iter_bench: 2-bit (P,N) balanced add with carry, iterative loop
 Iterative balanced PN add: N=1024, iters=128,  3187.96 µs/word,     2.57 Mtrits/s
 Iterative balanced PN add: N=1024, iters=512, 13531.47 µs/word,     2.42 Mtrits/s
@@ -53,3 +54,5 @@ N=   100000: baseline  5623.10 µs/call ( 1707.24 Mop/s)  SWAR  7810.94 µs/call
 triadic_nn_bench2: baseline NumPy vs packed SWAR dot_product_swar
 N=     1000, M=  8: baseline    79.37 µs/call ( 1209.54 Mop/s) SWAR   202.35 µs/call (  474.42 Mop/s) speedup x 0.39
 N=   100000, M= 16: baseline 13097.40 µs/call ( 1465.94 Mop/s) SWAR 17307.89 µs/call ( 1109.32 Mop/s) speedup x 0.76
+
+```
