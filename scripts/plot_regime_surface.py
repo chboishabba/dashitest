@@ -1,9 +1,11 @@
 """
 plot_regime_surface.py
 ----------------------
-Plot acceptable% over RegimeSpec sweeps (min_run_length × vol cap percentile).
+Plot acceptable% over RegimeSpec sweeps.
+If max_flip_rate is present, prefer plotting (min_run_length × max_flip_rate).
+Else plot (min_run_length × max_vol_pct).
 Expects CSV from sweep_regime_acceptability.py with columns:
-  min_run_length, max_vol_pct, acceptable_pct
+  min_run_length, acceptable_pct, and either max_flip_rate or max_vol_pct
 
 Usage:
   PYTHONPATH=. python scripts/plot_regime_surface.py --csv logs/accept_surface.csv --save regime_surface.png
@@ -17,21 +19,34 @@ import matplotlib.pyplot as plt
 
 def load_table(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
-    required = {"min_run_length", "max_vol_pct", "acceptable_pct"}
-    if not required.issubset(df.columns):
-        raise SystemExit(f"{path} missing required columns {required}")
+    required_base = {"min_run_length", "acceptable_pct"}
+    if not required_base.issubset(df.columns):
+        raise SystemExit(f"{path} missing required columns {required_base}")
+    if "max_flip_rate" in df.columns:
+        df["max_flip_rate"] = df["max_flip_rate"]
+    if "max_vol_pct" in df.columns:
+        df["max_vol_pct"] = df["max_vol_pct"]
     return df
 
 
 def pivot_surface(df: pd.DataFrame):
-    table = df.pivot_table(
-        index="min_run_length",
-        columns="max_vol_pct",
-        values="acceptable_pct",
-        aggfunc="mean",
-    )
-    table = table.sort_index().sort_index(axis=1)
-    return table
+    if "max_flip_rate" in df.columns and df["max_flip_rate"].notna().any():
+        table = df.pivot_table(
+            index="min_run_length",
+            columns="max_flip_rate",
+            values="acceptable_pct",
+            aggfunc="mean",
+        )
+    elif "max_vol_pct" in df.columns:
+        table = df.pivot_table(
+            index="min_run_length",
+            columns="max_vol_pct",
+            values="acceptable_pct",
+            aggfunc="mean",
+        )
+    else:
+        raise SystemExit("No sweep dimension found (max_flip_rate or max_vol_pct).")
+    return table.sort_index().sort_index(axis=1)
 
 
 def plot_heatmap(table: pd.DataFrame, title: str, save: str = None):
