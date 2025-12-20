@@ -52,6 +52,7 @@
   - Implement BarExecution (existing) vs LOBReplayExecution (hftbacktest) switch.
   - Prepare Binance BTC/ETH book+trade schema for hftbacktest; integrate adapter.
   - Keep AUD/USD on bar execution (no L2 available).
+  - Wire runner: strategy emits intents; route BTC/ETH to LOBReplayExecution, others to BarExecution. Define data schema (parquet/npz) for Binance book+trades.
 
 - **Triadic exits/controls (trader)**
   - Exposure decay on HOLD (fast exit when field re-pins).
