@@ -24,6 +24,8 @@ from execution.intent import Intent
 from strategy.triadic_strategy import TriadicStrategy
 import pandas as pd
 import pathlib
+import numpy as np
+from regime import RegimeSpec, check_regime
 
 
 def get_executor(symbol: str, mode: str = "auto", lob_symbols=None):
@@ -70,6 +72,12 @@ def run_bars(
     if log_file:
         log_file.parent.mkdir(parents=True, exist_ok=True)
         log_file.unlink(missing_ok=True)
+    # regime acceptance (PnL-free): rolling vol + run-length/flip-rate
+    price_arr = bars["close"].to_numpy()
+    rets = np.diff(price_arr, prepend=price_arr[0])
+    vols = pd.Series(rets).rolling(50).std().to_numpy()
+    spec = RegimeSpec()  # defaults; adjust if needed
+    acceptable = check_regime(bars["state"].to_numpy(), vols, spec)
     for _, row in bars.iterrows():
         ts = int(row["ts"])
         state = int(row["state"])
@@ -86,6 +94,7 @@ def run_bars(
                 "t": ts,  # dashboard-friendly
                 "ts": ts,
                 "symbol": symbol,
+                "acceptable": bool(acceptable[_]),
                 "state": state,
                 "intent_direction": intent.direction,
                 "intent_target": intent.target_exposure,

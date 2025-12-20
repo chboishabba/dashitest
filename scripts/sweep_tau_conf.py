@@ -1,34 +1,73 @@
 """
-Sweep tau_conf (HOLD gate) and report stability metrics.
-This keeps direction/execution fixed and varies only the confidence threshold.
-Metrics: trades, HOLD%, max drawdown, pnl.
+Sweep hysteresis width (tau_off) while holding tau_on fixed.
+Reports precision/recall of ACT vs acceptable; PnL is intentionally ignored.
 """
 
+import argparse
 import numpy as np
 import pandas as pd
 from pathlib import Path
 from runner import run_bars
 from run_trader import load_prices, compute_triadic_state
-from scripts.run_bars_btc import confidence_from_disagreement
+from scripts.run_bars_btc import confidence_from_persistence
 
 
-def max_drawdown(pnl_series):
-    s = pd.Series(pnl_series)
-    running_max = s.cummax()
-    dd = (s - running_max).min()
-    return float(dd)
+def compute_metrics(df: pd.DataFrame):
+    acceptable = df["acceptable"].astype(bool)
+    act = df["action"] != 0
+    acceptable_pct = float(acceptable.mean()) if len(df) else float("nan")
+    act_hits = (acceptable & act).sum()
+    act_count = act.sum()
+    acceptable_count = acceptable.sum()
+    precision = float(act_hits) / float(act_count) if act_count > 0 else float("nan")
+    recall = float(act_hits) / float(acceptable_count) if acceptable_count > 0 else float("nan")
+    hold_pct = float(df["hold"].mean()) if "hold" in df and len(df) else float("nan")
+    return {
+        "acceptable_pct": acceptable_pct,
+        "precision": precision,
+        "recall": recall,
+        "act_bars": int(act_count),
+        "hold_pct": hold_pct,
+    }
 
 
-def run_once(tau_conf):
-    csv = Path("data/raw/stooq/btc_intraday.csv")
+def engagement_bins(df: pd.DataFrame, bins: int = 20):
+    """
+    Return per-bin engagement rates: list of (bin_center, engagement_rate).
+    Uses acceptable=True rows only; engagement=action!=0.
+    """
+    if df is None or df.empty or "actionability" not in df or "action" not in df or "acceptable" not in df:
+        return []
+    sub = df[df["acceptable"] == True]  # noqa: E712
+    if sub.empty:
+        return []
+    actionability = pd.to_numeric(sub["actionability"], errors="coerce")
+    act = (sub["action"] != 0).astype(int)
+    mask = np.isfinite(actionability)
+    actionability = actionability[mask]
+    act = act.loc[actionability.index]
+    if actionability.empty:
+        return []
+    bins = max(5, bins)
+    edges = np.linspace(0.0, 1.0, bins + 1)
+    labels = 0.5 * (edges[:-1] + edges[1:])
+    cat = pd.cut(actionability, edges, include_lowest=True, labels=labels)
+    grouped = act.groupby(cat).mean()
+    rows = []
+    for center, rate in grouped.items():
+        rows.append({"bin_center": float(center), "engagement": float(rate)})
+    return rows
+
+
+def run_once(csv: Path, tau_on: float, tau_off: float):
     price, _ = load_prices(csv)
     ts = np.arange(len(price))
     state = compute_triadic_state(price)
     bars = pd.DataFrame({"ts": ts, "close": price, "state": state})
     rets = np.diff(price, prepend=price[0])
     vol = pd.Series(rets).rolling(50).std().to_numpy()
-    conf_seq = confidence_from_disagreement(
-        state, window=50, ret_vol=vol, vol_thresh=np.nanpercentile(vol, 80)
+    conf_seq = confidence_from_persistence(
+        state, run_scale=30, ret_vol=vol, vol_thresh=np.nanpercentile(vol, 80)
     )
 
     def conf_fn(t, s):
@@ -41,22 +80,111 @@ def run_once(tau_conf):
         bars,
         symbol="BTCUSDT",
         mode="bar",
-        log_path=None,  # no need to write per sweep
+        log_path=None,  # PnL-free sweep
         confidence_fn=conf_fn,
-        tau_conf=tau_conf,
+        tau_conf_enter=tau_on,
+        tau_conf_exit=tau_off,
     )
-    trades = (df["fill"] != 0).sum()
-    hold = df["hold"].mean() if "hold" in df else 0.0
-    pnl = df["pnl"].iloc[-1] if not df.empty else 0.0
-    dd = max_drawdown(df["pnl"]) if not df.empty else 0.0
-    return {"tau_conf": tau_conf, "trades": trades, "hold": hold, "pnl": pnl, "max_dd": dd}
+    metrics = compute_metrics(df)
+    metrics.update({"tau_on": tau_on, "tau_off": tau_off})
+    return metrics
 
 
 def main():
-    taus = [0.0, 0.2, 0.4, 0.6, 0.8]
-    rows = [run_once(t) for t in taus]
+    ap = argparse.ArgumentParser()
+    ap.add_argument(
+        "--csv",
+        type=Path,
+        default=Path("data/raw/stooq/btc_intraday.csv"),
+        help="Price CSV (Stooq BTC intraday expected).",
+    )
+    ap.add_argument("--tau_on", type=float, default=0.5, help="Entry threshold (fixed).")
+    ap.add_argument(
+        "--tau_off",
+        type=float,
+        nargs="+",
+        default=[0.30, 0.35, 0.40, 0.45, 0.25, 0.20, 0.15],
+        help="Exit thresholds to sweep (must be <= tau_on).",
+    )
+    ap.add_argument(
+        "--precision_floor",
+        type=float,
+        default=0.8,
+        help="Stop sweep if precision falls below this (drop in legitimacy).",
+    )
+    ap.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="Optional CSV path for precision/recall curve.",
+    )
+    ap.add_argument(
+        "--out_bins",
+        type=Path,
+        default=None,
+        help="Optional CSV for engagement surface (long form: tau_off, bin_center, engagement).",
+    )
+    ap.add_argument("--bins", type=int, default=20, help="Bins for actionability engagement surface.")
+    args = ap.parse_args()
+
+    if args.tau_on < max(args.tau_off):
+        raise SystemExit("tau_on must be >= all tau_off values for hysteresis.")
+    if not args.csv.exists():
+        raise SystemExit(f"CSV not found: {args.csv} (run data_downloader.py)")
+
+    rows = []
+    bin_rows = []
+    for tau_off in args.tau_off:
+        metrics = run_once(args.csv, args.tau_on, tau_off)
+        rows.append(metrics)
+        print(
+            f"tau_off={tau_off:.2f}  acceptable={metrics['acceptable_pct']:.3f}  "
+            f"precision={metrics['precision']:.3f}  recall={metrics['recall']:.3f}  "
+            f"act_bars={metrics['act_bars']}  hold%={metrics['hold_pct']:.3f}"
+        )
+        if not np.isnan(metrics["precision"]) and metrics["precision"] < args.precision_floor:
+            print("Precision dropped below floor; stopping sweep.")
+            break
+        # compute per-bin engagement for this run if requested
+        if args.out_bins:
+            # rerun to get df (recompute; acceptable given tau_off already used)
+            price, _ = load_prices(args.csv)
+            ts = np.arange(len(price))
+            state = compute_triadic_state(price)
+            bars = pd.DataFrame({"ts": ts, "close": price, "state": state})
+            rets = np.diff(price, prepend=price[0])
+            vol = pd.Series(rets).rolling(50).std().to_numpy()
+            conf_seq = confidence_from_persistence(
+                state, run_scale=30, ret_vol=vol, vol_thresh=np.nanpercentile(vol, 80)
+            )
+
+            def conf_fn(t, s):
+                idx = int(t)
+                if idx < 0 or idx >= len(conf_seq):
+                    return 1.0
+                return conf_seq[idx]
+
+            df_bins = run_bars(
+                bars,
+                symbol="BTCUSDT",
+                mode="bar",
+                log_path=None,
+                confidence_fn=conf_fn,
+                tau_conf_enter=args.tau_on,
+                tau_conf_exit=tau_off,
+            )
+            for row in engagement_bins(df_bins, bins=args.bins):
+                row["tau_off"] = tau_off
+                bin_rows.append(row)
     df = pd.DataFrame(rows)
-    print(df)
+    if args.out:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(args.out, index=False)
+        print(f"Wrote sweep metrics to {args.out}")
+    if args.out_bins and bin_rows:
+        args.out_bins.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(bin_rows).to_csv(args.out_bins, index=False)
+        print(f"Wrote engagement surface to {args.out_bins}")
 
 
 if __name__ == "__main__":
