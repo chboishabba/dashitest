@@ -1,15 +1,22 @@
+import argparse
 import time
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 
-# --- Import your CA + training bits ---
-# Assumes this file lives next to levin_ca_train.py
+# --- CA imports ---
 from levin_ca_train import (
     step_grid,
-    make_dataset,
+    make_dataset as make_dataset_levin,
     features_from_grid,
-    train_logreg,
+    train_logreg as train_logreg_levin,
+)
+from motif_ca import (
+    step_motif_ca,
+    features_from_state,
+    train_logreg as train_logreg_motif,
+    make_dataset as make_dataset_motif,
+    MotifParams,
 )
 
 # ---------- Learned rule inference ----------
@@ -25,16 +32,36 @@ def step_grid_learned(grid: np.ndarray, W: np.ndarray) -> np.ndarray:
     return pred.reshape(H, Wd)
 
 
+def step_motif_learned(G: np.ndarray, F: np.ndarray, A: np.ndarray, W: np.ndarray, params: MotifParams):
+    """
+    Apply the learned logistic regression rule to the motif CA.
+    Learner predicts next G; fatigue F is updated deterministically using predicted G.
+    """
+    H, Wd = G.shape
+    feats = features_from_state(G, F, A)  # (H*W, 8)
+    logits = feats @ W                    # (H*W, 3)
+    pred = logits.argmax(axis=1).astype(np.int8).reshape(H, Wd)
+    # fatigue update mirrors true rule's growth/decay
+    F_next = F + (pred == 1) * params.fatigue_inc - (pred != 1) * params.fatigue_dec
+    F_next = np.clip(F_next, 0, params.fatigue_max)
+    return pred, F_next
+
+
 # ---------- Visualiser ----------
 class CAVisualizer:
-    def __init__(self, H=128, W=128, seed=0, train_samples=200, show_learned=True):
+    def __init__(self, H=128, W=128, seed=0, train_samples=200, show_learned=True, mode="levin"):
         self.rng = np.random.default_rng(seed)
         self.H, self.W = H, W
+        self.mode = mode
+        self.params = MotifParams() if mode == "motif" else None
 
         # state
         self.grid = self.rng.integers(0, 3, size=(H, W), dtype=np.int8)
         self.grid_true = self.grid.copy()
         self.grid_learned = self.grid.copy()
+        self.fat_true = self.rng.integers(0, 4, size=(H, W), dtype=np.int8) if mode == "motif" else None
+        self.fat_learned = self.fat_true.copy() if mode == "motif" else None
+        self.anchor = (self.rng.random((H, W)) < (self.params.anchor_prob if self.params else 0.2)).astype(np.int8) if mode == "motif" else None
 
         # animation controls
         self.paused = False
@@ -56,16 +83,18 @@ class CAVisualizer:
         self.fig.canvas.mpl_connect("key_press_event", self.on_key)
 
     def _train_rule(self, train_samples=200):
-        # Make small dataset (same as your script, just inline)
-        X, Y = make_dataset(num_samples=train_samples, H=32, W=32, seed=0)
-        X_feats = np.concatenate([features_from_grid(x) for x in X], axis=0)
-        Y_flat = np.concatenate([y.ravel() for y in Y], axis=0)
-
         t0 = time.perf_counter()
-        W = train_logreg(X_feats, Y_flat, lr=5e-3, iters=300)
+        if self.mode == "motif":
+            X, Y, _, _ = make_dataset_motif(num_samples=train_samples, H=32, W=32, seed=0, params=self.params)
+            W_lr = train_logreg_motif(X, Y, lr=5e-3, iters=400)
+        else:
+            X, Y = make_dataset_levin(num_samples=train_samples, H=32, W=32, seed=0)
+            X_feats = np.concatenate([features_from_grid(x) for x in X], axis=0)
+            Y_flat = np.concatenate([y.ravel() for y in Y], axis=0)
+            W_lr = train_logreg_levin(X_feats, Y_flat, lr=5e-3, iters=300)
         t1 = time.perf_counter()
-        print(f"[learn] trained log-reg in {(t1 - t0) * 1e3:.1f} ms on {train_samples} samples")
-        return W
+        print(f"[learn] trained log-reg in {(t1 - t0) * 1e3:.1f} ms on {train_samples} samples (mode={self.mode})")
+        return W_lr
 
     def _setup_axes(self):
         self.fig.clf()
@@ -96,14 +125,28 @@ class CAVisualizer:
         self.fig.tight_layout(rect=(0, 0.03, 1, 1))
 
     def _randomize(self):
-        self.grid = self.rng.integers(0, 3, size=(self.H, self.W), dtype=np.int8)
+        if self.mode == "motif" and self.params:
+            self.grid = self.rng.choice(3, size=(self.H, self.W), p=self.params.state_probs).astype(np.int8)
+        else:
+            self.grid = self.rng.integers(0, 3, size=(self.H, self.W), dtype=np.int8)
         self.grid_true = self.grid.copy()
         self.grid_learned = self.grid.copy()
+        if self.mode == "motif":
+            self.fat_true = self.rng.integers(0, self.params.fatigue_max + 1, size=(self.H, self.W), dtype=np.int8)
+            self.fat_learned = self.fat_true.copy()
+            self.anchor = (self.rng.random((self.H, self.W)) < self.params.anchor_prob).astype(np.int8)
 
     def _step(self):
-        self.grid_true = step_grid(self.grid_true)
-        if self.show_learned and self.W_lr is not None:
-            self.grid_learned = step_grid_learned(self.grid_learned, self.W_lr)
+        if self.mode == "motif":
+            self.grid_true, self.fat_true = step_motif_ca(self.grid_true, self.fat_true, self.anchor, self.params)
+            if self.show_learned and self.W_lr is not None:
+                self.grid_learned, self.fat_learned = step_motif_learned(
+                    self.grid_learned, self.fat_learned, self.anchor, self.W_lr, self.params
+                )
+        else:
+            self.grid_true = step_grid(self.grid_true)
+            if self.show_learned and self.W_lr is not None:
+                self.grid_learned = step_grid_learned(self.grid_learned, self.W_lr)
 
     def _status_line(self):
         # show basic state distribution + speed + mode
@@ -115,9 +158,9 @@ class CAVisualizer:
             return (c0 / tot, c1 / tot, c2 / tot)
 
         p0, p1, p2 = dist(self.grid_true)
-        mode = "compare" if (self.show_learned and self.compare) else "single"
+        mode_vis = "compare" if (self.show_learned and self.compare) else "single"
         run = "paused" if self.paused else "running"
-        return f"{run} | mode={mode} | delay={self.delay*1000:.0f}ms | true dist: 0={p0:.2f} 1={p1:.2f} 2={p2:.2f}"
+        return f"{run} | vis_mode={mode_vis} | ca={self.mode} | delay={self.delay*1000:.0f}ms | true dist: 0={p0:.2f} 1={p1:.2f} 2={p2:.2f}"
 
     def on_key(self, event):
         if event.key == " ":
@@ -161,12 +204,20 @@ class CAVisualizer:
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--mode", choices=["levin", "motif"], default="motif", help="CA rule to visualize")
+    ap.add_argument("--size", type=int, default=160, help="Grid side length (square)")
+    ap.add_argument("--train_samples", type=int, default=200, help="Training samples for learned rule")
+    ap.add_argument("--no_learned", action="store_true", help="Hide learned CA overlay")
+    args = ap.parse_args()
+
     vis = CAVisualizer(
-        H=160,
-        W=160,
+        H=args.size,
+        W=args.size,
         seed=0,
-        train_samples=200,
-        show_learned=True,  # set False if you only want the true CA
+        train_samples=args.train_samples,
+        show_learned=not args.no_learned,
+        mode=args.mode,
     )
     vis.run()
 

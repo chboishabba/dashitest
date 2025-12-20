@@ -27,6 +27,18 @@
 - **GF(3) popcount path**
   - Swap in hardware popcnt via CFFI/Numba intrinsic for `gf3_check_bench.py`; re-measure.
 
+- **Triadic hysteresis precision–recall sweep (Option 1)**
+  - Freeze legitimacy: keep `RegimeSpec` at stability-only (`min_run_length=3`; no vol/flip-rate gates).
+  - Fix `tau_on=0.5`; sweep `tau_off ∈ {0.30, 0.35, 0.40, 0.45}` to narrow hysteresis only.
+  - Log per-sweep metrics: `acceptable%`, `P(acceptable|ACT)` (precision), `P(ACT|acceptable)` (recall), trades/HOLD%.
+  - Stop sweep if precision drops sharply; keep PnL completely out of the loop.
+  - Add a tiny PR table/sparkline to the dashboard fed by the sweep output (tau_off → precision/recall).
+
+- **Motif CA diagnostics**
+  - Wire motif CA (M4/M7/M9) into visualiser (true vs learned) to see corridors/rims/absorbing basins; optionally toggle levin mode.
+  - Add CA hysteresis/confidence sweep (softmax margin → tau_on/tau_off, k_on/k_off) mirroring trading PR knee; report precision/recall vs acceptable.
+  - Document mapping: ACT/HOLD/RED ↔ regime gate; corridor/tolerance/absorption motifs ↔ trading behaviors.
+
 - **Trading demo (ternary)**
   - Choose horizon/target (e.g., 1h next-bar {-1,0,+1} with vol-scaled dead-zone).
   - Build ternary/p-adic encoding, baseline binary model, ternary model, walk-forward backtest with costs; compare accuracy and trading metrics.
