@@ -9,6 +9,20 @@
 - `execution/`: Execution backends (`bar_exec` in use; `hft_exec` stub for future LOB replay).
 - `strategy/`: Strategy logic (`triadic_strategy.py`) driving intents from states/confidence.
 
+## Trading stack: what is implemented today
+- **Triadic control loop (implemented):** `run_trader.py` computes a triadic latent state (`compute_triadic_state`) and drives exposure in {-1,0,+1}. It uses: HOLD decay, velocity-based exits, persistence ramp, risk targeting (`SIGMA_TARGET`, `DEFAULT_RISK_FRAC`), impact (`IMPACT_COEFF`), and fees (`cost`). This is the same simulator used by `run_all.py`.
+- **Epistemic gating & posture separation (implemented):** Strategy vs execution is split (`strategy/triadic_strategy.py` + `execution/bar_exec.py`). Prediction (state) is distinct from permission/posture; logs include `action`, `hold`, `acceptable`, `actionability` for downstream analysis.
+- **27-state kernel / persistence logic (implemented):** The triadic state and hysteresis live in the strategy; HOLD is epistemic, not flatten. Persistence and velocity checks are in `run_trader.py` and honored across markets.
+- **Market discovery & replay (implemented):** `run_all.py` discovers all `data/raw/stooq/*.csv`, runs the same bar-level sim per market, writes per-market logs (`logs/trading_log_<market>.csv`), and prints a scoreboard. `--live` streams the dashboard while each market runs.
+- **Projection quality (observed):** High-resolution BTC (1s) and daily BTC are profitable; coarse intraday bars (`btc_intraday`) are lossy and can hide forced flows. Use richer projections when possible (e.g., `btc_intraday_1s.csv`, `btc_yf.csv`).
+- **Data sources (implemented):** `data_downloader.py` pulls BTC from Binance (1m extended window, 1s resampled trades), Yahoo (daily/intraday), CoinGecko, and Stooq. `run_trader.find_btc_csv` prefers 1s, then 1m, then daily.
+
+## Future work: CA “kernel of kernels” (not implemented yet)
+- Concept: each asset is a cell hosting a triadic epistemic kernel (permission, state, fatigue) and exchanging triadic messages with neighbors. Neighborhood can be sector-based or learned (e.g., kNN on correlation embeddings).
+- State proposal: visible sign `s∈{-1,0,+1}` plus phase/chirality `φ∈{-1,0,+1}` to allow glider-like motion; gate `g∈{-1,0,+1}` (ban/hold/act).
+- Update sketch: gate first (M₄ corridor, M₇ fatigue, M₉ shutdown pressures), then state update with a phase-gradient term to create motion. Market data (returns/vol/spread binned to triads) enters as anchors or boundary forcing.
+- Status: design only—no code yet. If we build it, we’ll pick a concrete lattice (e.g., kNN on correlation) and add a prototype CA runner alongside the existing bar simulator.
+
 ## How `run_all.py` behaved before the latest changes
 - Single-threaded batch runner: iterated cached market CSVs under `data/raw/stooq`, executed the same bar-level simulator as `run_trader.py` (includes fees via `cost`, slippage via `IMPACT_COEFF`, HOLD decay, risk targeting), wrote a single `logs/trading_log.csv`, printed per-run summary, then a simple scoreboard.
 - No live dashboard streaming; to visualize you had to run `training_dashboard.py` separately pointing at the log.
