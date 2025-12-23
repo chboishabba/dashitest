@@ -122,10 +122,14 @@ class Dashboard(QtWidgets.QMainWindow):
 
         self.price_curve.setData(x, price)
         if bad_flag is not None:
-            # For stepMode=True, x must be len(y)+1; pad last point.
-            x_bad = np.append(np.array(x), x.iloc[-1] if hasattr(x, "iloc") else x[-1] + 1)
-            y_bad = np.append(np.array(bad_flag), bad_flag.iloc[-1] if hasattr(bad_flag, "iloc") else bad_flag[-1])
-            self.bad_fill.setData(x_bad, y_bad)
+            x_arr = np.array(x)
+            y_arr = np.array(bad_flag)
+            # If timestamps are non-numeric, fall back to index positions.
+            if not np.issubdtype(x_arr.dtype, np.number):
+                x_arr = np.arange(len(y_arr))
+            # For stepMode=True, len(x) = len(y) + 1
+            x_bad = np.append(x_arr, x_arr[-1] + 1)
+            self.bad_fill.setData(x_bad, y_arr)
         if action is not None:
             buys = action == 1
             sells = action == -1
