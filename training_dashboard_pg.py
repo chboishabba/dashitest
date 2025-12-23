@@ -89,7 +89,8 @@ class Dashboard(QtWidgets.QMainWindow):
         # PnL pane
         self.p_pnl = self.win.addPlot(row=1, col=0, title="PnL + HOLD%")
         self.pnl_curve = self.p_pnl.plot(pen=pg.mkPen("y", width=1))
-        self.hold_curve = self.p_pnl.plot(pen=pg.mkPen("c", width=1, style=QtCore.Qt.DashLine))
+        dash_style = getattr(QtCore.Qt, "DashLine", QtCore.Qt.PenStyle.DashLine)
+        self.hold_curve = self.p_pnl.plot(pen=pg.mkPen("c", width=1, style=dash_style))
 
         # p_bad pane
         self.p_bad_plot = self.win.addPlot(row=2, col=0, title="p_bad + bad_flag")
