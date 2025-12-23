@@ -8,6 +8,7 @@
 - `scripts/sweep_tau_conf.py`: Sweep hysteresis thresholds (tau_on/off), produce PR curves for the dashboard sparkline.
 - `execution/`: Execution backends (`bar_exec` in use; `hft_exec` stub for future LOB replay).
 - `strategy/`: Strategy logic (`triadic_strategy.py`) driving intents from states/confidence.
+- `scripts/ca_epistemic_tape.py`: Trading-driven CA visualization (epistemic tape) that injects triadic market features into a 2D CA and plots snapshots, motif triggers, and multiscale change rates. Research/diagnostic only (does not drive trading).
 
 ## Trading stack: what is implemented today
 - **Triadic control loop (implemented):** `run_trader.py` computes a triadic latent state (`compute_triadic_state`) and drives exposure in {-1,0,+1}. It uses: HOLD decay, velocity-based exits, persistence ramp, risk targeting (`SIGMA_TARGET`, `DEFAULT_RISK_FRAC`), impact (`IMPACT_COEFF`), and fees (`cost`). This is the same simulator used by `run_all.py`.
