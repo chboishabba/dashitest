@@ -48,6 +48,7 @@ def compute_pnl_metrics(df: pd.DataFrame):
             "impact": float("nan"),
             "mean_ret": float("nan"),
             "std_ret": float("nan"),
+            "edge_per_turnover": float("nan"),
         }
     equity = df["pnl"] + 1.0
     ret = equity.pct_change().fillna(0.0)
@@ -72,6 +73,9 @@ def compute_pnl_metrics(df: pd.DataFrame):
         "impact": impact,
         "mean_ret": mean_ret,
         "std_ret": std_ret,
+        "edge_per_turnover": float("nan")
+        if turnover is None or not np.isfinite(turnover) or turnover == 0
+        else pnl_net / turnover,
     }
 
 
@@ -202,7 +206,8 @@ def main():
             f"precision={metrics['precision']:.3f}  recall={metrics['recall']:.3f}  "
             f"act_bars={metrics['act_bars']}  hold%={metrics['hold_pct']:.3f}  "
             f"pnl={metrics['pnl_net']:.4f}  max_dd={metrics['max_dd']:.4f}  trades={metrics['trades']}  "
-            f"turnover={metrics['turnover']:.4f}  fees={metrics['fees']:.6f}"
+            f"turnover={metrics['turnover']:.4f}  fees={metrics['fees']:.6f}  "
+            f"edge/turn={metrics['edge_per_turnover']:.6f}"
         )
         if not np.isnan(metrics["precision"]) and metrics["precision"] < args.precision_floor:
             print("Precision dropped below floor; stopping sweep.")

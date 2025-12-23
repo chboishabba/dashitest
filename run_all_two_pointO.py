@@ -104,7 +104,7 @@ def run_tau_sweep(csv_path, tau_on, tau_off_list, precision_floor=0.8, live=Fals
             ax_pnl.scatter(df_live["max_dd"], df_live["pnl_net"], c="tab:green")
             for _, r in df_live.iterrows():
                 ax_pnl.annotate(
-                    f"tau={r['tau_off']:.2f}\nturn={r['turnover']:.2f}",
+                    f"tau={r['tau_off']:.2f}\nturn={r['turnover']:.2f}\nedge/turn={r['edge_per_turnover']:.4f}",
                     (r["max_dd"], r["pnl_net"]),
                     fontsize=7,
                 )
