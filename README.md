@@ -2,6 +2,7 @@
 - `data_downloader.py`: Fetch BTC data (daily/intraday/1s) from Binance/Yahoo/CoinGecko/Stooq; saves under `data/raw/stooq`.
 - `run_trader.py`: Core bar-level trading loop with simple impact/fee model; writes `logs/trading_log.csv` and `data/run_history.csv`.
 - `run_all.py`: Runs the trading loop across all cached markets (or synthetic), prints a scoreboard; `--live` streams the dashboard while running.
+- `run_all_two_pointO.py`: Orchestrator that can (a) run all markets with progress prints, (b) sweep tau_off with live PR/PnL Pareto plots, and (c) preview the CA tape on the same CSV.
 - `training_dashboard.py`: Live viewer for logs (PnL, price/actions, latent/HOLD%, optional PR/engagement overlays).
 - `runner.py`: Strategy + execution wiring for batch bar runs (used by scripts).
 - `scripts/run_bars_btc.py`: Build BTC bars/state, run the bar executor, write a trading log.
@@ -31,6 +32,12 @@ To track outcomes alongside epistemic metrics (e.g., per tau_off sweep point):
 - **Trading intensity:** #trades; turnover (∑|Δpos| or notional traded); time in market; ACT bars vs fills.
 - **Robustness:** win rate; profit factor (gross wins/gross losses); avg win/avg loss; exposure-weighted return; “edge after costs” = E[Δequity]/∑|Δpos|.
 - **Sweep reporting (per tau_off):** keep epistemic axes (acceptable%, precision, recall, act_bars, hold%) and add mean return, max DD, turnover/trades, fees+impact, net PnL. Useful plots: (1) Precision–Recall annotated with net PnL/max DD; (2) Net PnL vs Max DD (Pareto), colored by tau_off, sized by turnover.
+
+## Structural stress / bad-day flag (implemented)
+- `run_trader.py` now computes a crude structural stress score (vol z-score vs median/MAD, jump z, triadic flip rate) and logs `p_bad` ∈ [0,1] plus `bad_flag` (p_bad>0.7) per bar. Progress prints include these.
+- `scripts/sweep_tau_conf.py` conditions forward returns on engagement and bad_flag: `ret_engaged`, `ret_flat`, `ret_bad`, `ret_good`, plus `edge_per_turnover`. Use `--live-plot` to see PR and PnL-vs-DD live with annotations.
+- Orchestrator usage example: `PYTHONPATH=. python run_all_two_pointO.py --markets --market-progress-every 500 --csv data/raw/stooq/btc_intraday_1s.csv --live-sweep --run-ca --ca-report-every 1000`.
+- Intent: separate “world is a bad game” detection from directional signals; this is an audit/pre-gate signal, not a change in acceptance logic.
 ## Trading stack: what is implemented today
 - **Triadic control loop (implemented):** `run_trader.py` computes a triadic latent state (`compute_triadic_state`) and drives exposure in {-1,0,+1}. It uses: HOLD decay, velocity-based exits, persistence ramp, risk targeting (`SIGMA_TARGET`, `DEFAULT_RISK_FRAC`), impact (`IMPACT_COEFF`), and fees (`cost`). This is the same simulator used by `run_all.py`.
 - **Epistemic gating & posture separation (implemented):** Strategy vs execution is split (`strategy/triadic_strategy.py` + `execution/bar_exec.py`). Prediction (state) is distinct from permission/posture; logs include `action`, `hold`, `acceptable`, `actionability` for downstream analysis.
