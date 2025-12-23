@@ -11,6 +11,7 @@ import threading
 import time
 
 import numpy as np
+import pandas as pd
 
 import run_trader  # provides the trading loop
 import training_dashboard as dash  # for live plotting

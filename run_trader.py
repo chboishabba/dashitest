@@ -142,7 +142,7 @@ def find_stooq_csv():
     raise FileNotFoundError("No valid Stooq CSV with Close/Zamkniecie column; re-run data_downloader.py with .us symbols.")
 
 
-def load_prices(path: pathlib.Path):
+def load_prices(path: pathlib.Path, return_time: bool = False):
     def read_basic(p):
         return pd.read_csv(p)
 
@@ -191,19 +191,22 @@ def load_prices(path: pathlib.Path):
             close_series = close_series.dropna()
             vol_series = vol_series.loc[close_series.index]
 
-        return close_series.to_numpy(), vol_series.to_numpy()
+        time_index = dates.to_numpy() if date_key is not None else None
+        return close_series.to_numpy(), vol_series.to_numpy(), time_index
 
     # try basic read, then fallback to skiprows if too many non-numeric
     for reader in (read_basic, read_skip):
         try:
             df = reader(path)
-            close, vol = parse_df(df)
+            close, vol, ts = parse_df(df)
             # replace nonpositive/NaN volume
             pos_vol = vol[np.isfinite(vol) & (vol > 0)]
             fallback_vol = np.median(pos_vol) if pos_vol.size else 1e6
             vol = np.where((~np.isfinite(vol)) | (vol <= 0), fallback_vol, vol)
             # require reasonable length
             if len(close) >= 10 and np.isfinite(close).any():
+                if return_time:
+                    return close, vol, ts
                 return close, vol
         except Exception:
             continue
@@ -214,6 +217,7 @@ def run_trading_loop(
     price: np.ndarray,
     volume: np.ndarray,
     source: str,
+    time_index: np.ndarray | None = None,
     max_steps=None,
     sleep_s=0.0,
     risk_frac: float = DEFAULT_RISK_FRAC,
@@ -227,6 +231,10 @@ def run_trading_loop(
     """
     price = np.asarray(price, dtype=float)
     volume = np.asarray(volume, dtype=float)
+    if time_index is not None:
+        time_index = np.asarray(time_index)
+        if len(time_index) != len(price):
+            raise ValueError("time_index length must match price length")
     log_path = pathlib.Path(log_path) if log_path is not None else None
     if log_path:
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -268,6 +276,7 @@ def run_trading_loop(
             desired = 1
         else:
             desired = -1
+        banned = bool(t < len(bad_flag) and bad_flag[t])
         order = desired - pos
         base_cap = PARTICIPATION_CAP * volume[t]
         vel_term = 1.0 + 10.0 * max(abs(ret), z_vel)
@@ -295,8 +304,13 @@ def run_trading_loop(
         else:
             align_age = 0
 
-        # Triadic control: decay on HOLD, exit on high velocity, ramp size when aligned persists
-        if desired == 0:
+        # Triadic control: BAN is sovereign, then HOLD decay, then normal ramp
+        if banned:
+            # hard flatten; BAN overrides any directional intent
+            cap = max(cap, abs(pos))
+            fill = np.clip(-pos, -cap, cap)
+            desired = 0
+        elif desired == 0:
             # decay exposure toward zero
             cap = cap * (1.0 - HOLD_DECAY) + 1e-9  # keep a tiny ability to act
             fill = np.clip(-pos, -cap, cap)
@@ -318,10 +332,12 @@ def run_trading_loop(
         pnl = cash + pos * price[t] - cost * abs(fill)
         row = {
             "t": t,
+            "ts": time_index[t] if time_index is not None and t < len(time_index) else np.nan,
             "price": price[t],
             "pnl": pnl,
             "p_bad": p_bad[t] if t < len(p_bad) else np.nan,
             "bad_flag": int(bad_flag[t]) if t < len(bad_flag) else 0,
+            "ban": int(banned),
             "z_norm": abs(z),
             "z_vel": z_vel,
             "hold": int(desired == 0),
@@ -364,6 +380,17 @@ def run_trading_loop(
         max_drawdown = float(drawdown)
     print(f"Run complete: source={source}, steps={len(rows)}, trades={trades}, pnl={total_pnl:.4f}")
 
+    # Conditional returns to validate the bad-day classifier
+    ret_all = ret_good = ret_bad = float("nan")
+    if rows:
+        equity_series = pd.Series([r["pnl"] for r in rows])
+        eq_prev = equity_series.shift(1).fillna(START_CASH)
+        eq_ret = equity_series.diff() / eq_prev.replace(0, np.nan)
+        bad_mask = pd.Series([bool(r["bad_flag"]) for r in rows])
+        ret_all = float(eq_ret.mean(skipna=True))
+        ret_good = float(eq_ret[~bad_mask].mean(skipna=True))
+        ret_bad = float(eq_ret[bad_mask].mean(skipna=True))
+
     summary = {
         "timestamp": pd.Timestamp.utcnow(),
         "source": source,
@@ -374,6 +401,9 @@ def run_trading_loop(
         "max_drawdown": max_drawdown,
         "p_bad_mean": float(np.mean(p_bad[: len(rows)])) if len(rows) else float("nan"),
         "bad_rate": float(np.mean(bad_flag[: len(rows)])) if len(rows) else float("nan"),
+        "ret_all": ret_all,
+        "ret_good": ret_good,
+        "ret_bad": ret_bad,
     }
     pd.DataFrame([summary]).to_csv(
         RUN_HISTORY, mode="a", header=not RUN_HISTORY.exists(), index=False
@@ -392,12 +422,12 @@ def main(
     try:
         csv_path = find_btc_csv()
         if csv_path is not None:
-            price, volume = load_prices(csv_path)
+            price, volume, ts = load_prices(csv_path, return_time=True)
             source = "btc"
             print(f"Using BTC data: {csv_path}")
         else:
             csv_path = find_stooq_csv()
-            price, volume = load_prices(csv_path)
+            price, volume, ts = load_prices(csv_path, return_time=True)
             print(f"Using Stooq data: {csv_path}")
     except Exception as e:
         print(f"Falling back to synthetic prices: {e}")
@@ -406,11 +436,13 @@ def main(
         steps = rng.normal(loc=0.0, scale=0.01, size=1000)
         price = 100 + np.cumsum(steps)
         volume = np.ones_like(price) * 1e6
+        ts = None
 
     run_trading_loop(
         price=price,
         volume=volume,
         source=source,
+        time_index=ts,
         max_steps=max_steps,
         sleep_s=sleep_s,
         risk_frac=risk_frac,
