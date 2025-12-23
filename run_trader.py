@@ -190,6 +190,7 @@ def run_trading_loop(
     contract_mult: float = CONTRACT_MULT,
     sigma_target: float = SIGMA_TARGET,
     log_path: pathlib.Path = LOG,
+    progress_every: int = 0,
 ):
     """
     Core trading loop extracted so multiple markets can be evaluated.
@@ -305,6 +306,11 @@ def run_trading_loop(
         if log_path:
             pd.DataFrame([row]).to_csv(
                 log_path, mode="a", header=not log_path.exists(), index=False
+            )
+        if progress_every and (t % progress_every == 0 or t == total_steps):
+            print(
+                f"[{source}] t={t:6d}/{total_steps:6d} pnl={row['pnl']:.4f} pos={row['pos']:.4f} "
+                f"fill={row['fill']:.4f} act={int(row['action'])}"
             )
         z_prev = z
         prev_action = desired

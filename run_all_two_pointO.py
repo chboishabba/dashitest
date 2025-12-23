@@ -37,7 +37,7 @@ from scripts import ca_epistemic_tape
 
 # --- Trading summaries -----------------------------------------------------
 
-def run_market_summaries(max_steps=None):
+def run_market_summaries(max_steps=None, progress_every=0):
     markets = run_all.discover_markets()
     summaries = []
     for m in markets:
@@ -50,6 +50,7 @@ def run_market_summaries(max_steps=None):
             sleep_s=0.0,
             max_steps=max_steps,
             log_path=None,
+            progress_every=progress_every or (1000 if max_steps is None else max(1, max_steps // 10)),
         )
         summaries.append(summary)
     if summaries:
@@ -160,11 +161,17 @@ def main():
         default=0,
         help="If >0, print incremental CA stats every N steps.",
     )
+    ap.add_argument(
+        "--market-progress-every",
+        type=int,
+        default=0,
+        help="If >0, print trading loop progress every N steps per market.",
+    )
     ap.add_argument("--max-steps", type=int, default=None, help="Optional cap for market runs.")
     args = ap.parse_args()
 
     if args.markets:
-        run_market_summaries(max_steps=args.max_steps)
+        run_market_summaries(max_steps=args.max_steps, progress_every=args.market_progress_every)
 
     if args.csv:
         csv_path = pathlib.Path(args.csv)
