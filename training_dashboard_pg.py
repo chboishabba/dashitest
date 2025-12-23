@@ -122,7 +122,10 @@ class Dashboard(QtWidgets.QMainWindow):
 
         self.price_curve.setData(x, price)
         if bad_flag is not None:
-            self.bad_fill.setData(x, bad_flag)
+            # For stepMode=True, x must be len(y)+1; pad last point.
+            x_bad = np.append(np.array(x), x.iloc[-1] if hasattr(x, "iloc") else x[-1] + 1)
+            y_bad = np.append(np.array(bad_flag), bad_flag.iloc[-1] if hasattr(bad_flag, "iloc") else bad_flag[-1])
+            self.bad_fill.setData(x_bad, y_bad)
         if action is not None:
             buys = action == 1
             sells = action == -1
