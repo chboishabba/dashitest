@@ -175,23 +175,32 @@ class Dashboard(QtWidgets.QMainWindow):
             log = synthetic_log()
 
         # Progressive reveal by day (ts required)
-        if self.progressive_days and "ts" in log.columns and log["ts"].notna().any():
-            if self.day_keys is None or len(self.day_keys) != log["ts"].nunique():
-                ts_dt = pd.to_datetime(log["ts"])
-                self.day_keys = ts_dt.dt.normalize().unique()
-                self.day_keys.sort()
+        ts_dt = None
+        if "ts" in log.columns:
+            ts_dt = pd.to_datetime(log["ts"], errors="coerce")
+
+        if self.progressive_days and ts_dt is not None and ts_dt.notna().any():
+            ts_days = ts_dt.dt.normalize()
+            day_keys = ts_days.dropna().unique()
+            day_keys.sort()
+            if self.day_keys is None or len(self.day_keys) != len(day_keys) or not np.array_equal(
+                self.day_keys, day_keys
+            ):
+                self.day_keys = day_keys
             if self.day_keys is not None and len(self.day_keys) > 0:
                 # Clamp day index
                 self.day_idx = min(self.day_idx, len(self.day_keys) - 1)
-                cutoff = self.day_keys[self.day_idx]
-                ts_dt = pd.to_datetime(log["ts"])
-                mask = ts_dt.dt.normalize() <= cutoff
+                visible_days = set(self.day_keys[: self.day_idx + 1])
+                mask = ts_days.isin(visible_days)
                 log = log.loc[mask]
                 # Advance for next frame if possible
                 if self.refresh_s > 0 and self.day_idx < len(self.day_keys) - 1:
                     self.day_idx += 1
 
-        x = log["ts"] if "ts" in log.columns and log["ts"].notna().any() else log["t"]
+        if ts_dt is not None and ts_dt.notna().any():
+            x = ts_dt.loc[log.index]
+        else:
+            x = log["ts"] if "ts" in log.columns and log["ts"].notna().any() else log["t"]
         price = log["price"]
         pnl = log["pnl"] if "pnl" in log else None
         p_bad = log["p_bad"] if "p_bad" in log else None
