@@ -20,6 +20,7 @@ Flags:
   --max-steps N        Optional cap for market runs to speed up.
 """
 
+import requests
 import argparse
 import pathlib
 import sys
@@ -33,26 +34,32 @@ from scripts.run_bars_btc import confidence_from_persistence
 import run_all  # for discover_markets
 from scripts import sweep_tau_conf
 from scripts import ca_epistemic_tape
+from scripts.emit_news_windows import contiguous_windows
+from scripts.news_slice import gdelt_fetch
 
 
 # --- Trading summaries -----------------------------------------------------
 
-def run_market_summaries(max_steps=None, progress_every=0):
+def run_market_summaries(max_steps=None, progress_every=0, emit_news=False, news_kwargs=None):
     markets = run_all.discover_markets()
     summaries = []
     for m in markets:
         name = m["name"]
         print(f"\n=== Market: {name} ===")
+        log_path = pathlib.Path(f"logs/trading_log_{name}.csv")
         summary, _ = run_trading_loop(
             price=m["price"],
             volume=m["volume"],
             source=name,
+            time_index=m.get("time"),
             sleep_s=0.0,
             max_steps=max_steps,
-            log_path=None,
+            log_path=log_path,
             progress_every=progress_every or (1000 if max_steps is None else max(1, max_steps // 10)),
         )
         summaries.append(summary)
+        if emit_news:
+            emit_news_windows(log_path, **(news_kwargs or {}))
     if summaries:
         df = pd.DataFrame(summaries)
         print("\n=== Market summaries ===")
@@ -137,6 +144,178 @@ def run_ca_preview(csv_path, width=128, report_every=0):
     ca_epistemic_tape.plot_multiscale(hist)
 
 
+# --- News windows from bad flags ------------------------------------------
+
+def emit_news_windows(
+    log_path,
+    p_bad_hi=0.7,
+    max_gap_min=15.0,
+    pad_min=60.0,
+    query="",
+    maxrows=250,
+    max_days=5,
+    max_failures=3,
+    max_windows=20,
+):
+    """
+    Detect contiguous bad windows in the trading log and fetch GDELT events (no API key).
+    Prints a short summary to stdout and writes CSVs under logs/news_events/.
+    To avoid spamming GDELT, windows are grouped by UTC day; one fetch per day (capped by max_days).
+    """
+    GDELT_MIN = pd.Timestamp("2015-06-01", tz="UTC")
+    log_path = pathlib.Path(log_path)
+    if not log_path.exists():
+        print(f"[news] log not found: {log_path}")
+        return
+    df = pd.read_csv(log_path)
+    if "ts" not in df.columns:
+        print(f"[news] missing ts column in {log_path}; rerun trader with timestamp support.")
+        return
+    df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
+    if df["ts"].notna().any():
+        ts_min = df["ts"].min()
+        ts_max = df["ts"].max()
+        if ts_max < GDELT_MIN:
+            print(f"[news] {log_path.stem}: all data end before GDELT coverage ({GDELT_MIN.date()}); skipping news fetch.")
+            return
+    mask = (df["bad_flag"] == 1) & (df["p_bad"] >= p_bad_hi)
+    triggers = df.loc[mask, "ts"].dropna()
+    if triggers.empty:
+        print(f"[news] no bad windows found in {log_path.name}")
+        return
+    windows = contiguous_windows(triggers, pd.Timedelta(minutes=max_gap_min))
+    pad = pd.Timedelta(minutes=pad_min)
+    out_dir = pathlib.Path("logs/news_events")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    # prefilter windows within coverage and cap total windows by trigger count
+    filtered = []
+    skipped_pre = 0
+    for idx, (start, end) in enumerate(windows):
+        w_start, w_end = start - pad, end + pad
+        if w_end < GDELT_MIN:
+            skipped_pre += 1
+            continue
+        w_start = max(w_start, GDELT_MIN)
+        trig_count = ((triggers >= start) & (triggers <= end)).sum()
+        window_mask = (df["ts"] >= start) & (df["ts"] <= end)
+        p_bad_sum = float(df.loc[window_mask, "p_bad"].sum(skipna=True))
+        filtered.append((idx, w_start, w_end, start, end, trig_count, p_bad_sum))
+
+    now = pd.Timestamp.utcnow()
+
+    if not filtered:
+        msg = f"[news] no windows within GDELT coverage for {log_path.stem}"
+        if skipped_pre:
+            msg += f" (skipped {skipped_pre} pre-coverage windows)"
+        print(msg)
+        return
+
+    # prioritize highest trigger count if too many windows
+    filtered.sort(key=lambda x: (x[6], x[5]), reverse=True)
+    if len(filtered) > max_windows:
+        print(f"[news] capping windows for {log_path.stem}: {len(filtered)} -> {max_windows} (by triggers desc)")
+        filtered = filtered[:max_windows]
+    # regroup by day for batched fetch; score days by total triggers
+    day_windows = {}
+    for idx, w_start, w_end, start, end, trig_count, sev in filtered:
+        day = w_start.date()
+        day_windows.setdefault(day, []).append((idx, w_start, w_end, start, end, trig_count, sev))
+    day_scores = {d: sum(t for *_, t, sev in lst) for d, lst in day_windows.items()}
+
+    if not day_windows:
+        msg = f"[news] no windows within GDELT coverage for {log_path.stem}"
+        if skipped_pre:
+            msg += f" (skipped {skipped_pre} pre-coverage windows)"
+        print(msg)
+        return
+
+    days_sorted = sorted(day_windows.keys(), key=lambda d: day_scores[d], reverse=True)
+    if len(days_sorted) > max_days:
+        skipped = len(days_sorted) - max_days
+        print(f"[news] too many days ({len(days_sorted)}) for {log_path.stem}; fetching first {max_days}, skipping {skipped}.")
+        days_sorted = days_sorted[:max_days]
+
+    summary_rows = []
+    failures = 0
+    for day in days_sorted:
+        day_str = day.isoformat()
+        day_start = pd.Timestamp(f"{day_str}T00:00:00Z")
+        day_end = day_start + pd.Timedelta(days=1)
+        if day_start >= now:
+            print(f"[news] {log_path.stem} date={day_str} is in the future relative to now={now.date()}; skipping.")
+            continue
+        if day_end > now:
+            print(f"[news] {log_path.stem} date={day_str} clamped end from {day_end.date()} to {now.date()} (no future fetch).")
+            day_end = now
+        try:
+            events_day = gdelt_fetch(day_start, day_end, query or None, maxrows)
+            fetch_note = f"events={len(events_day)}"
+        except requests.HTTPError as e:
+            status = getattr(e.response, "status_code", None)
+            if status == 404:
+                print(f"[news] {log_path.stem} date={day_str} returned 404; treating as no events.")
+                events_day = pd.DataFrame()
+                fetch_note = "events=0 (404)"
+            else:
+                print(f"[news] fetch failed for {day_str} ({log_path.stem}): {e}")
+                failures += 1
+                if failures >= max_failures:
+                    print(f"[news] aborting further fetches for {log_path.stem} after {failures} failures.")
+                    break
+                events_day = pd.DataFrame()
+                fetch_note = "events=0 (fetch failed)"
+        except Exception as e:
+            print(f"[news] fetch failed for {day_str} ({log_path.stem}): {e}")
+            failures += 1
+            if failures >= max_failures:
+                print(f"[news] aborting further fetches for {log_path.stem} after {failures} failures.")
+                break
+            events_day = pd.DataFrame()
+            fetch_note = "events=0 (fetch failed)"
+
+        print(f"[news] {log_path.stem} date={day_str} {fetch_note}")
+        for idx, w_start, w_end, raw_start, raw_end, trig_count, sev in day_windows[day]:
+            events_win = events_day[(events_day["ts"] >= w_start) & (events_day["ts"] <= w_end)] if not events_day.empty else pd.DataFrame()
+            fname = out_dir / f"{log_path.stem}_events_{idx:03d}_{w_start.strftime('%Y%m%dT%H%M%S')}_{w_end.strftime('%Y%m%dT%H%M%S')}.csv"
+            events_win.to_csv(fname, index=False)
+            top_codes = ""
+            if "EventRootCode" in events_win.columns:
+                vc = events_win["EventRootCode"].value_counts().head(3)
+                top_codes = ";".join(f"{k}:{v}" for k, v in vc.items())
+            # print a tiny preview of up to 2 events for context
+            preview_rows = []
+            preview_cols = [c for c in ["ts", "EventRootCode", "Goldstein", "AvgTone", "Actor1Name", "Actor2Name", "Actor1CountryCode", "Actor2CountryCode"] if c in events_win.columns]
+            if not events_win.empty and preview_cols:
+                for _, r in events_win.head(2).iterrows():
+                    vals = [str(r.get(c, "")) for c in preview_cols]
+                    preview_rows.append("|".join(vals))
+            preview_str = "; ".join(preview_rows)
+            print(
+                f"[news] {log_path.stem} window {idx:03d} {w_start} → {w_end} | "
+                f"triggers={trig_count} sev_sum_p_bad={sev:.3f} | "
+                f"events={len(events_win)} | top_codes={top_codes} | file={fname.name}"
+                + (f" | preview={preview_str}" if preview_str else "")
+            )
+            summary_rows.append(
+                {
+                    "market": log_path.stem,
+                    "window_id": idx,
+                    "start": w_start,
+                    "end": w_end,
+                    "date": day_str,
+                    "triggers": trig_count,
+                    "severity_sum_p_bad": sev,
+                    "events": len(events_win),
+                    "top_codes": top_codes,
+                    "file": fname.name,
+                }
+            )
+
+    summary_path = out_dir / f"{log_path.stem}_events_summary.csv"
+    pd.DataFrame(summary_rows).to_csv(summary_path, index=False)
+    print(f"[news] wrote summary to {summary_path}")
+
+
 # --- Main ------------------------------------------------------------------
 
 def main():
@@ -168,10 +347,37 @@ def main():
         help="If >0, print trading loop progress every N steps per market.",
     )
     ap.add_argument("--max-steps", type=int, default=None, help="Optional cap for market runs.")
+    ap.add_argument(
+        "--emit-news-windows",
+        action="store_true",
+        help="After each market run, detect bad windows and fetch GDELT events (no API key).",
+    )
+    ap.add_argument("--p-bad-hi", type=float, default=0.7, help="p_bad threshold for news windows.")
+    ap.add_argument("--news-max-gap-min", type=float, default=15.0, help="Gap to merge bad triggers into a window.")
+    ap.add_argument("--news-pad-min", type=float, default=60.0, help="Pad around each window for news fetch.")
+    ap.add_argument("--news-query", type=str, default="", help="Optional keyword filter for news fetch (GDELT query).")
+    ap.add_argument("--news-maxrows", type=int, default=250, help="Max rows for news fetch (GDELT).")
+    ap.add_argument("--news-max-days", type=int, default=5, help="Max distinct days to fetch per market to avoid spamming.")
+    ap.add_argument("--news-max-failures", type=int, default=3, help="Abort news fetches after this many failures per market.")
+    ap.add_argument("--news-max-windows", type=int, default=20, help="Max bad windows per market to fetch news for (highest trigger count first).")
     args = ap.parse_args()
 
     if args.markets:
-        run_market_summaries(max_steps=args.max_steps, progress_every=args.market_progress_every)
+        run_market_summaries(
+            max_steps=args.max_steps,
+            progress_every=args.market_progress_every,
+            emit_news=args.emit_news_windows,
+            news_kwargs={
+                "p_bad_hi": args.p_bad_hi,
+                "max_gap_min": args.news_max_gap_min,
+                "pad_min": args.news_pad_min,
+                "query": args.news_query,
+                "maxrows": args.news_maxrows,
+                "max_days": args.news_max_days,
+                "max_failures": args.news_max_failures,
+                "max_windows": args.news_max_windows,
+            },
+        )
 
     if args.csv:
         csv_path = pathlib.Path(args.csv)

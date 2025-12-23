@@ -52,3 +52,34 @@ This distills the “bad day” discussion into something you can wire and test.
 - **Test for “major news days” bias:** bucket days by `bad_rate` (share of bars with `bad_flag`) and check if high-`bad_rate` days coincide with known macro/news shocks.
 - **Remember the semantics:** `bad_day` detects structural stress; news is often the visible cause/effect. A lack of headlines can still yield `bad_flag` if the tape is forced (e.g., liquidations).
 - **Daily rollup for calendar heatmaps:** aggregate intraday `p_bad` into per-day stats (mean, max, run-length). Example: `bad_score_d = α·mean(p_bad_d) + β·max(p_bad_d) + γ·runlen(p_bad>0.7)`. Plot as a calendar; annotate the most negative days with headlines to sanity-check alignment.
+- **Helper script:** `PYTHONPATH=. python scripts/rollup_bad_days.py --log logs/trading_log.csv --out logs/bad_days.csv --top 10` produces the per-day badness table (mean/max/run-length/bad_score) for quick news overlays.
+- **Fetch headlines/events for a slice:** `PYTHONPATH=. python scripts/news_slice.py --provider newsapi --start 2025-03-01T09:00:00Z --end 2025-03-01T12:00:00Z --out logs/news_slice.csv` (requires `NEWSAPI_KEY`). For event-level intensity instead of headlines, use `--provider gdelt` (no key).
+- **Automatic windows → events:** `PYTHONPATH=. python scripts/emit_news_windows.py --log logs/trading_log.csv --out-dir logs/news_events` detects bad windows (p_bad≥0.7 & bad_flag) and fetches GDELT events per window (no API key by default).
+- **Coverage/404 behavior:** GDELT effectively covers ~2015-06 onward; future dates are skipped. 404 responses are treated as “no events” and logged once. Windows/days are capped by trigger count so you don’t spam the endpoint on deep histories.
+- **Synthetic validation (no news needed):** `PYTHONPATH=. python scripts/score_bad_windows.py --log logs/trading_log.csv --out logs/bad_windows.csv` adds synthetic bad flags (|return|>k·σ or drawdown slope) and ranks top-N windows by summed `p_bad` over a sliding window, so you can verify p_bad/bad_flag against price/vol shocks directly.
+
+### Regime windows (inter-arrival of bad)
+- Define bad onsets: τ_k where bad flips from {!–1} → –1. Define windows W_k = [τ_k, τ_{k+1}). Measure:
+  - window length distribution
+  - PnL per window
+  - volatility/drawdown concentration near window start
+- This turns the problem into hazard/survival analysis: “how long until the next bad regime?” rather than bar-by-bar prediction.
+
+### Tri-state p_bad (symmetric semantics)
+- Use p_bad ∈ {−1,0,+1} (or mapped from [0,1] with thresholds):
+  - +1: coherent/exploitable
+  - 0: undecidable/entropy
+  - −1: incoherent/adversarial
+- Policy: ACT if p_bad>θ₊; BAN if p_bad<θ₋; HOLD otherwise. This keeps three postures distinct from directional view.
+
+### “Legal” BAN monetisation (no cheating on direction)
+- Do not let BAN imply “go short directionally.” BAN monetises structure, not price:
+  - Vol-only exposure (long vol proxies / straddle-like behavior).
+  - Capital preservation (flat when others bleed).
+  - Fee/slippage avoidance in churny regimes.
+- Directional inversion is a later, separate strategy gated by the same posture logic.
+
+### Suggested next experiment (minimal)
+- Attach a trivial ACT strategy (e.g., single-parameter trend-follow) and compare:
+  - strategy alone vs strategy+CA gate (drawdown, Sharpe, turnover).
+- Rank bad windows by severity (p_bad sum × trigger count) and align with synthetic bad labels before relying on news.

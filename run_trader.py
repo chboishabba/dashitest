@@ -165,6 +165,11 @@ def load_prices(path: pathlib.Path, return_time: bool = False):
             if dk in col_map:
                 date_key = col_map[dk]
                 break
+        # yfinance exports sometimes put dates under "Price" after skipping header rows
+        if date_key is None and "price" in col_map:
+            maybe_dates = pd.to_datetime(df[col_map["price"]], errors="coerce")
+            if maybe_dates.notna().mean() > 0.8:
+                date_key = col_map["price"]
 
         close_series = pd.to_numeric(df[close_key], errors="coerce")
 
@@ -198,6 +203,13 @@ def load_prices(path: pathlib.Path, return_time: bool = False):
     for reader in (read_basic, read_skip):
         try:
             df = reader(path)
+            # handle yfinance multi-index export (ticker row, then date row)
+            cols_lower = [c.lower() for c in df.columns]
+            if "price" in cols_lower:
+                price_col = cols_lower.index("price")
+                head_vals = df.iloc[:2, price_col].astype(str).str.lower()
+                if head_vals.str.contains("ticker").any():
+                    df = df.iloc[2:].reset_index(drop=True)
             close, vol, ts = parse_df(df)
             # replace nonpositive/NaN volume
             pos_vol = vol[np.isfinite(vol) & (vol > 0)]
@@ -217,7 +229,7 @@ def run_trading_loop(
     price: np.ndarray,
     volume: np.ndarray,
     source: str,
-    time_index: np.ndarray | None = None,
+    time_index=None,
     max_steps=None,
     sleep_s=0.0,
     risk_frac: float = DEFAULT_RISK_FRAC,

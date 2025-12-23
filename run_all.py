@@ -27,10 +27,10 @@ def discover_markets():
     if root.exists():
         for f in sorted(root.glob("*.csv")):
             try:
-                price, volume = run_trader.load_prices(f)
+                price, volume, ts = run_trader.load_prices(f, return_time=True)
                 if len(price) < 10:
                     continue
-                markets.append({"name": f.stem, "path": f, "price": price, "volume": volume})
+                markets.append({"name": f.stem, "path": f, "price": price, "volume": volume, "time": ts})
             except Exception:
                 continue
     if not markets:
@@ -39,7 +39,7 @@ def discover_markets():
         steps = rng.normal(loc=0.0, scale=0.01, size=1000)
         price = 100 + np.cumsum(steps)
         volume = np.ones_like(price) * 1e6
-        markets.append({"name": "synthetic", "path": None, "price": price, "volume": volume})
+        markets.append({"name": "synthetic", "path": None, "price": price, "volume": volume, "time": None})
     return markets
 
 
