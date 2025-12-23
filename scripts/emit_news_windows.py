@@ -22,7 +22,7 @@ from typing import List, Tuple
 import pandas as pd
 
 # reuse provider fetchers
-from scripts.news_slice import gdelt_fetch, newsapi_fetch  # type: ignore
+from scripts.news_slice import gdelt_fetch, newsapi_fetch, rss_fetch  # type: ignore
 
 
 def contiguous_windows(ts: pd.Series, max_gap: pd.Timedelta) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
@@ -48,9 +48,14 @@ def main():
     ap.add_argument("--p-bad-hi", type=float, default=0.7, help="p_bad threshold to trigger a window.")
     ap.add_argument("--max-gap-min", type=float, default=15.0, help="Merge triggers separated by at most this gap (minutes).")
     ap.add_argument("--pad-min", type=float, default=60.0, help="Pad each window start/end by this many minutes.")
-    ap.add_argument("--provider", choices=["gdelt", "newsapi"], default="gdelt")
+    ap.add_argument("--provider", choices=["gdelt", "newsapi", "rss"], default="gdelt")
     ap.add_argument("--query", default="", help="Optional keyword filter for provider.")
-    ap.add_argument("--maxrows", type=int, default=250, help="Max rows for provider fetch (GDELT).")
+    ap.add_argument("--maxrows", type=int, default=250, help="Max rows for provider fetch (GDELT/RSS).")
+    ap.add_argument(
+        "--feed-url",
+        action="append",
+        help="RSS/Atom feed URL (repeatable) used when provider=rss.",
+    )
     args = ap.parse_args()
 
     if not args.log.exists():
@@ -76,8 +81,12 @@ def main():
         w_end = end + pad
         if args.provider == "gdelt":
             events = gdelt_fetch(w_start, w_end, args.query or None, args.maxrows)
-        else:
+        elif args.provider == "newsapi":
             events = newsapi_fetch(w_start, w_end, args.query, page_size=min(args.maxrows, 100))
+        else:
+            if not args.feed_url:
+                raise ValueError("Provide at least one --feed-url when provider=rss")
+            events = rss_fetch(args.feed_url, w_start, w_end, maxrows=args.maxrows)
         fname = args.out_dir / f"events_{idx:03d}_{w_start.strftime('%Y%m%dT%H%M%S')}_{w_end.strftime('%Y%m%dT%H%M%S')}.csv"
         events.to_csv(fname, index=False)
         top_codes = ""

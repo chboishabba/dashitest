@@ -4,6 +4,7 @@ Fetch headlines or event summaries for a given time slice to align with bad_day 
 Supports:
 - NewsAPI (headlines): requires NEWSAPI_KEY env var.
 - GDELT (event counts + tone): no key required.
+- RSS (headlines): no key; provide one or more feed URLs.
 
 Examples:
   PYTHONPATH=. python scripts/news_slice.py --provider newsapi --start 2025-03-01T09:00:00Z --end 2025-03-01T12:00:00Z --out logs/news_slice.csv
@@ -97,14 +98,83 @@ def gdelt_fetch(start: pd.Timestamp, end: pd.Timestamp, query: Optional[str], ma
     return df
 
 
+def rss_fetch(feed_urls, start: pd.Timestamp, end: pd.Timestamp, maxrows: int = 200, timeout: float = 10.0) -> pd.DataFrame:
+    """
+    Minimal RSS/Atom fetcher (no API key). Filters items within [start, end].
+    """
+    import xml.etree.ElementTree as ET
+
+    rows = []
+
+    def parse_time(text: str) -> Optional[pd.Timestamp]:
+        if not text:
+            return None
+        ts = pd.to_datetime(text, utc=True, errors="coerce")
+        return ts
+
+    for url in feed_urls:
+        try:
+            resp = requests.get(url, timeout=timeout)
+            resp.raise_for_status()
+        except Exception as e:
+            print(f"[rss] failed {url}: {e}")
+            continue
+        try:
+            root = ET.fromstring(resp.content)
+        except ET.ParseError as e:
+            print(f"[rss] parse error {url}: {e}")
+            continue
+
+        # RSS 2.0: channel/item; Atom: feed/entry
+        channel = root.find("channel")
+        source = ""
+        items = []
+        if channel is not None:
+            source_el = channel.findtext("title")
+            source = source_el or ""
+            items = channel.findall("item")
+        else:
+            source = root.findtext("{http://www.w3.org/2005/Atom}title") or ""
+            items = root.findall("{http://www.w3.org/2005/Atom}entry")
+
+        for it in items:
+            title = it.findtext("title") or it.findtext("{http://www.w3.org/2005/Atom}title") or ""
+            link_el = it.find("link")
+            link = ""
+            if link_el is not None:
+                link = link_el.get("href") or link_el.text or ""
+            pub = (
+                it.findtext("pubDate")
+                or it.findtext("{http://www.w3.org/2005/Atom}updated")
+                or it.findtext("{http://purl.org/dc/elements/1.1/}date")
+            )
+            ts = parse_time(pub)
+            if ts is None:
+                continue
+            if ts < start or ts > end:
+                continue
+            rows.append({"ts": ts, "title": title, "source": source, "url": link, "provider": "rss"})
+            if len(rows) >= maxrows:
+                break
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
+    return df
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--provider", choices=["newsapi", "gdelt"], required=True)
+    ap.add_argument("--provider", choices=["newsapi", "gdelt", "rss"], required=True)
     ap.add_argument("--start", required=True, help="ISO start time (UTC recommended), e.g. 2025-03-01T09:00:00Z")
     ap.add_argument("--end", required=True, help="ISO end time (UTC recommended)")
     ap.add_argument("--query", default="", help="Optional keyword filter.")
     ap.add_argument("--out", type=pathlib.Path, default=None, help="Optional CSV output path.")
-    ap.add_argument("--maxrows", type=int, default=250, help="Max rows for providers that support it (GDELT).")
+    ap.add_argument("--maxrows", type=int, default=250, help="Max rows for providers that support it (GDELT/RSS).")
+    ap.add_argument(
+        "--feed-url",
+        action="append",
+        help="RSS/Atom feed URL (can be repeated). Required when --provider rss.",
+    )
     args = ap.parse_args()
 
     start = parse_iso(args.start)
@@ -114,8 +184,12 @@ def main():
 
     if args.provider == "newsapi":
         df = newsapi_fetch(start, end, args.query)
-    else:
+    elif args.provider == "gdelt":
         df = gdelt_fetch(start, end, args.query or None, args.maxrows)
+    else:
+        if not args.feed_url:
+            raise ValueError("Provide at least one --feed-url when using provider=rss")
+        df = rss_fetch(args.feed_url, start, end, maxrows=args.maxrows)
 
     if df.empty:
         print("No records returned.")
