@@ -10,6 +10,18 @@
 - `strategy/`: Strategy logic (`triadic_strategy.py`) driving intents from states/confidence.
 - `scripts/ca_epistemic_tape.py`: Trading-driven CA visualization (epistemic tape) that injects triadic market features into a 2D CA and plots snapshots, motif triggers, and multiscale change rates. Research/diagnostic only (does not drive trading).
 
+## CA metrics wish-list (diagnostics, not implemented yet)
+To keep research and trading separate, CA metrics live in the lab. The key statistics we intend to collect when iterating on the CA prototypes:
+- **State occupancy:** Fractions of s∈{-1,0,+1}, g∈{BAN,HOLD,ACT}, and joint (s,g)/(s,φ) per step and aggregated.
+- **Transitions/persistence:** Transition matrices (s_t→s_{t+1}, g_t→g_{t+1}), run-lengths of ACT/HOLD/BAN, flip rates.
+- **Motion/propagation:** Spatial autocorrelation, phase/velocity bias, glider density, lifetimes of moving motifs.
+- **Tension/conflict:** Local τ=min(c⁺,c⁻), its distribution/variance, duration above thresholds.
+- **Motif triggers:** Counts per step of M4 (corridor), M7 (fatigue rim), M9 (shutdown), plus joint events.
+- **Multiscale structure:** Change rate vs coarse-graining k; entropy vs scale; cross-scale mutual information.
+- **Fatigue/memory:** Mean/variance/tails of fatigue; autocorrelation decay of s/g/τ to estimate effective memory depth.
+- **Market-driven CA (when forced by real data):** Input alignment (correlation of injected symbols vs CA state), lagged influence; identification of corridors, fracture zones, shutdown islands.
+- **Bridge to trading (epistemic only):** Permission surface stability (ACT fraction, volatility, clustering); inferred hysteresis (empirical tau_on/off, knee points from CA stats).
+- **Pathology checks:** Collapse (all 0), white-noise (flat entropy across scales), limit cycles, over-ban (M9 dominance).
 ## Trading stack: what is implemented today
 - **Triadic control loop (implemented):** `run_trader.py` computes a triadic latent state (`compute_triadic_state`) and drives exposure in {-1,0,+1}. It uses: HOLD decay, velocity-based exits, persistence ramp, risk targeting (`SIGMA_TARGET`, `DEFAULT_RISK_FRAC`), impact (`IMPACT_COEFF`), and fees (`cost`). This is the same simulator used by `run_all.py`.
 - **Epistemic gating & posture separation (implemented):** Strategy vs execution is split (`strategy/triadic_strategy.py` + `execution/bar_exec.py`). Prediction (state) is distinct from permission/posture; logs include `action`, `hold`, `acceptable`, `actionability` for downstream analysis.
