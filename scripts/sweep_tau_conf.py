@@ -79,6 +79,24 @@ def compute_pnl_metrics(df: pd.DataFrame):
     }
 
 
+def compute_return_splits(df: pd.DataFrame):
+    """
+    Forward 1-step returns conditioned on engagement vs flat.
+    Uses price column; action!=0 => engaged, action==0 => flat.
+    """
+    if df is None or df.empty or "price" not in df or "action" not in df:
+        return {"ret_all": float("nan"), "ret_engaged": float("nan"), "ret_flat": float("nan")}
+    price = pd.to_numeric(df["price"], errors="coerce")
+    fwd_ret = price.shift(-1) / price - 1.0
+    engaged = df["action"] != 0
+    flat = df["action"] == 0
+    return {
+        "ret_all": float(fwd_ret.mean()),
+        "ret_engaged": float(fwd_ret[engaged].mean()),
+        "ret_flat": float(fwd_ret[flat].mean()),
+    }
+
+
 def engagement_bins(df: pd.DataFrame, bins: int = 20):
     """
     Return per-bin engagement rates: list of (bin_center, engagement_rate).
@@ -135,6 +153,7 @@ def run_once(csv: Path, tau_on: float, tau_off: float):
     )
     metrics = compute_metrics(df)
     metrics.update(compute_pnl_metrics(df))
+    metrics.update(compute_return_splits(df))
     metrics.update({"tau_on": tau_on, "tau_off": tau_off})
     return metrics, df
 
@@ -207,7 +226,8 @@ def main():
             f"act_bars={metrics['act_bars']}  hold%={metrics['hold_pct']:.3f}  "
             f"pnl={metrics['pnl_net']:.4f}  max_dd={metrics['max_dd']:.4f}  trades={metrics['trades']}  "
             f"turnover={metrics['turnover']:.4f}  fees={metrics['fees']:.6f}  "
-            f"edge/turn={metrics['edge_per_turnover']:.6f}"
+            f"edge/turn={metrics['edge_per_turnover']:.6f}  "
+            f"ret_engaged={metrics['ret_engaged']:.6f}  ret_flat={metrics['ret_flat']:.6f}"
         )
         if not np.isnan(metrics["precision"]) and metrics["precision"] < args.precision_floor:
             print("Precision dropped below floor; stopping sweep.")
