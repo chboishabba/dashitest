@@ -29,6 +29,11 @@ MIN_DELAY_YAHOO = 3.0  # seconds between Yahoo requests
 _last_request_stooq = 0.0
 _last_request_yahoo = 0.0
 
+BINANCE_BASE = "https://api.binance.com"
+BINANCE_KLINES = f"{BINANCE_BASE}/api/v3/klines"
+BINANCE_AGG_TRADES = f"{BINANCE_BASE}/api/v3/aggTrades"
+BINANCE_LIMIT = 1000  # max rows per request
+
 
 def polite_sleep(source: str):
     """Sleep to enforce per-source minimum delay."""
@@ -48,6 +53,45 @@ def polite_sleep(source: str):
 
 def ensure_dir(path):
     pathlib.Path(path).mkdir(parents=True, exist_ok=True)
+
+
+def _interval_to_ms(interval: str) -> int:
+    lookup = {
+        "1s": 1_000,
+        "1m": 60_000,
+        "3m": 180_000,
+        "5m": 300_000,
+        "15m": 900_000,
+        "30m": 1_800_000,
+        "1h": 3_600_000,
+        "2h": 7_200_000,
+        "4h": 14_400_000,
+        "6h": 21_600_000,
+        "8h": 28_800_000,
+        "12h": 43_200_000,
+        "1d": 86_400_000,
+    }
+    if interval not in lookup:
+        raise ValueError(f"Unsupported Binance interval: {interval}")
+    return lookup[interval]
+
+
+def _binance_get(url, params):
+    """
+    Simple retry wrapper for Binance public REST calls.
+    """
+    base = 0.5
+    for i in range(5):
+        try:
+            r = requests.get(url, params=params, timeout=30)
+            if r.status_code != 200:
+                raise RuntimeError(f"Binance error {r.status_code}: {r.text[:200]}")
+            return r.json()
+        except Exception:
+            if i == 4:
+                raise
+            time.sleep(min(base * (2 ** i) + random.uniform(0, 0.25), 10.0))
+    return []
 
 
 def download_stooq(symbol: str, out_dir="data/raw/stooq", overwrite=False):
@@ -260,6 +304,170 @@ def download_btc_yahoo_intraday(
     return out_path
 
 
+def download_btc_binance_intraday(
+    out_path="data/raw/stooq/btc_intraday.csv",
+    interval="1m",
+    lookback_days=70,
+    overwrite=False,
+    max_rows=250_000,
+):
+    """
+    Download extended intraday BTCUSDT klines from Binance (no API key).
+    Defaults to ~70 days of 1m bars (roughly 10x the old 7d window).
+    """
+    out_path = pathlib.Path(out_path)
+    ensure_dir(out_path.parent)
+
+    interval_ms = _interval_to_ms(interval)
+    target_rows = int((lookback_days * 86_400_000) / interval_ms)
+    if out_path.exists() and not overwrite:
+        try:
+            existing_rows = sum(1 for _ in open(out_path))
+            if existing_rows >= 0.9 * target_rows:
+                print(f"[binance] cache hit: {out_path.name} ({existing_rows} rows)")
+                return out_path
+            else:
+                print(f"[binance] refreshing {out_path.name} (rows={existing_rows}, target≈{target_rows})")
+        except Exception:
+            print(f"[binance] refreshing {out_path.name} due to read error")
+
+    end_ms = int(time.time() * 1000)
+    start_ms = end_ms - int(lookback_days * 86_400_000)
+    rows = []
+    cursor = start_ms
+    requests_made = 0
+    while cursor < end_ms and len(rows) < max_rows:
+        params = {
+            "symbol": "BTCUSDT",
+            "interval": interval,
+            "startTime": cursor,
+            "endTime": end_ms,
+            "limit": BINANCE_LIMIT,
+        }
+        data = _binance_get(BINANCE_KLINES, params)
+        requests_made += 1
+        if not data:
+            break
+        for k in data:
+            rows.append(
+                {
+                    "Datetime": pd.to_datetime(k[0], unit="ms", utc=True),
+                    "Open": float(k[1]),
+                    "High": float(k[2]),
+                    "Low": float(k[3]),
+                    "Close": float(k[4]),
+                    "Volume": float(k[5]),
+                }
+            )
+        cursor = data[-1][6] + 1  # advance just past the last close time
+        if len(data) < BINANCE_LIMIT:
+            break
+        time.sleep(0.25)
+        if len(rows) >= max_rows:
+            print(f"[binance] reached max_rows={max_rows}; data may be truncated.")
+            break
+
+    if not rows:
+        print("[binance] BTCUSDT intraday download failed or empty.")
+        return None
+
+    df = pd.DataFrame(rows)
+    df.to_csv(out_path, index=False)
+    print(
+        f"[binance] saved BTCUSDT intraday to {out_path} "
+        f"({len(df)} rows, interval={interval}, lookback_days={lookback_days}, requests={requests_made})"
+    )
+    return out_path
+
+
+def download_btc_binance_seconds(
+    out_path="data/raw/stooq/btc_intraday_1s.csv",
+    hours=10,
+    overwrite=False,
+    max_trades=1_000_000,
+    sleep_s=0.25,
+):
+    """
+    Download aggregated BTCUSDT trades from Binance and resample to 1-second bars.
+    This is heavier than klines; default is ~10 hours of per-second bars.
+    """
+    out_path = pathlib.Path(out_path)
+    ensure_dir(out_path.parent)
+
+    target_rows = hours * 3600
+    if out_path.exists() and not overwrite:
+        try:
+            existing_rows = sum(1 for _ in open(out_path))
+            if existing_rows >= 0.8 * target_rows:
+                print(f"[binance] cache hit: {out_path.name} ({existing_rows} rows)")
+                return out_path
+            else:
+                print(f"[binance] refreshing {out_path.name} (rows={existing_rows}, target≈{target_rows})")
+        except Exception:
+            print(f"[binance] refreshing {out_path.name} due to read error")
+
+    end_ms = int(time.time() * 1000)
+    start_ms = end_ms - int(hours * 3_600_000)
+    trades = []
+    cursor = start_ms
+    requests_made = 0
+
+    while cursor < end_ms and len(trades) < max_trades:
+        params = {
+            "symbol": "BTCUSDT",
+            "startTime": cursor,
+            "endTime": end_ms,
+            "limit": BINANCE_LIMIT,
+        }
+        batch = _binance_get(BINANCE_AGG_TRADES, params)
+        requests_made += 1
+        if not batch:
+            break
+        trades.extend(batch)
+        cursor = batch[-1]["T"] + 1  # move just past the last trade timestamp
+        if len(batch) < BINANCE_LIMIT:
+            break
+        time.sleep(sleep_s)
+        if len(trades) >= max_trades:
+            print(f"[binance] reached max_trades={max_trades}; data may be truncated.")
+            break
+
+    if not trades:
+        print("[binance] BTCUSDT 1s download failed or empty.")
+        return None
+
+    df_trades = pd.DataFrame(trades)
+    df_trades["timestamp"] = pd.to_datetime(df_trades["T"], unit="ms", utc=True)
+    df_trades["price"] = pd.to_numeric(df_trades["p"], errors="coerce")
+    df_trades["qty"] = pd.to_numeric(df_trades["q"], errors="coerce")
+    df_trades = df_trades.sort_values("timestamp")
+
+    bars = (
+        df_trades.resample("1S", on="timestamp")
+        .agg(
+            Open=("price", "first"),
+            High=("price", "max"),
+            Low=("price", "min"),
+            Close=("price", "last"),
+            Volume=("qty", "sum"),
+        )
+        .dropna(subset=["Open", "High", "Low", "Close"])
+        .reset_index()
+        .rename(columns={"timestamp": "Datetime"})
+    )
+
+    if bars.empty:
+        print("[binance] No per-second bars assembled from trades.")
+        return None
+
+    bars.to_csv(out_path, index=False)
+    print(
+        f"[binance] saved BTCUSDT 1s bars to {out_path} "
+        f"({len(bars)} rows, trades={len(trades)}, requests={requests_made})"
+    )
+    return out_path
+
+
 def download_yahoo(
     symbol: str,
     interval="1h",
@@ -352,6 +560,16 @@ if __name__ == "__main__":
         download_btc_coingecko()
     except Exception as e:
         print(f"CoinGecko BTC download failed: {e}")
+    print("Downloading BTC-USD intraday (1m, ~70d) via Binance...")
+    try:
+        download_btc_binance_intraday()
+    except Exception as e:
+        print(f"Binance intraday download failed: {e}")
+    print("Downloading BTC-USD per-second (~10h) via Binance aggregated trades...")
+    try:
+        download_btc_binance_seconds()
+    except Exception as e:
+        print(f"Binance per-second download failed: {e}")
     if yf is not None:
         print("Downloading sample symbols from Yahoo (1d, 1y)...")
         bulk_yahoo(["SPY", "MSFT", "AAPL", "BTC-USD"], interval="1d", period="1y")

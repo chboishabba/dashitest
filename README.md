@@ -1,3 +1,47 @@
+## Project map (what each file does)
+- `data_downloader.py`: Fetch BTC data (daily/intraday/1s) from Binance/Yahoo/CoinGecko/Stooq; saves under `data/raw/stooq`.
+- `run_trader.py`: Core bar-level trading loop with simple impact/fee model; writes `logs/trading_log.csv` and `data/run_history.csv`.
+- `run_all.py`: Runs the trading loop across all cached markets (or synthetic), prints a scoreboard; `--live` streams the dashboard while running.
+- `training_dashboard.py`: Live viewer for logs (PnL, price/actions, latent/HOLD%, optional PR/engagement overlays).
+- `runner.py`: Strategy + execution wiring for batch bar runs (used by scripts).
+- `scripts/run_bars_btc.py`: Build BTC bars/state, run the bar executor, write a trading log.
+- `scripts/sweep_tau_conf.py`: Sweep hysteresis thresholds (tau_on/off), produce PR curves for the dashboard sparkline.
+- `execution/`: Execution backends (`bar_exec` in use; `hft_exec` stub for future LOB replay).
+- `strategy/`: Strategy logic (`triadic_strategy.py`) driving intents from states/confidence.
+
+## How `run_all.py` behaved before the latest changes
+- Single-threaded batch runner: iterated cached market CSVs under `data/raw/stooq`, executed the same bar-level simulator as `run_trader.py` (includes fees via `cost`, slippage via `IMPACT_COEFF`, HOLD decay, risk targeting), wrote a single `logs/trading_log.csv`, printed per-run summary, then a simple scoreboard.
+- No live dashboard streaming; to visualize you had to run `training_dashboard.py` separately pointing at the log.
+- Example run (legacy behavior):
+  ```
+  ❯ python run_all.py
+
+  === Running market: aapl.us ===
+  Run complete: source=aapl.us, steps=10403, trades=1693, pnl=99142.2711
+
+  === Running market: btc.us ===
+  Run complete: source=btc.us, steps=348, trades=38, pnl=99906.5616
+
+  === Running market: btc_intraday ===
+  Run complete: source=btc_intraday, steps=100799, trades=12453, pnl=-29813.2553
+
+  === Running market: msft.us ===
+  Run complete: source=msft.us, steps=10020, trades=1132, pnl=97964.1213
+
+  === Running market: spy.us ===
+  Run complete: source=spy.us, steps=5238, trades=507, pnl=95434.7109
+
+  === Per-market results ===
+  btc.us               steps=   348 trades=   38 pnl=99906.5616 max_dd= -225.0276 hold=89.1%
+  aapl.us              steps= 10403 trades= 1693 pnl=99142.2711 max_dd=-1754.1843 hold=83.7%
+  msft.us              steps= 10020 trades= 1132 pnl=97964.1213 max_dd=-2604.6199 hold=88.7%
+  spy.us               steps=  5238 trades=  507 pnl=95434.7109 max_dd=-4905.0864 hold=90.3%
+  btc_intraday         steps=100799 trades=12453 pnl=-29813.2553 max_dd=-361939.6821 hold=87.6%
+
+  === Overall ===
+  markets=5, winners=4, losers=1, total_pnl=362634.4097
+  ```
+
 ```
 balanced_pn_iter_bench: 2-bit (P,N) balanced add with carry, iterative loop
 Iterative balanced PN add: N=1024, iters=128,  3187.96 µs/word,     2.57 Mtrits/s

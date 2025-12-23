@@ -75,7 +75,11 @@ def find_btc_csv():
     if not raw.exists():
         return None
     # prefer intraday then daily
-    files = sorted(list(raw.glob("btc_intraday*.csv")) + list(raw.glob("btc*.csv")))
+    files = (
+        sorted(raw.glob("btc_intraday_1s*.csv"))
+        + sorted(raw.glob("btc_intraday*.csv"))
+        + sorted(raw.glob("btc*.csv"))
+    )
     for f in files:
         try:
             df_head = pd.read_csv(f, nrows=5)
@@ -176,32 +180,26 @@ def load_prices(path: pathlib.Path):
     raise ValueError(f"Could not parse prices from {path}")
 
 
-def main(
+def run_trading_loop(
+    price: np.ndarray,
+    volume: np.ndarray,
+    source: str,
     max_steps=None,
     sleep_s=0.0,
     risk_frac: float = DEFAULT_RISK_FRAC,
     contract_mult: float = CONTRACT_MULT,
     sigma_target: float = SIGMA_TARGET,
+    log_path: pathlib.Path = LOG,
 ):
-    source = "stooq"
-    try:
-        csv_path = find_btc_csv()
-        if csv_path is not None:
-            price, volume = load_prices(csv_path)
-            source = "btc"
-            print(f"Using BTC data: {csv_path}")
-        else:
-            csv_path = find_stooq_csv()
-            price, volume = load_prices(csv_path)
-            print(f"Using Stooq data: {csv_path}")
-    except Exception as e:
-        print(f"Falling back to synthetic prices: {e}")
-        source = "synthetic"
-        rng = np.random.default_rng(0)
-        steps = rng.normal(loc=0.0, scale=0.01, size=1000)
-        price = 100 + np.cumsum(steps)
-        volume = np.ones_like(price) * 1e6
-    LOG.unlink(missing_ok=True)
+    """
+    Core trading loop extracted so multiple markets can be evaluated.
+    """
+    price = np.asarray(price, dtype=float)
+    volume = np.asarray(volume, dtype=float)
+    log_path = pathlib.Path(log_path) if log_path is not None else None
+    if log_path:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.unlink(missing_ok=True)
     cash = START_CASH
     pos = 0.0
     z_prev = 0.0
@@ -304,7 +302,10 @@ def main(
             "align_age": align_age,
         }
         rows.append(row)
-        pd.DataFrame([row]).to_csv(LOG, mode="a", header=not LOG.exists(), index=False)
+        if log_path:
+            pd.DataFrame([row]).to_csv(
+                log_path, mode="a", header=not log_path.exists(), index=False
+            )
         z_prev = z
         prev_action = desired
         time.sleep(sleep_s)  # slow enough to watch in dashboard
@@ -321,7 +322,6 @@ def main(
         max_drawdown = float(drawdown)
     print(f"Run complete: source={source}, steps={len(rows)}, trades={trades}, pnl={total_pnl:.4f}")
 
-    # append run history
     summary = {
         "timestamp": pd.Timestamp.utcnow(),
         "source": source,
@@ -331,7 +331,49 @@ def main(
         "hold_pct": hold_pct,
         "max_drawdown": max_drawdown,
     }
-    pd.DataFrame([summary]).to_csv(RUN_HISTORY, mode="a", header=not RUN_HISTORY.exists(), index=False)
+    pd.DataFrame([summary]).to_csv(
+        RUN_HISTORY, mode="a", header=not RUN_HISTORY.exists(), index=False
+    )
+    return summary, rows
+
+
+def main(
+    max_steps=None,
+    sleep_s=0.0,
+    risk_frac: float = DEFAULT_RISK_FRAC,
+    contract_mult: float = CONTRACT_MULT,
+    sigma_target: float = SIGMA_TARGET,
+):
+    source = "stooq"
+    try:
+        csv_path = find_btc_csv()
+        if csv_path is not None:
+            price, volume = load_prices(csv_path)
+            source = "btc"
+            print(f"Using BTC data: {csv_path}")
+        else:
+            csv_path = find_stooq_csv()
+            price, volume = load_prices(csv_path)
+            print(f"Using Stooq data: {csv_path}")
+    except Exception as e:
+        print(f"Falling back to synthetic prices: {e}")
+        source = "synthetic"
+        rng = np.random.default_rng(0)
+        steps = rng.normal(loc=0.0, scale=0.01, size=1000)
+        price = 100 + np.cumsum(steps)
+        volume = np.ones_like(price) * 1e6
+
+    run_trading_loop(
+        price=price,
+        volume=volume,
+        source=source,
+        max_steps=max_steps,
+        sleep_s=sleep_s,
+        risk_frac=risk_frac,
+        contract_mult=contract_mult,
+        sigma_target=sigma_target,
+        log_path=LOG,
+    )
 
 
 if __name__ == "__main__":
