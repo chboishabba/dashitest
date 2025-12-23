@@ -5,6 +5,10 @@
   - `scripts/score_bad_windows.py` computes synthetic bad flags (|return| vs σ or drawdown slope) and ranks top-N windows by summed `p_bad` over a sliding window.
   - News fetch summaries now include severity (`sev_sum_p_bad`) and cap windows/days by triggers to avoid spam; 404s/future dates are treated as empty fetches.
   - `docs/bad_day.md` and `README.md` now describe regime windows (hazard view), tri-state `p_bad` posture policy, and “legal” BAN monetisation (structure/vol/fee avoidance, not forced shorting).
+- Added `scripts/contextual_news.py` to aggregate contextual signals per date:
+  - Reuters markets RSS (no key) filtered by keywords.
+  - TradingEconomics macro calendar if `TE_API_KEY` is set; empty otherwise.
+  - Stress proxies via yfinance (VIX, USDCNH, Copper) when available.
 - Recorded historical `run_all.py` behavior before the latest changes (single-threaded, no live view) and captured example results for the legacy run.
 - Captured pre/post `run_all.py` outputs for reference:
   - Legacy (5 markets): total_pnl=362,634.4097 with per-market PnL: aapl.us 99,142.2711; btc.us 99,906.5616; btc_intraday -29,813.2553; msft.us 97,964.1213; spy.us 95,434.7109.
