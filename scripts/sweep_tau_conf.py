@@ -7,6 +7,7 @@ import argparse
 import numpy as np
 import pandas as pd
 from pathlib import Path
+import matplotlib.pyplot as plt
 from runner import run_bars
 from run_trader import load_prices, compute_triadic_state
 from scripts.run_bars_btc import confidence_from_persistence
@@ -175,6 +176,11 @@ def main():
         help="Optional CSV for engagement surface (long form: tau_off, bin_center, engagement).",
     )
     ap.add_argument("--bins", type=int, default=20, help="Bins for actionability engagement surface.")
+    ap.add_argument(
+        "--live-plot",
+        action="store_true",
+        help="Show incremental PR and PnL-vs-DD plots as the sweep runs.",
+    )
     args = ap.parse_args()
 
     if args.tau_on < max(args.tau_off):
@@ -184,6 +190,10 @@ def main():
 
     rows = []
     bin_rows = []
+    if args.live_plot:
+        plt.ion()
+        fig, (ax_pr, ax_pnl) = plt.subplots(1, 2, figsize=(10, 4))
+
     for tau_off in args.tau_off:
         metrics, df_run = run_once(args.csv, args.tau_on, tau_off)
         rows.append(metrics)
@@ -202,6 +212,38 @@ def main():
             for row in engagement_bins(df_run, bins=args.bins):
                 row["tau_off"] = tau_off
                 bin_rows.append(row)
+
+        # live plots
+        if args.live_plot:
+            df_live = pd.DataFrame(rows)
+            ax_pr.cla()
+            ax_pnl.cla()
+            # PR plot annotated with net pnl and max dd
+            ax_pr.scatter(df_live["recall"], df_live["precision"], c="tab:blue")
+            for _, r in df_live.iterrows():
+                ax_pr.annotate(
+                    f"tau={r['tau_off']:.2f}\nP={r['pnl_net']:.1f}\nDD={r['max_dd']:.1f}",
+                    (r["recall"], r["precision"]),
+                    fontsize=7,
+                )
+            ax_pr.set_xlabel("Recall (P(ACT | acceptable))")
+            ax_pr.set_ylabel("Precision (P(acceptable | ACT))")
+            ax_pr.set_title("PR curve (annotated with PnL, DD)")
+            ax_pr.set_xlim(0, 1)
+            ax_pr.set_ylim(0, 1)
+            # PnL vs Max DD Pareto
+            ax_pnl.scatter(df_live["max_dd"], df_live["pnl_net"], c="tab:green", s=40)
+            for _, r in df_live.iterrows():
+                ax_pnl.annotate(
+                    f"tau={r['tau_off']:.2f}\nturn={r['turnover']:.2f}",
+                    (r["max_dd"], r["pnl_net"]),
+                    fontsize=7,
+                )
+            ax_pnl.set_xlabel("Max drawdown")
+            ax_pnl.set_ylabel("Net PnL")
+            ax_pnl.set_title("PnL vs Max DD (size=turnover)")
+            plt.tight_layout()
+            plt.pause(0.01)
     df = pd.DataFrame(rows)
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
