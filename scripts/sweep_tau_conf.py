@@ -85,15 +85,25 @@ def compute_return_splits(df: pd.DataFrame):
     Uses price column; action!=0 => engaged, action==0 => flat.
     """
     if df is None or df.empty or "price" not in df or "action" not in df:
-        return {"ret_all": float("nan"), "ret_engaged": float("nan"), "ret_flat": float("nan")}
+        return {
+            "ret_all": float("nan"),
+            "ret_engaged": float("nan"),
+            "ret_flat": float("nan"),
+            "ret_bad": float("nan"),
+            "ret_good": float("nan"),
+        }
     price = pd.to_numeric(df["price"], errors="coerce")
     fwd_ret = price.shift(-1) / price - 1.0
     engaged = df["action"] != 0
     flat = df["action"] == 0
+    bad = df["bad_flag"] == 1 if "bad_flag" in df else pd.Series([False] * len(df))
+    good = ~bad
     return {
         "ret_all": float(fwd_ret.mean()),
         "ret_engaged": float(fwd_ret[engaged].mean()),
         "ret_flat": float(fwd_ret[flat].mean()),
+        "ret_bad": float(fwd_ret[bad].mean()) if len(fwd_ret[bad]) else float("nan"),
+        "ret_good": float(fwd_ret[good].mean()) if len(fwd_ret[good]) else float("nan"),
     }
 
 

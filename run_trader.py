@@ -70,6 +70,36 @@ def compute_triadic_state(prices, dz_min=5e-5, window=200):
     return state
 
 
+def compute_structural_stress(prices, states, window=100, vol_z_thr=1.5, flip_thr=0.4):
+    """
+    Derive a crude structural stress score from price/triadic state history:
+    - rolling vol z-score (median/MAD)
+    - rolling jump z-score (abs return / rolling vol)
+    - rolling flip rate of the triadic state
+
+    Returns p_bad in [0,1] and a bad_flag bool (p_bad > 0.7).
+    """
+    prices = pd.Series(prices, dtype=float)
+    states = pd.Series(states, dtype=float)
+    rets = prices.pct_change().fillna(0.0)
+    vol = rets.rolling(window).std().fillna(method="bfill").fillna(0.0)
+    med_vol = vol.median()
+    mad_vol = (vol - med_vol).abs().median() + 1e-9
+    vol_z = (vol - med_vol) / mad_vol
+    jump_z = (rets.abs() / (vol + 1e-9)).fillna(0.0)
+    flips = (states != states.shift(1)).astype(float)
+    flip_rate = flips.rolling(window).mean().fillna(0.0)
+    score = (
+        (vol_z / vol_z_thr).clip(lower=0)
+        + (jump_z).clip(lower=0)
+        + (flip_rate / flip_thr).clip(lower=0)
+    )
+    # squash to [0,1] with a smooth cap
+    p_bad = (score / (1.0 + score)).clip(0.0, 1.0)
+    bad_flag = p_bad > 0.7
+    return p_bad.to_numpy(), bad_flag.to_numpy()
+
+
 def find_btc_csv():
     raw = pathlib.Path("data/raw/stooq")
     if not raw.exists():
@@ -201,6 +231,10 @@ def run_trading_loop(
     if log_path:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.unlink(missing_ok=True)
+    # Precompute triadic states and structural stress (for bad_day signal)
+    pre_states = compute_triadic_state(price)
+    p_bad, bad_flag = compute_structural_stress(price, pre_states)
+
     cash = START_CASH
     pos = 0.0
     z_prev = 0.0
@@ -286,6 +320,8 @@ def run_trading_loop(
             "t": t,
             "price": price[t],
             "pnl": pnl,
+            "p_bad": p_bad[t] if t < len(p_bad) else np.nan,
+            "bad_flag": int(bad_flag[t]) if t < len(bad_flag) else 0,
             "z_norm": abs(z),
             "z_vel": z_vel,
             "hold": int(desired == 0),
@@ -310,7 +346,7 @@ def run_trading_loop(
         if progress_every and (t % progress_every == 0 or t == total_steps):
             print(
                 f"[{source}] t={t:6d}/{total_steps:6d} pnl={row['pnl']:.4f} pos={row['pos']:.4f} "
-                f"fill={row['fill']:.4f} act={int(row['action'])}"
+                f"fill={row['fill']:.4f} act={int(row['action'])} p_bad={row['p_bad']:.3f} bad={row['bad_flag']}"
             )
         z_prev = z
         prev_action = desired
