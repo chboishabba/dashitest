@@ -9,6 +9,7 @@
   - Reuters markets RSS (no key) filtered by keywords.
   - TradingEconomics macro calendar if `TE_API_KEY` is set; empty otherwise.
   - Stress proxies via yfinance (VIX, USDCNH, Copper) when available.
+- Added `training_dashboard_pg.py`: PyQtGraph-based live dashboard with price/actions/bad_flag shading, PnL+HOLD%, p_bad+bad_flag step fill, and volume panes for fast intraday visualization.
 - Recorded historical `run_all.py` behavior before the latest changes (single-threaded, no live view) and captured example results for the legacy run.
 - Captured pre/post `run_all.py` outputs for reference:
   - Legacy (5 markets): total_pnl=362,634.4097 with per-market PnL: aapl.us 99,142.2711; btc.us 99,906.5616; btc_intraday -29,813.2553; msft.us 97,964.1213; spy.us 95,434.7109.
