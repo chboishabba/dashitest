@@ -79,7 +79,64 @@ This distills the “bad day” discussion into something you can wire and test.
   - Fee/slippage avoidance in churny regimes.
 - Directional inversion is a later, separate strategy gated by the same posture logic.
 
+### Posture semantics (disentangle axes)
+- Three axes, keep them distinct:
+  1) **Regime classification** (world type / admissibility).
+  2) **Posture** g∈{−1,0,+1} = {BAN, HOLD, ACT} (permission to express belief).
+  3) **Execution / PnL** (realized outcome).
+- g values are epistemic/control states, not returns:
+  - **+1 (ACT)**: “structure exists I trust” → directional expression allowed; mean >0 if edge, high variance.
+  - **0 (HOLD)**: “no reliable structure” → defer belief; ≈0 mean, low variance.
+  - **−1 (BAN)**: “structure is adversarial” → forbid directional belief; mean can be ≤0 or >0, variance very low; monetize second-order effects only.
+- BAN ≠ HOLD: HOLD defers belief; BAN forbids it and can trigger active defense.
+
+### BAN as a hazard operator (minimal “legal” rule)
+- Definition: BAN means “do not express first-order price belief.” Allowed monetisation is second-order:
+  - Exposure annihilation + cooldown + regime-boundary alignment (forced flatten, no churn).
+  - Symmetric/convex-only payoffs (vol/convexity capture, straddle-like logic, absolute-return caps).
+  - Inter-regime capital reallocation (lower next notional, delay redeploy, reset leverage).
+- Illegal during BAN: directional price bets, sign inversion as a proxy for “short the world,” hindsight hedging.
+
+### Window-level evaluation (litmus test)
+- Litmus: is mean return during BAN windows worse than mean return during ACT windows?
+- Implementation sketch on a per-bar log with `ret` and posture `g ∈ {−1,0,+1}`:
+  ```python
+  import pandas as pd
+  log = pd.read_csv("logs/trading_log.csv")
+  # forward or contemporaneous return; use whatever the log encodes
+  log["ret"] = log["pnl"].diff()  # example; replace with your bar return field
+  stats = (
+      log.assign(
+          posture=log["g"],  # or map from ban/hold/action columns
+      )
+      .groupby("posture")["ret"]
+      .agg(mean="mean", std="std", count="count")
+  )
+  print(stats.loc[1], "ACT"); print(stats.loc[0], "HOLD"); print(stats.loc[-1], "BAN")
+  ```
+- Windowed version (run-level hazard view):
+  ```python
+  def windows(df):
+      df = df.reset_index(drop=True)
+      starts = df.index[(df["g"].shift(1) != df["g"]) | (df.index == 0)]
+      for i, s in enumerate(starts):
+          e = starts[i+1] if i+1 < len(starts) else len(df)
+          yield df.loc[s:e-1], df.loc[s, "g"]
+
+  rows = []
+  for w, g in windows(log):
+      rows.append({"posture": g, "ret_sum": w["ret"].sum(), "ret_mean": w["ret"].mean(), "n": len(w)})
+  win = pd.DataFrame(rows)
+  print(win.groupby("posture")[["ret_sum","ret_mean","n"]].agg(["mean","std","count"]))
+  ```
+- Interpretation: BAN windows should exhibit lower (or negative) mean and lower variance vs ACT. If BAN mean ≥ ACT mean, the classifier is likely noise.
+
 ### Suggested next experiment (minimal)
 - Attach a trivial ACT strategy (e.g., single-parameter trend-follow) and compare:
   - strategy alone vs strategy+CA gate (drawdown, Sharpe, turnover).
 - Rank bad windows by severity (p_bad sum × trigger count) and align with synthetic bad labels before relying on news.
+
+### Next implementation options
+- Formalize BAN as a hazard operator in code: explicit permission mask + cooldown/rate limit on re-entry after bad onsets; make BAN sovereign over HOLD/ACT.
+- Wire posture-return audits: use `scripts/posture_returns.py` to print bar/window stats with cumulative sums per posture for quick integrity checks.
+- Add a minimal “legal BAN” execution stub (convex-only): symmetric payoffs/vol capture under BAN, no directional expression; gated by the same permission mask.

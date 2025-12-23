@@ -4,9 +4,11 @@
 - `run_all.py`: Runs the trading loop across all cached markets (or synthetic), prints a scoreboard; `--live` streams the dashboard while running.
 - `run_all_two_pointO.py`: Orchestrator that can (a) run all markets with progress prints, (b) sweep tau_off with live PR/PnL Pareto plots, and (c) preview the CA tape on the same CSV.
 - `training_dashboard.py`: Live viewer for logs (PnL, price/actions, latent/HOLD%, optional PR/engagement overlays).
+- `training_dashboard_pg.py`: PyQtGraph live viewer (fast, multi-pane).
 - `runner.py`: Strategy + execution wiring for batch bar runs (used by scripts).
 - `scripts/run_bars_btc.py`: Build BTC bars/state, run the bar executor, write a trading log.
 - `scripts/sweep_tau_conf.py`: Sweep hysteresis thresholds (tau_on/off), produce PR curves for the dashboard sparkline.
+- `scripts/posture_returns.py`: Compute bar- and window-level returns by posture (ACT/HOLD/BAN) with cumulative sums.
 - `execution/`: Execution backends (`bar_exec` in use; `hft_exec` stub for future LOB replay).
 - `strategy/`: Strategy logic (`triadic_strategy.py`) driving intents from states/confidence.
 - `scripts/ca_epistemic_tape.py`: Trading-driven CA visualization (epistemic tape) that injects triadic market features into a 2D CA and plots snapshots, motif triggers, and multiscale change rates. Research/diagnostic only (does not drive trading).

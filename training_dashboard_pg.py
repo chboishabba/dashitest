@@ -11,6 +11,8 @@ Panes:
 
 Usage:
   PYTHONPATH=. python training_dashboard_pg.py --log logs/trading_log.csv --refresh 1.0
+  # Progressive day-by-day reveal (each refresh adds the next day if ts present)
+  PYTHONPATH=. python training_dashboard_pg.py --log logs/trading_log.csv --refresh 1.0 --progressive-days
 """
 
 import argparse
@@ -19,7 +21,7 @@ import pandas as pd
 import numpy as np
 
 import pyqtgraph as pg
-from pyqtgraph.Qt import QtCore, QtWidgets
+from pyqtgraph.Qt import QtCore, QtWidgets, QtGui
 
 
 def load_log(path: pathlib.Path):
@@ -61,10 +63,14 @@ def rolling_hold(log, window=100):
 
 
 class Dashboard(QtWidgets.QMainWindow):
-    def __init__(self, log_path: pathlib.Path, refresh_s: float):
+    def __init__(self, log_path: pathlib.Path, refresh_s: float, progressive_days: bool):
         super().__init__()
         self.log_path = log_path
         self.refresh_s = refresh_s
+        self.progressive_days = progressive_days
+        self.day_idx = 0
+        self.day_keys = None
+        self.posture_spans = []
         self.init_ui()
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.update_data)
@@ -106,10 +112,84 @@ class Dashboard(QtWidgets.QMainWindow):
         self.p_vol = self.win.addPlot(row=3, col=0, title="Volume")
         self.vol_curve = self.p_vol.plot(pen=pg.mkPen("g", width=1))
 
+        # Posture pane (ACT/HOLD/BAN shading)
+        self.p_posture = self.win.addPlot(row=4, col=0, title="Posture (BAN/HOLD/ACT)")
+        self.p_posture.setYRange(-1.5, 1.5)
+        self.p_posture.setMouseEnabled(y=False)
+        self.p_posture.hideAxis("left")
+        self.p_posture.showGrid(x=True, y=False, alpha=0.3)
+        self.p_posture.setXLink(self.p_price)
+
+    def _clear_posture_spans(self):
+        for item in self.posture_spans:
+            try:
+                self.p_posture.removeItem(item)
+            except Exception:
+                pass
+        self.posture_spans = []
+
+    def _add_posture_spans(self, x_arr, g_arr):
+        """
+        Shade posture runs as translucent rectangles for readability.
+        g_arr: {-1,0,1} → BAN/HOLD/ACT
+        """
+        if len(x_arr) == 0 or len(g_arr) == 0:
+            return
+
+        # Use a representative step size to extend rectangles.
+        if len(x_arr) > 1:
+            step = float(np.median(np.diff(x_arr)))
+            step = step if step > 0 else 1.0
+        else:
+            step = 1.0
+
+        colors = {
+            -1: (200, 0, 0, 60),    # BAN
+            0: (120, 120, 120, 60), # HOLD
+            1: (0, 200, 0, 60),     # ACT
+        }
+
+        runs = []
+        start_idx = 0
+        for i in range(1, len(g_arr)):
+            if g_arr[i] != g_arr[start_idx]:
+                runs.append((start_idx, i - 1, g_arr[start_idx]))
+                start_idx = i
+        runs.append((start_idx, len(g_arr) - 1, g_arr[start_idx]))
+
+        for s, e, val in runs:
+            x_start = float(x_arr[s])
+            x_end = float(x_arr[e])
+            rect = QtWidgets.QGraphicsRectItem(
+                x_start, -1.5, (x_end - x_start) + step, 3.0
+            )
+            rect.setBrush(pg.mkBrush(*colors.get(val, (80, 80, 80, 40))))
+            rect.setPen(pg.mkPen(None))
+            rect.setZValue(-10)
+            self.p_posture.addItem(rect)
+            self.posture_spans.append(rect)
+
     def update_data(self):
         log = load_log(self.log_path)
         if log is None or log.empty:
             log = synthetic_log()
+
+        # Progressive reveal by day (ts required)
+        if self.progressive_days and "ts" in log.columns and log["ts"].notna().any():
+            if self.day_keys is None or len(self.day_keys) != log["ts"].nunique():
+                ts_dt = pd.to_datetime(log["ts"])
+                self.day_keys = ts_dt.dt.normalize().unique()
+                self.day_keys.sort()
+            if self.day_keys is not None and len(self.day_keys) > 0:
+                # Clamp day index
+                self.day_idx = min(self.day_idx, len(self.day_keys) - 1)
+                cutoff = self.day_keys[self.day_idx]
+                ts_dt = pd.to_datetime(log["ts"])
+                mask = ts_dt.dt.normalize() <= cutoff
+                log = log.loc[mask]
+                # Advance for next frame if possible
+                if self.refresh_s > 0 and self.day_idx < len(self.day_keys) - 1:
+                    self.day_idx += 1
 
         x = log["ts"] if "ts" in log.columns and log["ts"].notna().any() else log["t"]
         price = log["price"]
@@ -119,17 +199,45 @@ class Dashboard(QtWidgets.QMainWindow):
         action = log["action"] if "action" in log else None
         volume = log["volume"] if "volume" in log else None
         hold_roll = rolling_hold(log, window=200)
+        posture = None
+        if "ban" in log or "hold" in log or "action" in log:
+            g = np.ones(len(log), dtype=int)  # default ACT
+            if "ban" in log:
+                g[np.array(log["ban"]) > 0] = -1
+            if "hold" in log:
+                mask = (g != -1) & (np.array(log["hold"]) > 0)
+                g[mask] = 0
+            elif "action" in log:
+                mask = (g != -1) & (np.array(log["action"]) == 0)
+                g[mask] = 0
+            posture = g
 
         self.price_curve.setData(x, price)
+        step_x = None
         if bad_flag is not None:
             x_arr = np.array(x)
             y_arr = np.array(bad_flag)
-            # If timestamps are non-numeric, fall back to index positions.
+
+            # If timestamps are non-numeric, fall back to evenly spaced indices.
             if not np.issubdtype(x_arr.dtype, np.number):
                 x_arr = np.arange(len(y_arr))
-            # For stepMode=True, len(x) = len(y) + 1
-            x_bad = np.append(x_arr, x_arr[-1] + 1)
-            self.bad_fill.setData(x_bad, y_arr)
+
+            # Build X for stepMode=True: len(x) = len(y) + 1.
+            if len(x_arr) == len(y_arr):
+                # Use the last step size if available; otherwise default to 1.
+                step = x_arr[-1] - x_arr[-2] if len(x_arr) > 1 else 1
+                x_arr = np.append(x_arr, x_arr[-1] + step)
+            elif len(x_arr) > len(y_arr) + 1:
+                # Trim any excess so we don't trip the length check.
+                x_arr = x_arr[: len(y_arr) + 1]
+            elif len(x_arr) < len(y_arr) + 1:
+                # Pad forward if timestamps are missing.
+                step = x_arr[-1] - x_arr[-2] if len(x_arr) > 1 else 1
+                pad_count = len(y_arr) + 1 - len(x_arr)
+                pad = x_arr[-1] + step * np.arange(1, pad_count + 1)
+                x_arr = np.append(x_arr, pad)
+            step_x = x_arr
+            self.bad_fill.setData(step_x, y_arr)
         if action is not None:
             buys = action == 1
             sells = action == -1
@@ -144,21 +252,51 @@ class Dashboard(QtWidgets.QMainWindow):
         if p_bad is not None:
             self.p_bad_curve.setData(x, p_bad)
         if bad_flag is not None:
-            self.bad_flag_curve.setData(x, bad_flag)
+            # Reuse the step-aligned x for the bad_flag panel if available.
+            if step_x is None:
+                x_arr = np.array(x)
+                y_arr = np.array(bad_flag)
+                if not np.issubdtype(x_arr.dtype, np.number):
+                    x_arr = np.arange(len(y_arr))
+                if len(x_arr) == len(y_arr):
+                    step = x_arr[-1] - x_arr[-2] if len(x_arr) > 1 else 1
+                    x_arr = np.append(x_arr, x_arr[-1] + step)
+                elif len(x_arr) > len(y_arr) + 1:
+                    x_arr = x_arr[: len(y_arr) + 1]
+                elif len(x_arr) < len(y_arr) + 1:
+                    step = x_arr[-1] - x_arr[-2] if len(x_arr) > 1 else 1
+                    pad_count = len(y_arr) + 1 - len(x_arr)
+                    pad = x_arr[-1] + step * np.arange(1, pad_count + 1)
+                    x_arr = np.append(x_arr, pad)
+                step_x = x_arr
+            self.bad_flag_curve.setData(step_x, bad_flag)
 
         if volume is not None:
             self.vol_curve.setData(x, volume)
+
+        # Posture shading pane
+        self._clear_posture_spans()
+        if posture is not None:
+            x_arr = np.array(x)
+            if not np.issubdtype(x_arr.dtype, np.number):
+                x_arr = np.arange(len(posture))
+            self._add_posture_spans(x_arr, posture)
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--log", type=str, default="logs/trading_log.csv", help="CSV log file path")
     ap.add_argument("--refresh", type=float, default=1.0, help="Refresh seconds; set 0 for one-shot")
+    ap.add_argument(
+        "--progressive-days",
+        action="store_true",
+        help="Progressively reveal data day-by-day on each refresh (requires ts column).",
+    )
     args = ap.parse_args()
 
     log_path = pathlib.Path(args.log)
     app = QtWidgets.QApplication([])
-    dash = Dashboard(log_path=log_path, refresh_s=args.refresh)
+    dash = Dashboard(log_path=log_path, refresh_s=args.refresh, progressive_days=args.progressive_days)
     dash.show()
     if args.refresh <= 0:
         dash.update_data()
