@@ -31,6 +31,49 @@ def compute_metrics(df: pd.DataFrame):
     }
 
 
+def compute_pnl_metrics(df: pd.DataFrame):
+    """
+    Basic PnL audit metrics for a single run.
+    Expects df with columns: pnl (net), fee, slippage, fill, exposure, price.
+    """
+    if df is None or df.empty:
+        return {
+            "pnl_net": float("nan"),
+            "pnl_gross": float("nan"),
+            "max_dd": float("nan"),
+            "turnover": float("nan"),
+            "trades": 0,
+            "fees": float("nan"),
+            "impact": float("nan"),
+            "mean_ret": float("nan"),
+            "std_ret": float("nan"),
+        }
+    equity = df["pnl"] + 1.0
+    ret = equity.pct_change().fillna(0.0)
+    mean_ret = float(ret.mean())
+    std_ret = float(ret.std())
+    pnl_net = float(df["pnl"].iloc[-1])
+    pnl_gross = pnl_net + float(df["fee"].fillna(0).sum())  # fees already subtract from pnl
+    running_max = equity.cummax()
+    dd = (equity - running_max).min()
+    max_dd = float(dd)
+    turnover = float(df["fill"].abs().sum()) if "fill" in df else float("nan")
+    trades = int((df["fill"] != 0).sum()) if "fill" in df else 0
+    fees = float(df["fee"].fillna(0).sum())
+    impact = float(df["slippage"].abs().sum()) if "slippage" in df else float("nan")
+    return {
+        "pnl_net": pnl_net,
+        "pnl_gross": pnl_gross,
+        "max_dd": max_dd,
+        "turnover": turnover,
+        "trades": trades,
+        "fees": fees,
+        "impact": impact,
+        "mean_ret": mean_ret,
+        "std_ret": std_ret,
+    }
+
+
 def engagement_bins(df: pd.DataFrame, bins: int = 20):
     """
     Return per-bin engagement rates: list of (bin_center, engagement_rate).
@@ -80,14 +123,15 @@ def run_once(csv: Path, tau_on: float, tau_off: float):
         bars,
         symbol="BTCUSDT",
         mode="bar",
-        log_path=None,  # PnL-free sweep
+        log_path=None,  # PnL captured in df; no disk I/O
         confidence_fn=conf_fn,
         tau_conf_enter=tau_on,
         tau_conf_exit=tau_off,
     )
     metrics = compute_metrics(df)
+    metrics.update(compute_pnl_metrics(df))
     metrics.update({"tau_on": tau_on, "tau_off": tau_off})
-    return metrics
+    return metrics, df
 
 
 def main():
@@ -119,6 +163,12 @@ def main():
         help="Optional CSV path for precision/recall curve.",
     )
     ap.add_argument(
+        "--out_pnl",
+        type=Path,
+        default=None,
+        help="Optional CSV path for PnL audit metrics per tau_off.",
+    )
+    ap.add_argument(
         "--out_bins",
         type=Path,
         default=None,
@@ -135,45 +185,21 @@ def main():
     rows = []
     bin_rows = []
     for tau_off in args.tau_off:
-        metrics = run_once(args.csv, args.tau_on, tau_off)
+        metrics, df_run = run_once(args.csv, args.tau_on, tau_off)
         rows.append(metrics)
         print(
             f"tau_off={tau_off:.2f}  acceptable={metrics['acceptable_pct']:.3f}  "
             f"precision={metrics['precision']:.3f}  recall={metrics['recall']:.3f}  "
-            f"act_bars={metrics['act_bars']}  hold%={metrics['hold_pct']:.3f}"
+            f"act_bars={metrics['act_bars']}  hold%={metrics['hold_pct']:.3f}  "
+            f"pnl={metrics['pnl_net']:.4f}  max_dd={metrics['max_dd']:.4f}  trades={metrics['trades']}  "
+            f"turnover={metrics['turnover']:.4f}  fees={metrics['fees']:.6f}"
         )
         if not np.isnan(metrics["precision"]) and metrics["precision"] < args.precision_floor:
             print("Precision dropped below floor; stopping sweep.")
             break
         # compute per-bin engagement for this run if requested
         if args.out_bins:
-            # rerun to get df (recompute; acceptable given tau_off already used)
-            price, _ = load_prices(args.csv)
-            ts = np.arange(len(price))
-            state = compute_triadic_state(price)
-            bars = pd.DataFrame({"ts": ts, "close": price, "state": state})
-            rets = np.diff(price, prepend=price[0])
-            vol = pd.Series(rets).rolling(50).std().to_numpy()
-            conf_seq = confidence_from_persistence(
-                state, run_scale=30, ret_vol=vol, vol_thresh=np.nanpercentile(vol, 80)
-            )
-
-            def conf_fn(t, s):
-                idx = int(t)
-                if idx < 0 or idx >= len(conf_seq):
-                    return 1.0
-                return conf_seq[idx]
-
-            df_bins = run_bars(
-                bars,
-                symbol="BTCUSDT",
-                mode="bar",
-                log_path=None,
-                confidence_fn=conf_fn,
-                tau_conf_enter=args.tau_on,
-                tau_conf_exit=tau_off,
-            )
-            for row in engagement_bins(df_bins, bins=args.bins):
+            for row in engagement_bins(df_run, bins=args.bins):
                 row["tau_off"] = tau_off
                 bin_rows.append(row)
     df = pd.DataFrame(rows)
@@ -181,6 +207,10 @@ def main():
         args.out.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(args.out, index=False)
         print(f"Wrote sweep metrics to {args.out}")
+    if args.out_pnl:
+        args.out_pnl.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(args.out_pnl, index=False)
+        print(f"Wrote PnL audit metrics to {args.out_pnl}")
     if args.out_bins and bin_rows:
         args.out_bins.parent.mkdir(parents=True, exist_ok=True)
         pd.DataFrame(bin_rows).to_csv(args.out_bins, index=False)

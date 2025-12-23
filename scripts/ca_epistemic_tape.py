@@ -89,7 +89,7 @@ def phase_gradient(phi):
     return grad
 
 
-def run_ca_tape(feats, width=128, fatigue_thr=8, ban_conflict=6, seed=0):
+def run_ca_tape(feats, width=128, fatigue_thr=8, ban_conflict=6, seed=0, report_every=0):
     """
     Run the CA on a feature tape.
     feats: (C, T) triadic features
@@ -105,7 +105,27 @@ def run_ca_tape(feats, width=128, fatigue_thr=8, ban_conflict=6, seed=0):
     u = np.zeros((C, width), dtype=np.int8)    # fatigue 0..15
 
     snapshots = {}
-    stats = {k: [] for k in ["chg_s", "chg_g", "act", "hold", "ban", "fatigue", "m4", "m7", "m9"]}
+    stats = {
+        k: []
+        for k in [
+            "chg_s",
+            "chg_g",
+            "act",
+            "hold",
+            "ban",
+            "fatigue",
+            "m4",
+            "m7",
+            "m9",
+            "occ_s_neg",
+            "occ_s_zero",
+            "occ_s_pos",
+            "occ_g_neg",
+            "occ_g_zero",
+            "occ_g_pos",
+            "tension_mean",
+        ]
+    }
     history_s = []
     snap_ts = [0, max(1, T // 4), max(1, T // 2), max(1, 3 * T // 4), T - 1]
 
@@ -170,11 +190,26 @@ def run_ca_tape(feats, width=128, fatigue_thr=8, ban_conflict=6, seed=0):
         stats["m4"].append(float(np.mean(m4)))
         stats["m7"].append(float(np.mean(m7)))
         stats["m9"].append(float(np.mean(m9)))
+        # occupancy
+        stats["occ_s_neg"].append(float(np.mean(s2 == -1)))
+        stats["occ_s_zero"].append(float(np.mean(s2 == 0)))
+        stats["occ_s_pos"].append(float(np.mean(s2 == 1)))
+        stats["occ_g_neg"].append(float(np.mean(g2 == -1)))
+        stats["occ_g_zero"].append(float(np.mean(g2 == 0)))
+        stats["occ_g_pos"].append(float(np.mean(g2 == 1)))
+        stats["tension_mean"].append(float(np.mean(conflict)))
 
         s, phi, g, u = s2, phi2, g2, u2
         history_s.append(s.copy())
         if t in snap_ts:
             snapshots[t] = (s.copy(), phi.copy(), g.copy(), u.copy())
+
+        if report_every and (t % report_every == 0 or t == T - 1):
+            print(
+                f"[t={t:5d}] act={stats['act'][-1]:.3f} hold={stats['hold'][-1]:.3f} ban={stats['ban'][-1]:.3f} "
+                f"chg_s={stats['chg_s'][-1]:.4f} tension_mean={stats['tension_mean'][-1]:.3f} "
+                f"m4={stats['m4'][-1]:.3f} m7={stats['m7'][-1]:.3f} m9={stats['m9'][-1]:.3f}"
+            )
 
     return snapshots, stats, history_s
 
@@ -265,11 +300,19 @@ def main():
     ap.add_argument("--csv", type=str, default="data/raw/stooq/btc_intraday_1s.csv", help="CSV with close column.")
     ap.add_argument("--width", type=int, default=128, help="Lag width (X-axis).")
     ap.add_argument("--seed", type=int, default=0, help="RNG seed.")
+    ap.add_argument(
+        "--report-every",
+        type=int,
+        default=0,
+        help="If >0, print incremental CA stats every N steps (and at the end).",
+    )
     args = ap.parse_args()
 
     price, volume = load_price_series(args.csv)
     feats = build_features(price, volume)
-    snaps, stats, hist = run_ca_tape(feats, width=args.width, seed=args.seed)
+    snaps, stats, hist = run_ca_tape(
+        feats, width=args.width, seed=args.seed, report_every=args.report_every
+    )
     plot_snapshots(snaps)
     plot_stats(stats)
     plot_multiscale(hist)
