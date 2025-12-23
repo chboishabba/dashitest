@@ -38,6 +38,7 @@ To track outcomes alongside epistemic metrics (e.g., per tau_off sweep point):
 - `scripts/sweep_tau_conf.py` conditions forward returns on engagement and bad_flag: `ret_engaged`, `ret_flat`, `ret_bad`, `ret_good`, plus `edge_per_turnover`. Use `--live-plot` to see PR and PnL-vs-DD live with annotations.
 - Orchestrator usage example: `PYTHONPATH=. python run_all_two_pointO.py --markets --market-progress-every 500 --csv data/raw/stooq/btc_intraday_1s.csv --live-sweep --run-ca --ca-report-every 1000`.
 - Intent: separate “world is a bad game” detection from directional signals; this is an audit/pre-gate signal, not a change in acceptance logic.
+- Run summaries (`run_all_two_pointO.py --markets`) now print average `p_bad` and `bad_rate` per market so the clustering around ~100k PnL can be read alongside structural stress.
 ## Trading stack: what is implemented today
 - **Triadic control loop (implemented):** `run_trader.py` computes a triadic latent state (`compute_triadic_state`) and drives exposure in {-1,0,+1}. It uses: HOLD decay, velocity-based exits, persistence ramp, risk targeting (`SIGMA_TARGET`, `DEFAULT_RISK_FRAC`), impact (`IMPACT_COEFF`), and fees (`cost`). This is the same simulator used by `run_all.py`.
 - **Epistemic gating & posture separation (implemented):** Strategy vs execution is split (`strategy/triadic_strategy.py` + `execution/bar_exec.py`). Prediction (state) is distinct from permission/posture; logs include `action`, `hold`, `acceptable`, `actionability` for downstream analysis.

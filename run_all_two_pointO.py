@@ -56,7 +56,7 @@ def run_market_summaries(max_steps=None, progress_every=0):
     if summaries:
         df = pd.DataFrame(summaries)
         print("\n=== Market summaries ===")
-        print(df[["source", "pnl", "max_drawdown", "trades", "steps", "hold_pct"]])
+        print(df[["source", "pnl", "max_drawdown", "trades", "steps", "hold_pct", "p_bad_mean", "bad_rate"]])
     return summaries
 
 

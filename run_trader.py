@@ -372,6 +372,8 @@ def run_trading_loop(
         "pnl": total_pnl,
         "hold_pct": hold_pct,
         "max_drawdown": max_drawdown,
+        "p_bad_mean": float(np.mean(p_bad[: len(rows)])) if len(rows) else float("nan"),
+        "bad_rate": float(np.mean(bad_flag[: len(rows)])) if len(rows) else float("nan"),
     }
     pd.DataFrame([summary]).to_csv(
         RUN_HISTORY, mode="a", header=not RUN_HISTORY.exists(), index=False
