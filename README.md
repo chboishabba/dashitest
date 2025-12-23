@@ -22,6 +22,15 @@ To keep research and trading separate, CA metrics live in the lab. The key stati
 - **Market-driven CA (when forced by real data):** Input alignment (correlation of injected symbols vs CA state), lagged influence; identification of corridors, fracture zones, shutdown islands.
 - **Bridge to trading (epistemic only):** Permission surface stability (ACT fraction, volatility, clustering); inferred hysteresis (empirical tau_on/off, knee points from CA stats).
 - **Pathology checks:** Collapse (all 0), white-noise (flat entropy across scales), limit cycles, over-ban (M9 dominance).
+
+## PnL / finance metrics (audit stream, not “acceptable” criteria)
+To track outcomes alongside epistemic metrics (e.g., per tau_off sweep point):
+- **Per-bar fields (loggable):** price_t, ret_t, position_t, Δpos_t, fill_qty/price, fees_t, impact/slippage_t, pnl_gross_t, pnl_net_t, equity_t.
+- **Per-run summary:** total gross/net PnL, mean/stdev bar return, Sharpe/Sortino (consistent horizon), max drawdown, Calmar.
+- **Costs:** total fees; total impact/slippage; cost ratio ((fees+impact)/gross profit or turnover); PnL per trade (mean/median); tail losses per trade (e.g., 5th pct).
+- **Trading intensity:** #trades; turnover (∑|Δpos| or notional traded); time in market; ACT bars vs fills.
+- **Robustness:** win rate; profit factor (gross wins/gross losses); avg win/avg loss; exposure-weighted return; “edge after costs” = E[Δequity]/∑|Δpos|.
+- **Sweep reporting (per tau_off):** keep epistemic axes (acceptable%, precision, recall, act_bars, hold%) and add mean return, max DD, turnover/trades, fees+impact, net PnL. Useful plots: (1) Precision–Recall annotated with net PnL/max DD; (2) Net PnL vs Max DD (Pareto), colored by tau_off, sized by turnover.
 ## Trading stack: what is implemented today
 - **Triadic control loop (implemented):** `run_trader.py` computes a triadic latent state (`compute_triadic_state`) and drives exposure in {-1,0,+1}. It uses: HOLD decay, velocity-based exits, persistence ramp, risk targeting (`SIGMA_TARGET`, `DEFAULT_RISK_FRAC`), impact (`IMPACT_COEFF`), and fees (`cost`). This is the same simulator used by `run_all.py`.
 - **Epistemic gating & posture separation (implemented):** Strategy vs execution is split (`strategy/triadic_strategy.py` + `execution/bar_exec.py`). Prediction (state) is distinct from permission/posture; logs include `action`, `hold`, `acceptable`, `actionability` for downstream analysis.
