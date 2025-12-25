@@ -13,6 +13,136 @@
 - `strategy/`: Strategy logic (`triadic_strategy.py`) driving intents from states/confidence.
 - `scripts/ca_epistemic_tape.py`: Trading-driven CA visualization (epistemic tape) that injects triadic market features into a 2D CA and plots snapshots, motif triggers, and multiscale change rates. Research/diagnostic only (does not drive trading).
 
+## Full file index (every file/test)
+- `CHANGELOG.md`: Change history and release notes.
+- `CONTEXT.md`: Context notes for the repo and experiments.
+- `README.md`: Project overview and file index (this file).
+- `TODO.md`: Task backlog and future ideas.
+- `action_entropy.png`: Generated plot asset (action entropy).
+- `acceptable.png`: Generated plot asset (acceptable region).
+- `acceptable1.png`: Generated plot asset (acceptable variant).
+- `accept_persistence.png`: Generated plot asset (accept persistence).
+- `balanced_pn_iter_bench.py`: Benchmark for balanced P/N iterative add loops.
+- `block_sparse_moe_train.py`: Training script for block-sparse MoE models.
+- `block_sparse_tile_driver.py`: Driver for block-sparse tile experiments.
+- `ca_Figure_1.png`: Generated CA figure asset.
+- `ca_vis_Figure_0.png`: Generated CA visualization asset.
+- `ca_vis_Figure_1.png`: Generated CA visualization asset.
+- `ca_vis_Figure_2.png`: Generated CA visualization asset.
+- `ca_vis_Figure_3.png`: Generated CA visualization asset.
+- `ca_visualiser.py`: CA visualization utility.
+- `cluster_cull_bench.py`: Benchmark for cluster culling routine.
+- `cluster_cull_pqn_bench.py`: Benchmark for PQN cluster culling.
+- `compression/__init__.py`: Compression module init.
+- `compression/comp_ca.py`: CA generator/visualizer for compression experiments.
+- `compression/compression_bench.py`: Triadic CA compression benchmark.
+- `compression/compression_context.txt`: Long-form compression notes and hypotheses.
+- `compression/gpt2.py`: Compression experiment notes (gpt2).
+- `compression/gpt3.py`: Compression experiment notes (gpt3).
+- `compression/gpt4.py`: Compression experiment notes (gpt4).
+- `compression/naieve_i_think.py`: Sketch/notes for naive compression idea.
+- `compression/rans.py`: Range coder with rANS-like API.
+- `compression/triadic_pipeline.md`: Notes on triadic pipeline + per-plane Z2 quotient.
+- `compression/video_bench.py`: Video compression benchmark runner.
+- `confusion.png`: Generated plot asset (confusion surface).
+- `dashitest.old.keepme.py`: Legacy benchmark harness (kept for reference).
+- `dashitest.py`: SWAR XOR consumer benchmark driver.
+- `data_downloader.py`: Data fetcher for BTC market sources.
+- `dir_legit.png`: Generated plot asset (direction legitimacy).
+- `docs/bad_day.md`: Bad-day detection concept write-up.
+- `docs/compression_bench.md`: Compression benchmark notes.
+- `execution/__init__.py`: Execution package init.
+- `execution/bar_exec.py`: Bar-level execution backend.
+- `execution/base.py`: Base execution interface.
+- `execution/hft_exec.py`: HFT/LOB execution stub.
+- `execution/intent.py`: Intent datatypes and helpers.
+- `first_exit.png`: Generated plot asset (first-exit heatmap).
+- `five_trit_pack_bench.py`: Benchmark for 5-trit packing.
+- `fn_anatomy.png`: Generated plot asset (function anatomy).
+- `frontier_mask_bench.py`: Benchmark for frontier mask routine.
+- `fused_iter_bench.py`: Benchmark for fused iter XOR/threshold/dot loop.
+- `gf3_check_bench.py`: Benchmark for GF(3) check routines.
+- `gf3_parity_bench.py`: Benchmark for GF(3) parity routines.
+- `gpt_attach_1.py`: Attachment helper script (gpt_attach_1).
+- `gpt_attach_2.py`: Attachment helper script (gpt_attach_2).
+- `gpt_attach_3.py`: Attachment helper script (gpt_attach_3).
+- `homology.png`: Generated plot asset (homology).
+- `hysteresis_phase.png`: Generated plot asset (hysteresis phase).
+- `levin_ca_train.py`: Training script for Levin-style CA.
+- `margin.png`: Generated plot asset (legitimacy margin).
+- `microstructure.png`: Generated plot asset (microstructure).
+- `moe_fair_bench.py`: Benchmark for fair MoE routing.
+- `moe_fair_train.py`: Training script for fair MoE model.
+- `moe_sparse_bench.py`: Benchmark for sparse MoE routing.
+- `motif_ca.py`: Motif CA implementation.
+- `motif_ca_gpt-gen-lol.py`: Generated motif CA variant.
+- `notebooklm.chat`: Saved chat transcript/notes.
+- `optimal_packings_table.py`: Computes optimal trit packings table.
+- `packing_ablation_bench.py`: Benchmark for packing ablations.
+- `policy_curvature.png`: Generated plot asset (policy curvature).
+- `policy_distance.csv`: Output CSV for policy distance sweep.
+- `potts3_bench.py`: Potts model triadic benchmark.
+- `regime.py`: Regime model and helpers.
+- `regime_surface.png`: Generated plot asset (regime surface).
+- `regime_surface1.png`: Generated plot asset (regime surface variant).
+- `run_all.py`: Batch runner over cached markets.
+- `run_all_two_pointO.py`: Extended runner with sweeps and CA previews.
+- `run_trader.py`: Main bar-level trading simulator.
+- `runner.py`: Strategy + execution orchestrator.
+- `scripts/ca_epistemic_tape.py`: Epistemic tape CA generator and plots.
+- `scripts/compute_policy_distance.py`: Compute policy distance metrics.
+- `scripts/contextual_news.py`: Fetch/overlay news for windows.
+- `scripts/emit_news_windows.py`: Emit news windows for bad-day periods.
+- `scripts/news_slice.py`: Fetch news slice for a time window.
+- `scripts/plot_accept_persistence.py`: Plot accept persistence diagnostics.
+- `scripts/plot_acceptability.py`: Plot acceptability surface.
+- `scripts/plot_action_entropy.py`: Plot action entropy diagnostics.
+- `scripts/plot_confusion_surface.py`: Plot confusion surface.
+- `scripts/plot_direction_legitimacy.py`: Plot direction legitimacy.
+- `scripts/plot_engagement_surface.py`: Plot engagement surface.
+- `scripts/plot_first_exit_heatmap.py`: Plot first-exit heatmap.
+- `scripts/plot_fn_anatomy.py`: Plot function anatomy.
+- `scripts/plot_hysteresis_phase.py`: Plot hysteresis phase.
+- `scripts/plot_legitimacy_margin.py`: Plot legitimacy margin.
+- `scripts/plot_manifold_homology.py`: Plot manifold homology.
+- `scripts/plot_microstructure_overlay.py`: Plot microstructure overlay.
+- `scripts/plot_policy_curvature.py`: Plot policy curvature.
+- `scripts/plot_regime_surface.py`: Plot regime surface.
+- `scripts/plot_temporal_homology.py`: Plot temporal homology.
+- `scripts/plot_vector_field.py`: Plot vector field.
+- `scripts/rollup_bad_days.py`: Aggregate bad-day scores per day.
+- `scripts/run_bars_btc.py`: Build bars and run bar executor on BTC.
+- `scripts/score_bad_windows.py`: Score synthetic bad windows.
+- `scripts/sweep_confusion_surface.py`: Sweep confusion surface parameters.
+- `scripts/sweep_motif_hysteresis.py`: Sweep motif hysteresis parameters.
+- `scripts/sweep_regime_acceptability.py`: Sweep regime acceptability thresholds.
+- `scripts/sweep_tau_conf.py`: Sweep tau thresholds for PR curves.
+- `snapshot_bench.py`: Snapshot benchmark helper.
+- `sparse_iter_classifier_bench.py`: Benchmark for sparse iterative classifier loop.
+- `strategy/triadic_strategy.py`: Triadic strategy logic.
+- `surface.png`: Generated plot asset (surface).
+- `surface1.png`: Generated plot asset (surface variant).
+- `svo_traversal_bench.py`: SVO traversal benchmark.
+- `swar_test_harness.py`: SWAR test harness for ternary ops.
+- `temporal_homology.png`: Generated plot asset (temporal homology).
+- `ternary_alu_micro_bench.py`: Micro benchmark for ternary ALU ops.
+- `ternary_life_ca.py`: Ternary Life CA simulation.
+- `ternary_life_visualiser.py`: Visualizer for ternary Life CA.
+- `ternary_trading_demo.py`: Demo of ternary trading logic.
+- `test_trader_real_data.py`: Manual trader test on real data.
+- `tests/test_compression_bench.py`: Test for compression bench smoke.
+- `tests/test_rans.py`: Test for rANS/range coder roundtrip.
+- `tests/test_training_dashboard_pg.py`: Test for PyQtGraph dashboard smoke.
+- `tiled_ternary_dot_bench.py`: Tiled ternary dot product benchmark.
+- `training_dashboard.py`: Live training dashboard (matplotlib).
+- `training_dashboard_Figure_1.png`: Generated dashboard figure asset.
+- `training_dashboard_Figure_2.png`: Generated dashboard figure asset.
+- `training_dashboard_pg.py`: PyQtGraph live dashboard.
+- `triadic_nn_bench.py`: Triadic NN benchmark.
+- `triadic_nn_bench2.py`: Triadic NN benchmark (packed SWAR).
+- `vector_field.png`: Generated plot asset (vector field).
+- `z3_phase_fixedpoint_bench.py`: Z3 phase fixed-point benchmark.
+
 ## CA metrics wish-list (diagnostics, not implemented yet)
 To keep research and trading separate, CA metrics live in the lab. The key statistics we intend to collect when iterating on the CA prototypes:
 - **State occupancy:** Fractions of s∈{-1,0,+1}, g∈{BAN,HOLD,ACT}, and joint (s,g)/(s,φ) per step and aggregated.

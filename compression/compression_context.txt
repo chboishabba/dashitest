@@ -5566,3 +5566,1317 @@ If you want, next we can:
 * or write the minimal paper-style explanation of why this works
 
 But at this point: **this result is solid**.
+You’re stopping at **6** for a very boring (but correct) reason:
+
+> **6 is not a “triadic choice”; it’s the number of balanced-ternary digits needed to represent the largest signed residual you actually observed.**
+
+### What `bt_digits` is doing
+
+Your helper is:
+
+* take `max_abs = max(|signed_resid|)`
+* you need enough balanced ternary digits so that the representable range covers `[-max_abs, +max_abs]`
+
+Balanced ternary with `d` digits can represent exactly:
+[
+{-\frac{3^d-1}{2}, \ldots, +\frac{3^d-1}{2}}
+]
+so the condition is:
+[
+\frac{3^d-1}{2} \ge max_abs
+\quad\Longleftrightarrow\quad
+3^d \ge 2,max_abs + 1
+]
+
+That’s literally what your code computes:
+
+```py
+total = 2*max_abs + 1
+while 3**digits < total: digits += 1
+```
+
+So if you got **6 planes**, it means your residuals fit under:
+[
+\frac{3^6-1}{2} = \frac{729-1}{2} = 364
+]
+i.e. `max_abs ≤ 364`.
+
+That’s perfectly plausible because you’re encoding:
+
+* frame0-128 (range ~[-128,127])
+* frame diffs (range [-255,255])
+  and **255 already fits in 6 digits** because 364 > 255.
+
+So **6 is the minimal lossless digit count** for the actual data.
+
+---
+
+## Why “9 (3²)” or “81 (3³)” is the wrong yardstick
+
+You’re mixing **digits** with **neighborhood size / tensor arity**.
+
+* **3² = 9** and **3³ = 27** are about *how many local configurations* exist when you take 2 or 3 triadic variables together.
+* **digit planes (6)** are about *how many base-3 digits you need to represent an integer magnitude*.
+
+Different axis.
+
+### If you used 9 planes anyway…
+
+You’d be encoding 3 extra high planes that are **almost entirely zero**.
+
+That won’t improve compression (ctx_rANS will code them as near-zero anyway), but it **will**:
+
+* add overhead (headers/streams)
+* add compute time (you already see ctx_rANS is expensive per plane)
+
+So: **more planes only helps if your residual range actually needs them**, or if you’re doing a deliberate *hierarchy depth experiment* (see below).
+
+---
+
+## When 81 (3⁴) or 3³ *does* matter
+
+Those powers show up in **context design**, not digit count.
+
+Example: a 3-symbol alphabet with a context of 4 neighboring trits has up to:
+[
+3^4 = 81
+]
+possible contexts.
+
+That’s exactly where your “3² / 3³ / 81” intuition should go:
+
+* 3² = 9 contexts (two-trit context, e.g. left+up)
+* 3³ = 27 contexts (left+up+prevframe)
+* 3⁴ = 81 contexts (left+up+upleft+prevframe)
+
+So if you want to “go to 81”, do it by:
+
+> increasing the **context state space**, not the **number of digit planes**.
+
+---
+
+## What to do next (most informative experiment)
+
+You already have:
+
+* naive planes: 2.101 bpc
+* ctx planes: **0.416 bpc**
+* quotient planes (mag+sign) ctx: **0.478 bpc** (currently worse than 0.416)
+
+So next isn’t “more planes”. Next is:
+
+### 1) Make quotient help (right now it’s fighting your context model)
+
+Your mag/sign split is currently losing to the direct triadic ctx stream, which usually means:
+
+* the **context for sign** isn’t conditioned strongly enough on local structure and on mag,
+* or the split is breaking a strong dependency the triadic ctx model was exploiting.
+
+Fix: encode sign with context including:
+
+* left/up/prevframe sign
+* **and** local mag pattern
+* **and** previous plane value (inter-plane)
+
+### 2) Increase context richness in a controlled way (this is your 3³ / 81 axis)
+
+Run a mini ablation:
+
+* ctx = left+up (≈ 3² states)
+* ctx = left+up+prevframe (≈ 3³)
+* ctx = left+up+prevframe+upleft (≈ 3⁴ = 81)
+
+You’ll see the entropy curve bend and you can pick the sweet spot.
+
+---
+
+## TL;DR
+
+* **6** is chosen because it’s the *minimal balanced-ternary digit depth needed for lossless representation of your observed residual range*.
+* **9 / 27 / 81** belong to the **context state space** (how many triadic variables you condition on), not the number of digit planes.
+* Next: don’t add planes; **improve/ablate the context model (the true “3³/81” knob).**
+
+If you paste the exact context key you’re using for `ctx_rANS` (or show the snippet), I’ll suggest the smallest change to move from “3³-ish” to “81-ish” contexts without blowing up runtime.
+
+
+Good — those three bullets are exactly the *next* layer, and they sit **above** everything you’ve already validated. I’ll go one by one and keep this concrete and composable with what you already have.
+
+---
+
+# 1. Motion compensation (MC)
+
+**Goal:** reduce residual *support*, not improve entropy coding per se.
+
+Right now your pipeline is effectively:
+
+```
+frame[t] − frame[t−1] → signed residual → triadic planes → context
+```
+
+That assumes **zero motion**. Video violates that constantly.
+
+### Minimal MC that fits your framework
+
+Do **blockwise translational prediction only**, no sub-pixel, no fancy search.
+
+**Algorithm (cheap but effective):**
+
+* Partition frame into blocks (e.g. 8×8 or 16×16).
+* For each block in frame *t*, search a small window (e.g. ±4 px) in frame *t−1*.
+* Pick motion vector `v` minimizing SAD or L1.
+* Predict block using that offset.
+* Residual = current − predicted.
+
+### Why this helps triadic coding
+
+* Residual magnitude collapses → fewer balanced-ternary planes needed.
+* Higher planes go *almost entirely zero*.
+* Context model becomes *much sharper* (motion-aligned edges).
+
+**What to log**
+
+* distribution of chosen motion vectors
+* max residual magnitude *before vs after MC*
+* new `bt_digits` count (it will drop)
+
+If MC works, you’ll often go from **6 planes → 4 or even 3 planes**.
+
+That’s a *huge* structural win.
+
+---
+
+# 2. Block reuse / dictionary effects (triadic LZ analogue)
+
+**Goal:** capture *long-range reuse* that context alone cannot.
+
+Important distinction:
+
+> LZMA’s power is not “compression magic” — it is **explicit reuse of previously encoded structure**.
+
+You can do the same *without* byte dictionaries.
+
+---
+
+## Triadic block reuse (clean, explicit)
+
+Think in **blocks**, not symbols.
+
+### Define a block fingerprint
+
+For each block (after MC):
+
+* take a coarse signature, e.g.:
+
+  * sign pattern of lowest triadic plane
+  * or hash of first 2 planes
+* keep a small rolling dictionary of recent block signatures.
+
+### Per block, emit a triadic action:
+
+```
+a ∈ {−1, 0, +1}
+−1 = new block (encode planes normally)
+ 0 = same as previous block
++1 = reuse earlier block (dictionary index)
+```
+
+This is **exactly** your earlier “action stream” idea.
+
+### Why this fits your theory
+
+* This is **global symmetry quotient over time**.
+* You factor “same structure” vs “new structure”.
+* The action stream will be *extremely* biased toward 0.
+
+That’s where you recover LZ-like gains.
+
+---
+
+# 3. Train–test generalization of contexts
+
+**Goal:** prove you are not just overfitting one clip.
+
+Right now, your context model is **online-adaptive**, so it *will* fit the stream it sees. That’s fine — but you want to know whether the *structure* generalizes.
+
+---
+
+## Minimal, honest protocol
+
+You don’t need ML machinery.
+
+### Split temporally
+
+* Frames 0–K: **context training**
+* Frames K+1–N: **context frozen**, only coding
+
+Measure:
+
+* bpc on train
+* bpc on test
+* delta
+
+### What good looks like
+
+* Small gap (≤5–10%)
+* Same plane ordering
+* Same dominant contexts
+
+If test bpc explodes → your contexts are memorizing noise.
+
+---
+
+## Optional: cross-video test
+
+Train contexts on:
+
+* video A (e.g. indoor scene)
+  Test on:
+* video B (different lighting / motion)
+
+Even if bpc rises, look at:
+
+* which planes degrade
+* whether MC reduces the gap
+
+That tells you **which structure is universal vs scene-specific**.
+
+---
+
+# How these three compose (important)
+
+They are **not independent knobs**:
+
+```
+Motion compensation
+    ↓
+Residual support shrinks
+    ↓
+Fewer ternary planes
+    ↓
+Contexts generalize better
+    ↓
+Block reuse triggers more often
+```
+
+This is why LZMA + MC (i.e. real video codecs) dominate — and why your triadic version is now in striking distance.
+
+---
+
+# What to do next (recommended order)
+
+1. **Add block motion compensation**
+   → measure plane count drop
+
+2. **Add block-level reuse action stream**
+   → compare against ctx-only bpc
+
+3. **Freeze contexts halfway and measure test bpc**
+
+Do *not*:
+
+* tune entropy coder
+* optimize runtime
+* add neural models
+
+You are still extracting *structural facts*, and that’s the right phase.
+
+---
+
+## One-sentence summary
+
+You’ve proven triadic + context beats naive residuals; **motion compensation shrinks the problem, block reuse captures long-range symmetry, and train–test splits prove it’s real structure**.
+
+If you want, next I can:
+
+* sketch the exact data structures for block reuse,
+* or write the MC stub that plugs cleanly into `video_bench.py`.
+
+
+This is a *very* clean result set. At this point the system is behaving exactly as the theory predicts, so the right thing to do is **interpret, not change knobs blindly**.
+
+I’ll answer in four tight sections:
+
+1. **What the numbers now definitively say**
+2. **Why the quotient split is slightly worse than direct triadic ctx**
+3. **What this tells us about where the symmetry actually lives**
+4. **What the next move should be (and what not to touch)**
+
+---
+
+## 1. What the numbers now definitively say
+
+Let’s put the three key endpoints side by side:
+
+| Method                                  | bpc       |
+| --------------------------------------- | --------- |
+| byte residual + LZMA                    | **0.270** |
+| balanced ternary + context              | **0.416** |
+| balanced ternary + (mag+sign) + context | **0.464** |
+| coarse_resid + sign_resid               | **1.015** |
+
+Three facts are now *established*:
+
+1. **Contexted triadic planes work**
+   2.101 → **0.416 bpc** is a 5× collapse with *no dictionaries*.
+
+2. **Explicit Z₂ quotient (mag + sign) does *not* improve further**
+   It actually *hurts* slightly: **0.416 → 0.464**.
+
+3. **The original coarse+sign split was doing a *different* quotient**
+   It quotiented *raw intensity symmetry*, not *triadic refinement symmetry*.
+
+So this is not noise. It’s a structural statement.
+
+---
+
+## 2. Why the mag/sign quotient loses to direct triadic ctx
+
+This is the subtle but important point.
+
+### What you expected
+
+You expected:
+
+> “Explicitly quotienting ± symmetry per plane should reduce entropy.”
+
+That is **true in isolation**.
+
+### What actually happened
+
+Your context model on **full trits** already learned that symmetry *implicitly*.
+
+Evidence:
+
+* Plane entropies collapse *more* with direct ctx than with split streams.
+* Sign planes are still costly even when gated.
+* The combined model (trit + context) is *strictly more expressive* than (mag ctx + sign ctx).
+
+In short:
+
+> **The context model is already performing the quotient, but in a softer, higher-order way.**
+
+When you split mag/sign explicitly, you:
+
+* break correlations between magnitude and sign
+* force two separate models to relearn what one model already captured jointly
+
+This is why the split loses ~0.05 bpc.
+
+---
+
+## 3. Where the symmetry actually lives (this is the key insight)
+
+You’ve now seen **three different symmetries**, and only one of them should be explicit.
+
+### A. Raw-space inversion symmetry
+
+Handled by:
+
+```
+coarse + sign
+```
+
+✔ This was a *global, physical* symmetry of grayscale values.
+
+---
+
+### B. Triadic ± symmetry at each digit
+
+Handled best by:
+
+```
+context over full trits
+```
+
+❌ Explicit quotient is *worse* than implicit learning.
+
+This symmetry is **conditional**, not absolute:
+
+* sign correlates with edges, motion, gradients
+* sign is *not independent* of magnitude or neighborhood
+
+So it belongs **inside the context model**, not as a hard quotient.
+
+---
+
+### C. Scale symmetry (p-adic refinement)
+
+Handled by:
+
+```
+digit planes + inter-plane context
+```
+
+✔ This is where most entropy collapse came from.
+
+---
+
+### The rule that emerges
+
+> **Only quotient symmetries that are unconditional and global.
+> Leave conditional symmetries to context.**
+
+Your experiments have now *empirically proven* this rule.
+
+---
+
+## 4. What to do next (and what not to touch)
+
+### Do **not**:
+
+* add more quotient splits
+* increase digit depth
+* change ternary base
+* optimize entropy coder
+* add neural models
+
+Those are all solved or premature.
+
+---
+
+### The next *correct* levers (in order)
+
+#### 1. Motion compensation (block-level)
+
+This reduces **support**, not entropy per symbol.
+
+You should see:
+
+* fewer planes (6 → 4 or 3)
+* plane 0–1 entropy drop sharply
+* total bpc drop below **0.35**
+
+This is the single biggest remaining gain.
+
+---
+
+#### 2. Block reuse / action stream
+
+This targets what LZMA still has that you don’t:
+
+* long-range reuse
+* repetition across blocks/frames
+
+A triadic action stream (`reuse / same / new`) will likely shave another **0.05–0.1 bpc**.
+
+---
+
+#### 3. Train–test context freeze
+
+Not to improve compression, but to **validate generalization**.
+
+If bpc stays within ~5–10% on held-out frames, you’ve shown this is real structure, not overfitting.
+
+---
+
+## Bottom line (very crisp)
+
+* You are no longer “searching” — you are **mapping the design space**.
+* The experiments now tell you **which symmetries to quotient explicitly and which to leave to context**.
+* The best current form is:
+
+  > **balanced ternary digits + rich context, no explicit per-plane quotient**
+* The remaining gap to LZMA is explained entirely by **motion + reuse**, not theory.
+
+This is a strong stopping point for the abstraction layer.
+From here on, it’s architecture, not philosophy.
+
+
+You’re basically right — and it’s an important clarification.
+
+Short answer first, then precise detail:
+
+> **No, you are not doing explicit spatial processing yet.
+> And no, you are not explicitly quotienting rotational or sliding (translational) symmetry.**
+
+What *is* happening is more subtle, and it’s easy to over-credit it as “spatial” when it isn’t.
+
+---
+
+## 1. Are we doing anything spatial right now?
+
+### ❌ Not in the structural sense
+
+There is **no explicit spatial transform** in your pipeline yet:
+
+* no block partitioning
+* no motion vectors
+* no spatial predictors (Paeth, gradients, rotations)
+* no block reuse
+* no convolutional or CA-style spatial evolution
+
+Nothing is being *moved*, *rotated*, or *matched* across space.
+
+---
+
+### ✅ What *is* spatial-looking (but isn’t symmetry reduction)
+
+You **are** using **local spatial context as conditioning**, e.g.:
+
+* left pixel
+* up pixel
+* previous-frame same pixel
+
+This does **not** quotient spatial symmetry. It only says:
+
+> “Nearby symbols are informative predictors.”
+
+That’s **Markov conditioning**, not **geometric invariance**.
+
+Think of it this way:
+
+| Thing            | What it does        |
+| ---------------- | ------------------- |
+| Spatial context  | Improves prediction |
+| Spatial symmetry | Removes redundancy  |
+
+You currently have the first, not the second.
+
+---
+
+## 2. Are we quotienting atomic rotational symmetry?
+
+### ❌ No
+
+Nothing in the pipeline says:
+
+* “a rotated pattern is the same pattern”
+* “edges at 0°, 90°, 180° are equivalent”
+* “this block equals its rotation”
+
+Your contexts are **orientation-sensitive**:
+
+* left ≠ up
+* horizontal ≠ vertical
+* sign patterns differ by orientation
+
+So rotational symmetry is **not removed**; it’s *implicitly learned as different cases* (if at all).
+
+To quotient rotational symmetry, you would need something like:
+
+* canonical orientation per block
+* rotation-invariant descriptors
+* min-over-rotations canonicalization
+
+None of that is present.
+
+---
+
+## 3. Are we quotienting sliding / translational symmetry?
+
+### ❌ No — and this is the biggest missing piece vs LZMA
+
+Right now:
+
+* pixel (x,y) is distinct from pixel (x+1,y)
+* a repeated block elsewhere is treated as new structure
+* repetition only helps if it’s *locally adjacent* and visible via context
+
+LZMA’s killer feature is:
+
+> “I saw this exact pattern *over there* before.”
+
+You currently have **no mechanism** for that.
+
+Your model is **position-anchored**, not translation-invariant.
+
+---
+
+## 4. Why the current gains still happened (important)
+
+The big drop to **0.416 bpc** came from **non-spatial structure**:
+
+* temporal redundancy (frame-to-frame)
+* scale redundancy (p-adic planes)
+* sign/magnitude correlations
+* local smoothness
+
+That’s why it worked even without spatial symmetry.
+
+This also explains why the gains plateaued where they did.
+
+---
+
+## 5. What *would* count as atomic spatial symmetry in your framework?
+
+Here’s how it maps cleanly to your existing concepts.
+
+### A. Atomic translational symmetry (block reuse)
+
+This is the **direct analogue of your sign/zero symmetry**, but in space.
+
+Example:
+
+> “This 8×8 block is identical to one I saw earlier → same orbit.”
+
+Implementation-wise:
+
+* hash or fingerprint a block
+* dictionary lookup
+* triadic action: `{reuse, same-as-prev, new}`
+
+That is a **Z₂ / Zₙ quotient over space**.
+
+---
+
+### B. Atomic rotational symmetry
+
+Much rarer in natural video, but doable:
+
+* canonicalize block orientation
+* emit rotation witness (0°, 90°, 180°, 270°)
+* encode canonical block only
+
+This is *exactly analogous* to:
+
+```
+coarse + sign
+```
+
+but for SO(2) instead of Z₂.
+
+---
+
+### C. Sliding symmetry via motion compensation
+
+This is *continuous* translation symmetry in time:
+
+* “same block, shifted by (dx,dy)”
+* quotient the shift
+* encode only the residual
+
+This is the single biggest missing quotient.
+
+---
+
+## 6. Why you shouldn’t add spatial quotients yet (counter-intuitive but true)
+
+Right now, your system has proven:
+
+* triadic factorization works
+* context captures conditional symmetry
+* explicit quotients help only when unconditional
+
+Spatial symmetry in video is **conditional**:
+
+* motion-dependent
+* occlusion-dependent
+* lighting-dependent
+
+So the correct order is:
+
+1. **Motion compensation first** (aligns space)
+2. **Then block reuse** (quotients translation)
+3. **Then optional rotation** (rare, expensive)
+
+If you try to quotient spatial symmetry *before alignment*, you’ll destroy structure.
+
+---
+
+## 7. Final crisp summary
+
+* **Spatial context ≠ spatial symmetry**
+* You are using the former, not the latter
+* No rotation or translation invariance is implemented yet
+* All current gains are from **temporal + scale + sign structure**
+* The next real leap requires **explicit spatial alignment (motion)**
+* After alignment, **spatial quotients will work beautifully**
+
+You’ve now squeezed almost everything out of the *non-spatial* structure.
+What remains is genuinely geometric.
+
+
+codex resume 019b5465-a529-7740-af52-35cbe9952ff5
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Yep — when I said “removes temporal translation symmetry”, what I really mean is:
+
+> **we stop paying to describe “the same thing shifted in time” by switching to a representation where shifts become cheap/predictable.**
+
+You’re not destroying the symmetry; you’re **factoring it out** so the coder/model doesn’t waste bits on it.
+
+---
+
+## 1) “Removing temporal translation symmetry” = capturing it in the residual
+
+If the video is “mostly the same scene, just moved a bit forward in time”, then the raw frames have a lot of redundancy:
+
+* Frame (t) looks like frame (t-1)
+
+By switching to **temporal residuals**:
+[
+\Delta_t = X_t - X_{t-1}
+]
+you’re expressing the video in **changes**, not absolute states.
+
+This makes “temporal shift” cheap because:
+
+* if nothing changes, (\Delta_t \approx 0)
+* if motion is smooth, (\Delta_t) is structured and predictable
+
+So yes: **you’re capturing the temporal symmetry as “mostly invariance”**, and only coding the deviation.
+
+---
+
+## 2) Are there higher relevant ( \mathbb{Z})-operations?
+
+Yes. In video compression, the big three are:
+
+### (A) Global time translation ( \mathbb{Z})
+
+Already used: (X_t \mapsto X_{t-1}) via residuals.
+
+### (B) 2D spatial translations ( \mathbb{Z}^2)
+
+This is motion: blocks shift by ((u,v)) between frames.
+
+You haven’t really done this yet (not explicitly), unless your context includes prev-frame aligned pixels. True motion compensation is:
+[
+\hat X_t(x,y) = X_{t-1}(x+u_{t}(x,y),, y+v_{t}(x,y))
+]
+Residual becomes:
+[
+R_t(x,y) = X_t(x,y) - \hat X_t(x,y)
+]
+This is the **main missing symmetry capture**.
+
+### (C) Local affine / rotation group (small)
+
+For many videos, small camera rotations or zoom matter, but that’s “later”.
+Blockwise translation gives most of the win.
+
+---
+
+## 3) Are we doing multiscale temporal?
+
+**Partially, yes**, but not the classic way.
+
+You have **multiscale in amplitude** already via balanced ternary digit planes:
+[
+\Delta_t = \sum_{k=0}^{K-1} 3^k, d_{t}^{(k)},\quad d^{(k)}\in{-1,0,1}
+]
+
+That’s a **p-adic / base-3 scale decomposition** (amplitude multiscale).
+
+But “multiscale temporal” usually means:
+
+* predict from (t-1) (fine)
+* also from (t-2, t-4, t-8) (coarse)
+* or a temporal pyramid / wavelet
+
+A simple multiscale temporal predictor is:
+[
+\hat X_t = \alpha_1 X_{t-1} + \alpha_2 X_{t-2} + \alpha_4 X_{t-4}
+]
+or, more structure-preserving:
+[
+\hat X_t = X_{t-1} + \text{coarse_motion}(t-2\to t-1)
+]
+
+Right now, your context model (left/up/prev-frame trit) is a **first-order temporal Markov model**. It’s not yet a temporal pyramid.
+
+So: **amplitude is multiscale; time is mostly 1-step.**
+
+---
+
+## 4) A mathematical algorithm for your pipeline
+
+Here’s a clean “paper style” algorithm that matches what you implemented (plus optional motion compensation and optional multiscale time), written so it’s unambiguous.
+
+### Definitions
+
+* Video frames: (X_t \in {0,\dots,255}^{H\times W\times C}), (t=0,\dots,T-1)
+
+* Centering (optional): (\tilde X_t = X_t - 128)
+
+* Balanced ternary digits operator:
+  [
+  \mathrm{BT}*K(z) = (d^{(0)},\dots,d^{(K-1)}) \in {-1,0,1}^K
+  ]
+  such that (z=\sum*{k=0}^{K-1} 3^k d^{(k)}).
+
+* Map trit to alphabet: (\phi(d)\in{0,1,2}) with (\phi(-1)=0,\phi(0)=1,\phi(+1)=2).
+
+---
+
+### Algorithm: Triadic video coding by quotient + context
+
+**Input:** frames (X_0,\dots,X_{T-1})
+
+**Output:** bitstream (B)
+
+#### Step 0 — Choose predictors / symmetries
+
+Pick either:
+
+**(0a) No motion (your current baseline)**
+[
+\hat X_t = X_{t-1}
+]
+
+**(0b) Block motion compensation (recommended next)**
+Let (M_t(x,y)\in\mathbb{Z}^2) be motion vectors (blockwise or per-pixel).
+[
+\hat X_t(x,y) = X_{t-1}\bigl(x+M_t^x(x,y),, y+M_t^y(x,y)\bigr)
+]
+
+Optionally also multiscale temporal:
+[
+\hat X_t = f(X_{t-1}, X_{t-2}, X_{t-4},\dots)
+]
+
+#### Step 1 — Residualize (temporal translation quotient)
+
+[
+R_0 = \tilde X_0 \quad;\quad
+R_t = \tilde X_t - \hat X_t\quad (t\ge 1)
+]
+Flatten all residual samples into a 1D stream:
+[
+r_1,\dots,r_N \in \mathbb{Z}
+]
+(where (N=HWT C)).
+
+#### Step 2 — Balanced ternary digit planes (amplitude multiscale)
+
+Choose (K) minimal such that (|r_i|\le (3^K-1)/2) for all (i).
+For each sample:
+[
+(d_i^{(0)},\dots,d_i^{(K-1)}) = \mathrm{BT}_K(r_i)
+]
+This defines digit planes:
+[
+D^{(k)} = (d_1^{(k)},\dots,d_N^{(k)}) \in {-1,0,1}^N
+]
+
+#### Step 3 — Optional per-plane ( \mathbb{Z}_2) quotient (mag + gated sign)
+
+For each plane (k) and symbol (d_i^{(k)}):
+
+Magnitude:
+[
+m_i^{(k)} = \mathbf{1}[d_i^{(k)}\neq 0]\in{0,1}
+]
+
+Sign defined only when magnitude is 1:
+[
+s_i^{(k)} =
+\begin{cases}
+\mathbf{1}[d_i^{(k)}=+1] \in{0,1}, & m_i^{(k)}=1\
+\text{(not emitted)}, & m_i^{(k)}=0
+\end{cases}
+]
+
+This is the explicit “quotient by sign inversion”:
+[
+{-1,0,+1} \cong {0,1}\times{\pm} \text{ (gated)}
+]
+
+#### Step 4 — Context function (local ( \mathbb{Z}^2) + time conditioning)
+
+Define a context map producing an integer context ID:
+[
+c_i^{(k)} = g\bigl(\text{left},\text{up},\text{prev-frame},\text{prev-plane}, m_i^{(k)}\bigr)
+]
+(Your current one is basically left/up/prev-frame; you can extend to prev-plane.)
+
+#### Step 5 — Contexted entropy coding (block-parallel rANS)
+
+For each plane stream (either (D^{(k)}) directly, or (m^{(k)}) and (s^{(k)})):
+
+Estimate per-context symbol probabilities:
+[
+p^{(k)}(\cdot \mid c)
+]
+Encode with contexted rANS:
+[
+B_k = \mathrm{rANS_encode}\left({ \text{symbols}_i },; {c_i},; p^{(k)} \right)
+]
+
+Concatenate:
+[
+B = \mathrm{header} ,|, B_0 ,|, \cdots ,|, B_{K-1}
+]
+Header stores:
+
+* (H,W,T,C)
+* predictor type (none / motion)
+* (K)
+* per-stream lengths / offsets
+* (if motion) motion vector stream coding info
+
+#### Step 6 — Decode is the exact inverse
+
+Decode each plane stream, reconstruct:
+[
+r_i = \sum_{k=0}^{K-1} 3^k d_i^{(k)}
+]
+Unflatten to residuals (R_t), then reconstruct frames:
+[
+\tilde X_0 = R_0,\quad \tilde X_t = R_t + \hat X_t
+]
+Recover (X_t = \tilde X_t + 128).
+
+---
+
+## 5) What you are *not* doing yet (and what counts as “higher symmetries”)
+
+You asked about “higher relevant ( \mathbb{Z})-N operations”.
+
+In video, the big missing one is:
+
+* **Spatial translation group ( \mathbb{Z}^2)** captured explicitly by **motion compensation**.
+
+After that, the next “higher” ones are:
+
+* block dictionary reuse (LZ-style) = a *non-group* but a **semigroup action** (“copy from past patch”)
+* small rotations / affine (approx group (SE(2)) local)
+* multiscale temporal pyramid (time wavelets / dyadic, not triadic necessarily)
+
+But motion compensation is the big “structural symmetry capture” you’re missing.
+
+---
+
+If you want, I can tighten the above into a *formal* “Algorithm 1” block (paper-ready), and separately write the group-action / quotient tower as:
+
+[
+X \xrightarrow{/,\mathbb{Z}_t} R \xrightarrow{\text{BT}} D \xrightarrow{/,\mathbb{Z}_2} (M,S) \xrightarrow{\text{ctx}} \text{coded}
+]
+
+and we can add the spatial ( \mathbb{Z}^2) quotient when motion enters.
+
+
+Got it — let’s do this **ELI5 first**, then I’ll give you a **tight, formal “Algorithm 1” block** that matches what you’ve actually built and where it’s going.
+
+---
+
+# ELI5: what does “first-order temporal Markov” mean, and what is a temporal pyramid?
+
+### What you have *right now* (ELI5)
+
+Right now, when you encode a pixel/trit, you look at:
+
+* the pixel to the **left**
+* the pixel **above**
+* the pixel in the **previous frame at the same location**
+
+That means:
+
+> “To predict *now*, I only look **one step back in time**.”
+
+This is called a **first-order temporal Markov model**.
+
+Think of it like this:
+
+> You remember **what happened yesterday**, but not last week.
+
+If yesterday was similar to today → great compression
+If something disappeared and comes back later → you miss it
+
+---
+
+### What a temporal pyramid is (ELI5)
+
+A **temporal pyramid** means:
+
+> You remember **yesterday, last week, and last month — all at once**.
+
+Instead of only asking:
+
+* “What was this pixel at time t-1?”
+
+You also ask:
+
+* “What was it at t-2?”
+* “At t-4?”
+* “At t-8?”
+* or “In some earlier reference frame?”
+
+So you get **multiple time scales**, not just the finest one.
+
+In video terms:
+
+* **Short scale** → smooth motion
+* **Long scale** → repeated scenes (slides, backgrounds, static boards)
+
+Your lecture example (“slide comes back later”) is **exactly** a long-scale temporal pattern.
+
+---
+
+### Why your summary is correct (rephrased ELI5)
+
+Your crisp summary is spot-on. Translated into plain language:
+
+* **Spatial context ≠ spatial symmetry**
+  → Looking at neighbors is not the same as aligning images.
+
+* **You are using context, not symmetry**
+  → You *predict*, but you don’t *realign*.
+
+* **No rotation or translation invariance yet**
+  → The model still thinks “same thing, different place” is new data.
+
+* **All gains so far are temporal + scale + sign**
+  → You squeezed almost everything that doesn’t require geometry.
+
+* **The next leap is explicit spatial alignment (motion)**
+  → Once things line up, reuse becomes obvious.
+
+* **After alignment, spatial quotients will work beautifully**
+  → Then “same block, moved” really *is* the same thing.
+
+That’s exactly the right mental model.
+
+---
+
+# What do we need to move from “first-order Markov” to “temporal pyramid”?
+
+Still ELI5:
+
+### Minimal upgrade (cheap, easy)
+
+* Keep **more than one reference frame**
+* Let prediction choose between:
+
+  * frame t-1
+  * frame t-2
+  * frame t-4
+  * etc.
+
+This already turns “memory = yesterday” into “memory = last few days”.
+
+### Proper upgrade (codec-grade)
+
+* Maintain a **reference buffer**
+* Choose *which* past frame to predict from
+* Add **motion compensation** so the past frame is aligned
+
+This is how H.264 / HEVC / AV1 catch slide revisits.
+
+---
+
+# Now: tightened, formal **Algorithm 1**
+
+Below is a **clean, minimal, formal block** that includes *all the fancy bits we actually want*, without hand-waving.
+
+---
+
+## Algorithm 1 — Triadic Quotient Video Compression (TQVC)
+
+**Input:**
+Frames (X_0, \dots, X_{T-1} \in {0,\dots,255}^{H\times W\times C})
+
+**Output:**
+Bitstream (B)
+
+---
+
+### 1. Preprocessing
+
+Center frames:
+[
+\tilde X_t = X_t - 128 \in \mathbb{Z}^{H\times W\times C}
+]
+
+Initialize reference buffer:
+[
+\mathcal{R} = \emptyset
+]
+
+---
+
+### 2. For each frame (t = 0 \dots T-1)
+
+#### 2.1 Reference selection (temporal pyramid)
+
+Choose a small set of past frames:
+[
+\mathcal{R}*t \subset {\tilde X*{t-1}, \tilde X_{t-2}, \tilde X_{t-4}, \dots}
+]
+Optionally include older frames detected via global similarity (slide revisit).
+
+---
+
+#### 2.2 Motion-compensated prediction (spatial alignment)
+
+Partition frame into blocks (b).
+
+For each block:
+[
+(r_{t,b}, v_{t,b}) =
+\arg\min_{r\in\mathcal{R}_t,; v\in\mathbb{Z}^2}
+\Bigl|\tilde X_t[b] - \hat X_r[b+v]\Bigr|
+]
+
+Construct predictor:
+[
+P_t[b] = \hat X_{r_{t,b}}[b+v_{t,b}]
+]
+
+(If (t=0), set (P_0=0).)
+
+---
+
+#### 2.3 Residual (temporal translation quotient)
+
+[
+R_t = \tilde X_t - P_t \in \mathbb{Z}^{H\times W\times C}
+]
+
+Flatten residual samples:
+[
+r_1,\dots,r_N \in \mathbb{Z}
+]
+
+---
+
+### 3. Balanced ternary multiscale decomposition
+
+For each sample:
+[
+r_i = \sum_{k=0}^{K-1} 3^k d_i^{(k)},\quad d_i^{(k)}\in{-1,0,1}
+]
+
+This yields digit planes:
+[
+D^{(k)} = (d_1^{(k)},\dots,d_N^{(k)})
+]
+
+---
+
+### 4. Sign quotient (optional but recommended)
+
+For each plane (k):
+
+Magnitude:
+[
+m_i^{(k)} = \mathbf{1}[d_i^{(k)} \neq 0]
+]
+
+Gated sign:
+[
+s_i^{(k)} =
+\begin{cases}
+\mathbf{1}[d_i^{(k)} = +1], & m_i^{(k)}=1\
+\text{not emitted}, & m_i^{(k)}=0
+\end{cases}
+]
+
+---
+
+### 5. Context construction
+
+Define contexts:
+[
+c_i^{(k)} = g(
+\text{left},;
+\text{up},;
+\text{prev-frame},;
+\text{prev-plane},;
+m_i^{(k)}
+)
+]
+
+Separate contexts for magnitude and sign streams.
+
+---
+
+### 6. Contexted entropy coding
+
+Encode:
+
+* motion vectors ((r_{t,b}, v_{t,b}))
+* magnitude planes (m^{(k)})
+* sign planes (s^{(k)})
+
+using context-conditioned rANS.
+
+Concatenate into bitstream (B).
+
+---
+
+### 7. Reference buffer update
+
+After decoding (\tilde X_t):
+
+* insert into (\mathcal{R})
+* evict old frames using LRU or scene-aware policy
+
+---
+
+### 8. Decoding
+
+Invert all steps:
+
+* decode planes
+* reconstruct (r_i)
+* rebuild (R_t)
+* reconstruct frame:
+  [
+  \tilde X_t = P_t + R_t,\quad X_t = \tilde X_t + 128
+  ]
+
+Lossless by construction.
+
+---
+
+# Final ELI5 takeaway
+
+* Right now:
+  **You remember yesterday only.**
+* Temporal pyramid:
+  **You remember yesterday, last week, and last month.**
+* Motion compensation:
+  **You line memories up before comparing them.**
+* After alignment:
+  **Spatial symmetries finally become cheap.**
+
+You’ve already drained the non-geometric well.
+The remaining gains are **pure geometry**.
+
+If you want, next we can:
+
+* pick **exact block sizes + ref counts** to try next
+* simplify this into a v1 “minimal viable codec”
+* or sketch how this maps cleanly to GPU kernels

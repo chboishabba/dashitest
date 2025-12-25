@@ -4,6 +4,8 @@ import os
 import subprocess
 import sys
 import time
+import zlib
+from collections import deque
 from pathlib import Path
 from typing import Dict, Tuple
 
@@ -93,6 +95,91 @@ def _balanced_digits_needed(values: np.ndarray) -> int:
     while 3**digits < total:
         digits += 1
     return digits
+
+
+def _motion_compensated_residual(
+    frames: np.ndarray, block: int = 8, search: int = 4
+) -> tuple[np.ndarray, dict]:
+    """Return signed residuals after blockwise translational motion compensation."""
+    t, h, w = frames.shape
+    if t <= 1:
+        base = frames[0].astype(np.int16) - 128
+        return base.ravel(), {"mv_counts": {(0, 0): (h // block) * (w // block)}, "max_abs": int(np.max(np.abs(base)))}
+
+    residuals = []
+    mv_counts: dict[tuple[int, int], int] = {}
+    max_abs = 0
+    for ti in range(t):
+        if ti == 0:
+            base = frames[0].astype(np.int16) - 128
+            residuals.append(base)
+            max_abs = max(max_abs, int(np.max(np.abs(base))))
+            continue
+        prev = frames[ti - 1].astype(np.int16)
+        cur = frames[ti].astype(np.int16)
+        pred = np.zeros_like(cur)
+        for y in range(0, h, block):
+            for x in range(0, w, block):
+                y0 = min(y, h - block)
+                x0 = min(x, w - block)
+                block_cur = cur[y0 : y0 + block, x0 : x0 + block]
+                best_sad = None
+                best = (0, 0)
+                for dy in range(-search, search + 1):
+                    for dx in range(-search, search + 1):
+                        y1 = np.clip(y0 + dy, 0, h - block)
+                        x1 = np.clip(x0 + dx, 0, w - block)
+                        cand = prev[y1 : y1 + block, x1 : x1 + block]
+                        sad = int(np.abs(block_cur - cand).sum())
+                        if best_sad is None or sad < best_sad:
+                            best_sad = sad
+                            best = (dy, dx)
+                mv_counts[best] = mv_counts.get(best, 0) + 1
+                y1 = np.clip(y0 + best[0], 0, h - block)
+                x1 = np.clip(x0 + best[1], 0, w - block)
+                pred[y0 : y0 + block, x0 : x0 + block] = prev[y1 : y1 + block, x1 : x1 + block]
+        res = cur - pred
+        residuals.append(res)
+        max_abs = max(max_abs, int(np.max(np.abs(res))))
+
+    stacked = np.stack(residuals, axis=0)
+    return stacked.ravel(), {"mv_counts": mv_counts, "max_abs": max_abs}
+
+
+def _triadic_block_actions(
+    planes: np.ndarray, block: int = 8, dict_size: int = 256
+) -> np.ndarray:
+    """Return triadic action stream for block reuse based on the first two planes."""
+    if planes.shape[0] < 2:
+        return np.array([], dtype=np.int8)
+    _, t, h, w = planes.shape
+    actions = []
+    recent = deque(maxlen=dict_size)
+    recent_set: set[int] = set()
+    prev_sig = None
+    for ti in range(t):
+        for y in range(0, h, block):
+            for x in range(0, w, block):
+                y0 = min(y, h - block)
+                x0 = min(x, w - block)
+                block0 = planes[0, ti, y0 : y0 + block, x0 : x0 + block]
+                block1 = planes[1, ti, y0 : y0 + block, x0 : x0 + block]
+                sig = zlib.crc32(block0.tobytes()) ^ zlib.crc32(block1.tobytes())
+                if prev_sig is not None and sig == prev_sig:
+                    act = 0
+                elif sig in recent_set:
+                    act = 1
+                else:
+                    act = -1
+                actions.append(act)
+                prev_sig = sig
+                if sig not in recent_set:
+                    if len(recent) == dict_size:
+                        old = recent.popleft()
+                        recent_set.discard(old)
+                    recent.append(sig)
+                    recent_set.add(sig)
+    return np.array(actions, dtype=np.int8)
 
 
 def _build_context_tables(
@@ -244,6 +331,190 @@ def _encode_binary_plane_contexted(
     return enc.finish()
 
 
+def _build_gated_sign_tables(
+    mag: np.ndarray,
+    sign: np.ndarray,
+    prev_sign: np.ndarray | None,
+    alpha: float = 0.5,
+    min_count: int = 16,
+) -> list[rans.FreqTable]:
+    """Build context tables for gated sign bits using sign + mag neighbors and prev-plane sign."""
+    t, h, w = sign.shape
+    contexts = 128  # 2^7
+    counts = np.zeros((contexts, 2), dtype=np.int64)
+
+    def idx_from_bits(a: int, b: int, c: int, d: int, e: int, f: int, g: int) -> int:
+        return (((((((a << 1) | b) << 1) | c) << 1 | d) << 1 | e) << 1 | f) << 1 | g
+
+    for ti in range(t):
+        for yi in range(h):
+            row = sign[ti, yi]
+            mag_row = mag[ti, yi]
+            up = sign[ti, yi - 1] if yi > 0 else None
+            up_mag = mag[ti, yi - 1] if yi > 0 else None
+            prev_frame = sign[ti - 1, yi] if ti > 0 else None
+            prev_mag = mag[ti - 1, yi] if ti > 0 else None
+            prev_p = prev_sign[ti, yi] if prev_sign is not None else None
+            for xi in range(w):
+                if mag_row[xi] == 0:
+                    continue
+                left = int(row[xi - 1]) if xi > 0 else 0
+                up_val = int(up[xi]) if up is not None else 0
+                prev_val = int(prev_frame[xi]) if prev_frame is not None else 0
+                prevp_val = int(prev_p[xi]) if prev_p is not None else 0
+                left_mag = int(mag_row[xi - 1]) if xi > 0 else 0
+                up_mag_val = int(up_mag[xi]) if up_mag is not None else 0
+                prev_mag_val = int(prev_mag[xi]) if prev_mag is not None else 0
+                ctx = idx_from_bits(prevp_val, prev_val, up_val, left, prev_mag_val, up_mag_val, left_mag)
+                counts[ctx, int(row[xi])] += 1
+
+    tables: list[rans.FreqTable] = []
+    for ctx in range(contexts):
+        freq = counts[ctx].astype(np.float64)
+        if freq.sum() < min_count:
+            freq = counts.sum(axis=0).astype(np.float64)
+        freq += alpha
+        total = freq.sum()
+        scaled = np.maximum(1, np.floor(freq / total * rans.MAX_TOTAL)).astype(np.int64)
+        diff = rans.MAX_TOTAL - int(scaled.sum())
+        if diff > 0:
+            scaled[:diff] += 1
+        elif diff < 0:
+            idx = np.where(scaled > 1)[0]
+            take = min(-diff, len(idx))
+            scaled[idx[:take]] -= 1
+        tables.append(rans.FreqTable.from_freqs(scaled.astype(int).tolist()))
+    return tables
+
+
+def _encode_gated_sign_contexted(
+    mag: np.ndarray,
+    sign: np.ndarray,
+    prev_sign: np.ndarray | None,
+    tables: list[rans.FreqTable],
+) -> bytes:
+    t, h, w = sign.shape
+    enc = rans.RangeEncoder()
+
+    def idx_from_bits(a: int, b: int, c: int, d: int, e: int, f: int, g: int) -> int:
+        return (((((((a << 1) | b) << 1) | c) << 1 | d) << 1 | e) << 1 | f) << 1 | g
+
+    for ti in range(t):
+        for yi in range(h):
+            row = sign[ti, yi]
+            mag_row = mag[ti, yi]
+            up = sign[ti, yi - 1] if yi > 0 else None
+            up_mag = mag[ti, yi - 1] if yi > 0 else None
+            prev_frame = sign[ti - 1, yi] if ti > 0 else None
+            prev_mag = mag[ti - 1, yi] if ti > 0 else None
+            prev_p = prev_sign[ti, yi] if prev_sign is not None else None
+            for xi in range(w):
+                if mag_row[xi] == 0:
+                    continue
+                left = int(row[xi - 1]) if xi > 0 else 0
+                up_val = int(up[xi]) if up is not None else 0
+                prev_val = int(prev_frame[xi]) if prev_frame is not None else 0
+                prevp_val = int(prev_p[xi]) if prev_p is not None else 0
+                left_mag = int(mag_row[xi - 1]) if xi > 0 else 0
+                up_mag_val = int(up_mag[xi]) if up_mag is not None else 0
+                prev_mag_val = int(prev_mag[xi]) if prev_mag is not None else 0
+                ctx = idx_from_bits(prevp_val, prev_val, up_val, left, prev_mag_val, up_mag_val, left_mag)
+                enc.encode(int(row[xi]), tables[ctx])
+    return enc.finish()
+
+
+def _encode_plane_contexted_range(
+    plane: np.ndarray,
+    prev_plane: np.ndarray | None,
+    tables: list[rans.FreqTable],
+    start_t: int,
+) -> bytes:
+    t, h, w = plane.shape
+    enc = rans.RangeEncoder()
+
+    def idx_from_trits(a: int, b: int, c: int, d: int) -> int:
+        return (((a * 3 + b) * 3 + c) * 3 + d)
+
+    for ti in range(start_t, t):
+        for yi in range(h):
+            row = plane[ti, yi]
+            up = plane[ti, yi - 1] if yi > 0 else None
+            prev_frame = plane[ti - 1, yi] if ti > 0 else None
+            prev_p = prev_plane[ti, yi] if prev_plane is not None else None
+            for xi in range(w):
+                left = row[xi - 1] if xi > 0 else 0
+                up_val = up[xi] if up is not None else 0
+                prev_val = prev_frame[xi] if prev_frame is not None else 0
+                prevp_val = prev_p[xi] if prev_p is not None else 0
+                ctx = idx_from_trits(prevp_val + 1, prev_val + 1, up_val + 1, left + 1)
+                enc.encode(int(row[xi] + 1), tables[ctx])
+    return enc.finish()
+
+
+def _encode_binary_plane_contexted_range(
+    plane: np.ndarray,
+    prev_plane: np.ndarray | None,
+    tables: list[rans.FreqTable],
+    start_t: int,
+) -> bytes:
+    t, h, w = plane.shape
+    enc = rans.RangeEncoder()
+
+    def idx_from_bits(a: int, b: int, c: int, d: int) -> int:
+        return (((a << 1) | b) << 2) | (c << 1) | d
+
+    for ti in range(start_t, t):
+        for yi in range(h):
+            row = plane[ti, yi]
+            up = plane[ti, yi - 1] if yi > 0 else None
+            prev_frame = plane[ti - 1, yi] if ti > 0 else None
+            prev_p = prev_plane[ti, yi] if prev_plane is not None else None
+            for xi in range(w):
+                left = int(row[xi - 1]) if xi > 0 else 0
+                up_val = int(up[xi]) if up is not None else 0
+                prev_val = int(prev_frame[xi]) if prev_frame is not None else 0
+                prevp_val = int(prev_p[xi]) if prev_p is not None else 0
+                ctx = idx_from_bits(prevp_val, prev_val, up_val, left)
+                enc.encode(int(row[xi]), tables[ctx])
+    return enc.finish()
+
+
+def _encode_gated_sign_contexted_range(
+    mag: np.ndarray,
+    sign: np.ndarray,
+    prev_sign: np.ndarray | None,
+    tables: list[rans.FreqTable],
+    start_t: int,
+) -> bytes:
+    t, h, w = sign.shape
+    enc = rans.RangeEncoder()
+
+    def idx_from_bits(a: int, b: int, c: int, d: int, e: int, f: int, g: int) -> int:
+        return (((((((a << 1) | b) << 1) | c) << 1 | d) << 1 | e) << 1 | f) << 1 | g
+
+    for ti in range(start_t, t):
+        for yi in range(h):
+            row = sign[ti, yi]
+            mag_row = mag[ti, yi]
+            up = sign[ti, yi - 1] if yi > 0 else None
+            up_mag = mag[ti, yi - 1] if yi > 0 else None
+            prev_frame = sign[ti - 1, yi] if ti > 0 else None
+            prev_mag = mag[ti - 1, yi] if ti > 0 else None
+            prev_p = prev_sign[ti, yi] if prev_sign is not None else None
+            for xi in range(w):
+                if mag_row[xi] == 0:
+                    continue
+                left = int(row[xi - 1]) if xi > 0 else 0
+                up_val = int(up[xi]) if up is not None else 0
+                prev_val = int(prev_frame[xi]) if prev_frame is not None else 0
+                prevp_val = int(prev_p[xi]) if prev_p is not None else 0
+                left_mag = int(mag_row[xi - 1]) if xi > 0 else 0
+                up_mag_val = int(up_mag[xi]) if up_mag is not None else 0
+                prev_mag_val = int(prev_mag[xi]) if prev_mag is not None else 0
+                ctx = idx_from_bits(prevp_val, prev_val, up_val, left, prev_mag_val, up_mag_val, left_mag)
+                enc.encode(int(row[xi]), tables[ctx])
+    return enc.finish()
+
 def compress_stats(name: str, payload: bytes) -> Dict[str, float]:
     import gzip
     import lzma
@@ -264,7 +535,178 @@ def compress_stats(name: str, payload: bytes) -> Dict[str, float]:
     return stats
 
 
-def run_video_bench(path: Path, max_frames: int) -> None:
+def _report_triadic(
+    label: str,
+    signed_resid: np.ndarray,
+    frames: np.ndarray,
+    height: int,
+    width: int,
+    pixels: int,
+    train_split: float,
+    block_reuse: bool,
+) -> None:
+    bt_digits = _balanced_digits_needed(signed_resid)
+    bt_planes = _balanced_ternary_digits(signed_resid, bt_digits)
+    bt_planes_u8 = (bt_planes + 1).astype(np.uint8)  # map {-1,0,1} -> {0,1,2}
+    bt_planes_i8 = bt_planes.astype(np.int8).reshape(bt_digits, frames.shape[0], height, width)
+    bt_mag = np.abs(bt_planes_i8).astype(np.uint8)
+    bt_sign = (bt_planes_i8 > 0).astype(np.uint8)
+
+    train_frames = max(1, int(frames.shape[0] * train_split))
+
+    print(f"\n{label} balanced ternary digits: {bt_digits} planes")
+    plane_bytes = []
+    ctx_plane_bytes = []
+    ctx_test_bytes = []
+    for idx in range(bt_digits):
+        plane = bt_planes_u8[idx]
+        ent = stream_entropy(plane)
+        start = time.perf_counter()
+        enc = rans.encode(plane, alphabet=3)
+        ms = (time.perf_counter() - start) * 1000.0
+        plane_bytes.append(len(enc))
+        bpc = (len(enc) * 8) / pixels
+        print(
+            f"bt_plane{idx:<2} entropy={ent:6.3f}  "
+            f"rANS {len(enc):8d} ({bpc:5.3f} bpc, {ms:5.1f} ms)"
+        )
+        ctx_start = time.perf_counter()
+        prev_plane = bt_planes_i8[idx - 1] if idx > 0 else None
+        tables = _build_context_tables(bt_planes_i8[idx], prev_plane)
+        ctx_enc = _encode_plane_contexted(bt_planes_i8[idx], prev_plane, tables)
+        ctx_ms = (time.perf_counter() - ctx_start) * 1000.0
+        ctx_plane_bytes.append(len(ctx_enc))
+        ctx_bpc = (len(ctx_enc) * 8) / pixels
+        print(
+            f"bt_plane{idx:<2} ctx_rANS {len(ctx_enc):8d} ({ctx_bpc:5.3f} bpc, {ctx_ms:5.1f} ms)"
+        )
+        if train_frames < frames.shape[0]:
+            train_tables = _build_context_tables(bt_planes_i8[idx][:train_frames], prev_plane[:train_frames] if prev_plane is not None else None)
+            test_enc = _encode_plane_contexted_range(bt_planes_i8[idx], prev_plane, train_tables, train_frames)
+            ctx_test_bytes.append(len(test_enc))
+
+    total_bt = sum(plane_bytes)
+    bpc_bt = (total_bt * 8) / pixels
+    print(f"\n{label} multistream (balanced ternary planes via rANS): {total_bt} bytes ({bpc_bt:5.3f} bpc)")
+    total_ctx = sum(ctx_plane_bytes)
+    bpc_ctx = (total_ctx * 8) / pixels
+    print(f"{label} multistream (balanced ternary planes ctx_rANS): {total_ctx} bytes ({bpc_ctx:5.3f} bpc)")
+    if ctx_test_bytes:
+        total_test = sum(ctx_test_bytes)
+        test_pixels = pixels * (frames.shape[0] - train_frames) / frames.shape[0]
+        bpc_test = (total_test * 8) / max(1.0, test_pixels)
+        print(f"{label} multistream (balanced ternary planes ctx_rANS test-only): {total_test} bytes ({bpc_test:5.3f} bpc)")
+
+    # Per-plane Z2 quotient: magnitude plane + gated sign stream
+    print(f"\n{label} balanced ternary plane quotient (mag + gated sign)")
+    mag_bytes = []
+    mag_ctx_bytes = []
+    sign_bytes = []
+    sign_ctx_bytes = []
+    sign_ctx_test_bytes = []
+    for idx in range(bt_digits):
+        mag = bt_mag[idx]
+        sign = bt_sign[idx]
+        sign_mask = mag.astype(bool)
+        sign_stream = sign[sign_mask]
+
+        mag_ent = stream_entropy(mag.ravel())
+        start = time.perf_counter()
+        mag_enc = rans.encode(mag.ravel(), alphabet=2)
+        mag_ms = (time.perf_counter() - start) * 1000.0
+        mag_bytes.append(len(mag_enc))
+        mag_bpc = (len(mag_enc) * 8) / pixels
+
+        ctx_start = time.perf_counter()
+        prev_mag = bt_mag[idx - 1] if idx > 0 else None
+        mag_tables = _build_binary_context_tables(mag, prev_mag)
+        mag_ctx_enc = _encode_binary_plane_contexted(mag, prev_mag, mag_tables)
+        mag_ctx_ms = (time.perf_counter() - ctx_start) * 1000.0
+        mag_ctx_bytes.append(len(mag_ctx_enc))
+        mag_ctx_bpc = (len(mag_ctx_enc) * 8) / pixels
+
+        sign_ent = stream_entropy(sign_stream.astype(np.uint8)) if sign_stream.size else 0.0
+        start = time.perf_counter()
+        sign_enc = rans.encode(sign_stream.astype(np.uint8), alphabet=2)
+        sign_ms = (time.perf_counter() - start) * 1000.0
+        sign_bytes.append(len(sign_enc))
+        sign_bpc = (len(sign_enc) * 8) / pixels
+
+        ctx_sign_ms = 0.0
+        if sign_stream.size:
+            ctx_start = time.perf_counter()
+            prev_sign = bt_sign[idx - 1] if idx > 0 else None
+            sign_tables = _build_gated_sign_tables(mag, sign, prev_sign)
+            sign_ctx_enc = _encode_gated_sign_contexted(mag, sign, prev_sign, sign_tables)
+            ctx_sign_ms = (time.perf_counter() - ctx_start) * 1000.0
+            sign_ctx_bytes.append(len(sign_ctx_enc))
+        else:
+            sign_ctx_bytes.append(0)
+        sign_ctx_bpc = (sign_ctx_bytes[-1] * 8) / pixels
+
+        if train_frames < frames.shape[0] and sign_stream.size:
+            prev_sign = bt_sign[idx - 1] if idx > 0 else None
+            train_tables = _build_gated_sign_tables(
+                mag[:train_frames],
+                sign[:train_frames],
+                prev_sign[:train_frames] if prev_sign is not None else None,
+            )
+            test_enc = _encode_gated_sign_contexted_range(
+                mag,
+                sign,
+                prev_sign,
+                train_tables,
+                train_frames,
+            )
+            sign_ctx_test_bytes.append(len(test_enc))
+
+        print(
+            f"bt_plane{idx:<2} mag_ent={mag_ent:5.3f} "
+            f"rANS {len(mag_enc):7d} ({mag_bpc:5.3f} bpc, {mag_ms:5.1f} ms)  "
+            f"ctx {len(mag_ctx_enc):7d} ({mag_ctx_bpc:5.3f} bpc, {mag_ctx_ms:5.1f} ms)  "
+            f"sign_ent={sign_ent:5.3f} "
+            f"sign_rANS {len(sign_enc):7d} ({sign_bpc:5.3f} bpc, {sign_ms:5.1f} ms)  "
+            f"sign_ctx {sign_ctx_bytes[-1]:7d} ({sign_ctx_bpc:5.3f} bpc, {ctx_sign_ms:5.1f} ms)"
+        )
+
+    total_mag = sum(mag_bytes)
+    total_mag_ctx = sum(mag_ctx_bytes)
+    total_sign = sum(sign_bytes)
+    total_sign_ctx = sum(sign_ctx_bytes)
+    total_q = total_mag + total_sign
+    total_q_ctx = total_mag_ctx + total_sign
+    total_q_ctx_sign = total_mag_ctx + total_sign_ctx
+    print(f"\n{label} multistream (bt mag + sign via rANS): {total_q} bytes ({(total_q * 8) / pixels:5.3f} bpc)")
+    print(f"{label} multistream (bt mag ctx + sign via rANS): {total_q_ctx} bytes ({(total_q_ctx * 8) / pixels:5.3f} bpc)")
+    print(f"{label} multistream (bt mag ctx + sign ctx via rANS): {total_q_ctx_sign} bytes ({(total_q_ctx_sign * 8) / pixels:5.3f} bpc)")
+    if sign_ctx_test_bytes:
+        total_sign_ctx_test = sum(sign_ctx_test_bytes)
+        total_q_ctx_sign_test = total_mag_ctx + total_sign_ctx_test
+        test_pixels = pixels * (frames.shape[0] - train_frames) / frames.shape[0]
+        bpc_test = (total_q_ctx_sign_test * 8) / max(1.0, test_pixels)
+        print(f"{label} multistream (bt mag ctx + sign ctx test-only): {total_q_ctx_sign_test} bytes ({bpc_test:5.3f} bpc)")
+
+    if block_reuse:
+        actions = _triadic_block_actions(bt_mag.astype(np.int8), block=8)
+        if actions.size:
+            action_syms = (actions + 1).astype(np.uint8)
+            ent = stream_entropy(action_syms)
+            start = time.perf_counter()
+            enc = rans.encode(action_syms, alphabet=3)
+            ms = (time.perf_counter() - start) * 1000.0
+            bpb = (len(enc) * 8) / max(1, action_syms.size)
+            print(f"{label} block_action entropy={ent:6.3f}  rANS {len(enc):8d} ({bpb:5.3f} bpb, {ms:5.1f} ms)")
+
+
+def run_video_bench(
+    path: Path,
+    max_frames: int,
+    mc: bool,
+    mc_block: int,
+    mc_search: int,
+    train_split: float,
+    block_reuse: bool,
+) -> None:
     width, height, nb_frames = ffprobe_video(path)
     frames = decode_gray(path, width, height, max_frames)
     actual_frames = frames.shape[0]
@@ -285,12 +727,6 @@ def run_video_bench(path: Path, max_frames: int) -> None:
         signed_resid = np.concatenate([base.ravel(), diffs_signed.ravel()])
     else:
         signed_resid = base.ravel()
-    bt_digits = _balanced_digits_needed(signed_resid)
-    bt_planes = _balanced_ternary_digits(signed_resid, bt_digits)
-    bt_planes_u8 = (bt_planes + 1).astype(np.uint8)  # map {-1,0,1} -> {0,1,2}
-    bt_planes_i8 = bt_planes.astype(np.int8).reshape(bt_digits, actual_frames, height, width)
-    bt_mag = np.abs(bt_planes_i8).astype(np.uint8)
-    bt_sign = (bt_planes_i8 > 0).astype(np.uint8)
 
     # Orbit canonicalization for grayscale: reflect around mid (127.5)
     coarse = np.minimum(raw_stream, 255 - raw_stream).astype(np.uint8)  # orbit ID
@@ -347,100 +783,59 @@ def run_video_bench(path: Path, max_frames: int) -> None:
         bpc_combined = (total_bytes * 8) / pixels
         print(f"\nmultistream ({label} via rANS): {total_bytes} bytes ({bpc_combined:5.3f} bpc)")
 
-    # Balanced ternary planes for signed temporal residuals (lossless triadic)
-    print(f"\nbalanced ternary digits for signed residuals: {bt_digits} planes")
-    plane_bytes = []
-    ctx_plane_bytes = []
-    for idx in range(bt_digits):
-        plane = bt_planes_u8[idx]
-        ent = stream_entropy(plane)
-        start = time.perf_counter()
-        enc = rans.encode(plane, alphabet=3)
-        ms = (time.perf_counter() - start) * 1000.0
-        plane_bytes.append(len(enc))
-        bpc = (len(enc) * 8) / pixels
+    _report_triadic(
+        label="base",
+        signed_resid=signed_resid,
+        frames=frames,
+        height=height,
+        width=width,
+        pixels=pixels,
+        train_split=train_split,
+        block_reuse=block_reuse,
+    )
+
+    if mc:
+        mc_resid, stats = _motion_compensated_residual(frames, block=mc_block, search=mc_search)
         print(
-            f"bt_plane{idx:<2} entropy={ent:6.3f}  "
-            f"rANS {len(enc):8d} ({bpc:5.3f} bpc, {ms:5.1f} ms)"
+            f"\nmc stats: block={mc_block} search={mc_search} "
+            f"max_abs={stats['max_abs']} mv_unique={len(stats['mv_counts'])}"
         )
-        ctx_start = time.perf_counter()
-        prev_plane = bt_planes_i8[idx - 1] if idx > 0 else None
-        tables = _build_context_tables(bt_planes_i8[idx], prev_plane)
-        ctx_enc = _encode_plane_contexted(bt_planes_i8[idx], prev_plane, tables)
-        ctx_ms = (time.perf_counter() - ctx_start) * 1000.0
-        ctx_plane_bytes.append(len(ctx_enc))
-        ctx_bpc = (len(ctx_enc) * 8) / pixels
-        print(
-            f"bt_plane{idx:<2} ctx_rANS {len(ctx_enc):8d} ({ctx_bpc:5.3f} bpc, {ctx_ms:5.1f} ms)"
+        _report_triadic(
+            label="mc",
+            signed_resid=mc_resid,
+            frames=frames,
+            height=height,
+            width=width,
+            pixels=pixels,
+            train_split=train_split,
+            block_reuse=block_reuse,
         )
-    total_bt = sum(plane_bytes)
-    bpc_bt = (total_bt * 8) / pixels
-    print(f"\nmultistream (balanced ternary planes via rANS): {total_bt} bytes ({bpc_bt:5.3f} bpc)")
-    total_ctx = sum(ctx_plane_bytes)
-    bpc_ctx = (total_ctx * 8) / pixels
-    print(f"multistream (balanced ternary planes ctx_rANS): {total_ctx} bytes ({bpc_ctx:5.3f} bpc)")
-
-    # Per-plane Z2 quotient: magnitude plane + gated sign stream
-    print("\nbalanced ternary plane quotient (mag + gated sign)")
-    mag_bytes = []
-    mag_ctx_bytes = []
-    sign_bytes = []
-    for idx in range(bt_digits):
-        mag = bt_mag[idx]
-        sign = bt_sign[idx]
-        sign_mask = mag.astype(bool)
-        sign_stream = sign[sign_mask]
-
-        mag_ent = stream_entropy(mag.ravel())
-        start = time.perf_counter()
-        mag_enc = rans.encode(mag.ravel(), alphabet=2)
-        mag_ms = (time.perf_counter() - start) * 1000.0
-        mag_bytes.append(len(mag_enc))
-        mag_bpc = (len(mag_enc) * 8) / pixels
-
-        ctx_start = time.perf_counter()
-        prev_mag = bt_mag[idx - 1] if idx > 0 else None
-        mag_tables = _build_binary_context_tables(mag, prev_mag)
-        mag_ctx_enc = _encode_binary_plane_contexted(mag, prev_mag, mag_tables)
-        mag_ctx_ms = (time.perf_counter() - ctx_start) * 1000.0
-        mag_ctx_bytes.append(len(mag_ctx_enc))
-        mag_ctx_bpc = (len(mag_ctx_enc) * 8) / pixels
-
-        sign_ent = stream_entropy(sign_stream.astype(np.uint8)) if sign_stream.size else 0.0
-        start = time.perf_counter()
-        sign_enc = rans.encode(sign_stream.astype(np.uint8), alphabet=2)
-        sign_ms = (time.perf_counter() - start) * 1000.0
-        sign_bytes.append(len(sign_enc))
-        sign_bpc = (len(sign_enc) * 8) / pixels
-
-        print(
-            f"bt_plane{idx:<2} mag_ent={mag_ent:5.3f} "
-            f"rANS {len(mag_enc):7d} ({mag_bpc:5.3f} bpc, {mag_ms:5.1f} ms)  "
-            f"ctx {len(mag_ctx_enc):7d} ({mag_ctx_bpc:5.3f} bpc, {mag_ctx_ms:5.1f} ms)  "
-            f"sign_ent={sign_ent:5.3f} "
-            f"sign_rANS {len(sign_enc):7d} ({sign_bpc:5.3f} bpc, {sign_ms:5.1f} ms)"
-        )
-
-    total_mag = sum(mag_bytes)
-    total_mag_ctx = sum(mag_ctx_bytes)
-    total_sign = sum(sign_bytes)
-    total_q = total_mag + total_sign
-    total_q_ctx = total_mag_ctx + total_sign
-    print(f"\nmultistream (bt mag + sign via rANS): {total_q} bytes ({(total_q * 8) / pixels:5.3f} bpc)")
-    print(f"multistream (bt mag ctx + sign via rANS): {total_q_ctx} bytes ({(total_q_ctx * 8) / pixels:5.3f} bpc)")
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Benchmark triadic-style compression vs ffmpeg file.")
     parser.add_argument("video", type=Path, help="Path to input video (e.g., MP4).")
     parser.add_argument("--frames", type=int, default=120, help="Max frames to decode for the benchmark.")
+    parser.add_argument("--mc", action="store_true", help="Enable blockwise motion compensation.")
+    parser.add_argument("--mc-block", type=int, default=8, help="Block size for motion compensation.")
+    parser.add_argument("--mc-search", type=int, default=4, help="Search radius for motion compensation.")
+    parser.add_argument("--train-split", type=float, default=0.5, help="Fraction of frames used for context training.")
+    parser.add_argument("--block-reuse", action="store_true", help="Emit block reuse action stream stats.")
     args = parser.parse_args(argv)
 
     if not args.video.exists():
         print(f"Video not found: {args.video}", file=sys.stderr)
         sys.exit(1)
 
-    run_video_bench(args.video, max_frames=args.frames)
+    run_video_bench(
+        args.video,
+        max_frames=args.frames,
+        mc=args.mc,
+        mc_block=args.mc_block,
+        mc_search=args.mc_search,
+        train_split=args.train_split,
+        block_reuse=args.block_reuse,
+    )
 
 
 if __name__ == "__main__":
