@@ -35,6 +35,7 @@ def load_log(path: pathlib.Path):
 
 def synthetic_log(n=1000):
     t = np.arange(n)
+    ts = pd.Timestamp("2024-01-01") + pd.to_timedelta(t, unit="h")
     price = 100 + np.cumsum(np.random.normal(0, 0.2, size=n))
     pnl = 100000 + np.cumsum(np.random.normal(0, 1, size=n))
     p_bad = np.clip(np.random.beta(2, 5, size=n), 0, 1)
@@ -52,6 +53,7 @@ def synthetic_log(n=1000):
             "action": action,
             "hold": hold,
             "volume": volume,
+            "ts": ts,
         }
     )
 
@@ -62,6 +64,76 @@ def rolling_hold(log, window=100):
     return log["hold"].rolling(window, min_periods=1).mean()
 
 
+def list_csv_logs(log_dir: pathlib.Path):
+    if not log_dir.exists():
+        return []
+    return sorted(p for p in log_dir.glob("*.csv") if p.is_file())
+
+
+def select_log_path(cli_log: str | None, logs_dir: pathlib.Path, choice_idx: int | None = None):
+    """
+    Resolve the log path. If cli_log is provided, use it. Otherwise, list CSVs under logs_dir
+    and let the user pick (defaulting to the newest).
+    """
+    if cli_log:
+        return pathlib.Path(cli_log)
+
+    candidates = list_csv_logs(logs_dir)
+    if not candidates:
+        default_path = logs_dir / "trading_log.csv"
+        print(f"No CSV logs found under {logs_dir}. Falling back to {default_path} (may be missing).")
+        return default_path
+
+    newest = max(candidates, key=lambda p: p.stat().st_mtime)
+    if choice_idx is not None:
+        if 1 <= choice_idx <= len(candidates):
+            return candidates[choice_idx - 1]
+        print(f"[log-index] {choice_idx} out of range 1..{len(candidates)}; falling back to prompt.")
+
+    print("Select a log CSV (Enter = newest):")
+    for idx, path in enumerate(candidates, 1):
+        print(f"  [{idx}] {path.name}")
+
+    try:
+        choice = input(f"Choice [Enter for {newest.name}]: ").strip()
+    except EOFError:
+        choice = ""
+
+    if choice.isdigit():
+        idx = int(choice)
+        if 1 <= idx <= len(candidates):
+            return candidates[idx - 1]
+
+    return newest
+
+
+def prepare_progressive_view(log, day_idx, day_keys, refresh_s, progressive_days):
+    """
+    Apply progressive-day filtering and return the filtered log, parsed timestamps,
+    updated day_keys, and next day_idx.
+    """
+    ts_dt = None
+    if "ts" in log.columns:
+        ts_dt = pd.to_datetime(log["ts"], errors="coerce")
+
+    if progressive_days and ts_dt is not None and ts_dt.notna().any():
+        ts_days = ts_dt.dt.normalize()
+        candidate_keys = np.sort(ts_days.dropna().unique())
+        if day_keys is None or len(day_keys) != len(candidate_keys) or not np.array_equal(day_keys, candidate_keys):
+            day_keys = candidate_keys
+        if day_keys is not None and len(day_keys) > 0:
+            day_idx = min(day_idx, len(day_keys) - 1)
+            visible_days = set(day_keys[: day_idx + 1])
+            log = log.loc[ts_days.isin(visible_days)]
+            if refresh_s > 0 and day_idx < len(day_keys) - 1:
+                day_idx += 1
+
+    if ts_dt is not None:
+        ts_dt = ts_dt.loc[log.index]
+
+    return log, ts_dt, day_keys, day_idx
+
+
 class Dashboard(QtWidgets.QMainWindow):
     def __init__(self, log_path: pathlib.Path, refresh_s: float, progressive_days: bool):
         super().__init__()
@@ -70,6 +142,7 @@ class Dashboard(QtWidgets.QMainWindow):
         self.progressive_days = progressive_days
         self.day_idx = 0
         self.day_keys = None
+        self.progressive_warned = False
         self.posture_spans = []
         self.init_ui()
         self.timer = QtCore.QTimer()
@@ -173,32 +246,24 @@ class Dashboard(QtWidgets.QMainWindow):
         log = load_log(self.log_path)
         if log is None or log.empty:
             log = synthetic_log()
+            if self.progressive_days and not self.progressive_warned:
+                print("[progressive-days] Log missing/empty; using synthetic data with hourly timestamps.")
+                self.progressive_warned = True
 
-        # Progressive reveal by day (ts required)
-        ts_dt = None
-        if "ts" in log.columns:
-            ts_dt = pd.to_datetime(log["ts"], errors="coerce")
+        log, ts_dt, self.day_keys, self.day_idx = prepare_progressive_view(
+            log=log,
+            day_idx=self.day_idx,
+            day_keys=self.day_keys,
+            refresh_s=self.refresh_s,
+            progressive_days=self.progressive_days,
+        )
 
-        if self.progressive_days and ts_dt is not None and ts_dt.notna().any():
-            ts_days = ts_dt.dt.normalize()
-            day_keys = ts_days.dropna().unique()
-            day_keys.sort()
-            if self.day_keys is None or len(self.day_keys) != len(day_keys) or not np.array_equal(
-                self.day_keys, day_keys
-            ):
-                self.day_keys = day_keys
-            if self.day_keys is not None and len(self.day_keys) > 0:
-                # Clamp day index
-                self.day_idx = min(self.day_idx, len(self.day_keys) - 1)
-                visible_days = set(self.day_keys[: self.day_idx + 1])
-                mask = ts_days.isin(visible_days)
-                log = log.loc[mask]
-                # Advance for next frame if possible
-                if self.refresh_s > 0 and self.day_idx < len(self.day_keys) - 1:
-                    self.day_idx += 1
+        if self.progressive_days and (ts_dt is None or not ts_dt.notna().any()) and not self.progressive_warned:
+            print("[progressive-days] ts column missing or unparseable; showing full data.")
+            self.progressive_warned = True
 
         if ts_dt is not None and ts_dt.notna().any():
-            x = ts_dt.loc[log.index]
+            x = ts_dt
         else:
             x = log["ts"] if "ts" in log.columns and log["ts"].notna().any() else log["t"]
         price = log["price"]
@@ -294,16 +359,19 @@ class Dashboard(QtWidgets.QMainWindow):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--log", type=str, default="logs/trading_log.csv", help="CSV log file path")
+    ap.add_argument("--log", type=str, default=None, help="CSV log file path")
     ap.add_argument("--refresh", type=float, default=1.0, help="Refresh seconds; set 0 for one-shot")
     ap.add_argument(
         "--progressive-days",
         action="store_true",
         help="Progressively reveal data day-by-day on each refresh (requires ts column).",
     )
+    ap.add_argument("--logs-dir", type=str, default="logs", help="Directory to search for CSV logs when --log not set.")
+    ap.add_argument("--log-index", type=int, default=None, help="Select log by index from listed logs (1-based).")
     args = ap.parse_args()
 
-    log_path = pathlib.Path(args.log)
+    log_path = select_log_path(args.log, pathlib.Path(args.logs_dir), choice_idx=args.log_index)
+    print(f"Using log: {log_path}")
     app = QtWidgets.QApplication([])
     dash = Dashboard(log_path=log_path, refresh_s=args.refresh, progressive_days=args.progressive_days)
     dash.show()
