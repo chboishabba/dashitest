@@ -3247,3 +3247,1702 @@ Add:
 ---
 
 If you want, I’ll condense this into a single “Per sweep point report” schema (a fixed set of columns) that matches how you already output `acceptable/precision/recall/act_bars/hold%`, so your sweeps automatically produce the Pareto plots.
+
+
+
+
+› Short answer: **no — we did not explicitly outline an rANS algorithm in this chat**.
+
+  What *did* happen is that you **implicitly described an entropy-coder setup that is compatible with rANS**, but we never wrote down the **actual rANS state machine** or its encode/decode steps.
+
+  Let me be very precise and grounded here.
+
+  ---
+
+  ## What we *did* outline (implicitly)
+
+  Across the compression discussion, you already had all the **inputs rANS needs**, just not the **coder itself**:
+
+  ### You defined:
+
+  * A **ternary alphabet** `{−1, 0, +1}`
+  * Strongly **non-uniform symbol distributions**
+  * **Contextual structure** (CA state, regime, motif scale)
+  * A **quotiented / canonical representation** (symmetry reduction)
+  * A belief that p-adic / base-3 structure acts as an entropy model
+
+  That is *exactly* what rANS consumes:
+
+  > a stream of symbols + a probability model
+
+  So conceptually:
+
+  * You designed the **model**
+  * You did *not* specify the **entropy coder**
+
+  ---
+
+  ## What we did *not* do (important)
+
+  We did **not**:
+
+  * Define the rANS state `x`
+  * Define symbol frequency tables `freq[s]`
+  * Define cumulative distribution `cdf[s]`
+  * Write the **push / pop equations**
+  * Specify renormalisation bounds
+  * Describe bitstream I/O
+
+  So no — there is **no rANS algorithm written down yet**.
+
+  ---
+
+  ## The missing piece: rANS in your language
+
+  Here is the **clean minimal outline**, mapped to *your* system (ternary + regimes).
+
+  ---
+
+  ## rANS — algorithm outline (concrete)
+
+  ### 1. Choose a precision
+
+  Pick a total frequency `M = 2^k` (e.g. 4096).
+
+  All symbol frequencies must sum to `M`.
+
+  ---
+
+  ### 2. Build a model (this is where your CA matters)
+
+  For each **context** `c` (e.g. regime, scale, anchor):
+
+  ```text
+  freq_c(-1), freq_c(0), freq_c(+1)
+  ```
+
+  Estimated from:
+
+  * CA tape
+  * motif counts
+  * regime statistics
+
+  This is where your compression *actually* comes from.
+
+  ---
+
+  ### 3. rANS state
+
+  Maintain an integer state:
+
+  ```text
+  x ∈ [L, 2L)
+  ```
+
+  Typically `L = M`.
+
+  ---
+
+  ### 4. Encoding step (per symbol)
+
+  For symbol `s` with frequency `f = freq[s]`
+  and cumulative offset `cdf[s]`:
+
+  ```text
+  while x >= f * L:
+      output x % b
+      x //= b
+
+  x = floor(x / f) * M + (x % f) + cdf[s]
+  ```
+
+  (`b` is the I/O radix, e.g. 256)
+
+  ---
+
+  ### 5. Decoding step (inverse)
+
+  Given `x`:
+
+  ```text
+  y = x % M
+  find s such that cdf[s] ≤ y < cdf[s] + freq[s]
+
+  x = f * floor(x / M) + (y - cdf[s])
+
+  while x < L:
+      x = x * b + input()
+  ```
+
+  ---
+
+  ## Where your work plugs in (this is the key insight)
+
+  You are **not inventing a new entropy coder**.
+
+  You are inventing a **better probability model**.
+
+  Specifically:
+
+  * CA + symmetry quotienting → **lower entropy contexts**
+  * Context-conditioned symbol probabilities → **shorter codes**
+  * BAN / HOLD / ACT regimes → **model switching**
+  * p-adic / ternary structure → **natural alphabet**
+
+  rANS just converts that into bits.
+
+  ---
+
+  ## Why your intuition about “beating Shannon” keeps coming up
+
+  Because Shannon’s bound applies to:
+
+  > *a fixed alphabet with a fixed distribution*
+
+  You are doing:
+
+  * context splitting
+  * symmetry quotienting
+  * regime-conditioned models
+
+  That reduces entropy **before** coding.
+
+  PNG does the same thing.
+  Video codecs do the same thing.
+  You are not cheating.
+
+  ---
+
+  ## Bottom line
+
+  * ❌ No, we did **not** outline rANS explicitly
+  * ✅ You already built the **harder half** (the entropy model)
+  * 🔑 rANS is the correct, boring, standard back-end
+
+  ### Next clean steps (if you want)
+
+  1. Fix contexts (what switches models)
+  2. Estimate ternary frequencies per context
+  3. Drop in a reference rANS implementation
+  4. Measure bits / symbol vs noise baseline
+
+  If you want, I can:
+
+  * write a **minimal ternary rANS encoder** in Python, or
+  * help you design the **context tree** so rANS actually shines
+
+  You’re closer than you think — this is the *plumbing stage*, not the theory stage.
+
+
+
+The “1.58 thing” was:
+
+**(\log_2(3) \approx 1.5849625)**
+
+Meaning:
+
+* A **uniform trit** (3 equiprobable symbols) carries **~1.585 bits** of information.
+* So the Shannon lower bound for coding a length-(N) uniform ternary string is **~(1.585N) bits**.
+
+Two useful corollaries you were leaning on:
+
+* **Best possible bits per trit** (uniform) ≈ **1.585**
+* **Best possible trits per bit** ≈ (1/\log_2(3)=\log_3(2)\approx 0.63093)
+
+If your trits aren’t uniform (e.g. HOLD dominates), the entropy per trit is **less than 1.585**, and rANS can get close to that.
+
+---
+
+## Designing a context tree so rANS actually shines
+
+rANS “shines” when the model makes the next symbol distribution *very skewed* (low entropy). The trick is to add context only when it **predictably changes** the symbol mix, without exploding the number of contexts.
+
+### 1) Pick the coded symbol stream
+
+Decide what you’re encoding with rANS. Common options in your setup:
+
+* **Action symbol**: `a_t ∈ {-1,0,+1}` (ACT/HOLD/BAN or signed action)
+* **Residual / delta**: e.g. sign of return bucketed, or change in CA cell
+* **Motif events**: sparse event stream (often compresses insanely well)
+
+Start with **action symbols** because it’s already triadic and very non-uniform.
+
+---
+
+### 2) Start with a *tiny* context (big win, low risk)
+
+A really strong baseline is a Markov-1 action model:
+
+**Context = previous action**
+
+* `c = a_{t-1}`
+* model `P(a_t | a_{t-1})`
+
+This often collapses entropy because HOLD runs are long, and transitions are structured.
+
+---
+
+### 3) Add one “regime” bit that actually matters
+
+Your logs already have good candidates:
+
+* `bad_flag` or **quantized p_bad** into 3 bins: `{-1,0,+1}`
+* volatility bucket (e.g. `vol_q ∈ {low, mid, high}`)
+* spread/impact proxy bucket (if you have it)
+
+A good next context:
+
+**Context = (a_{t-1}, p_bad_bin)**
+That’s only `3 * 3 = 9` contexts. Very manageable.
+
+---
+
+### 4) Add “time since last switch” (run-length) as a bucket
+
+Markets + your controller both generate persistence. rANS loves run-length structure.
+
+Let:
+
+* `r = min(run_length_of_same_action, cap)` bucketed into e.g. `{0,1,2-3,4-7,8+}`
+
+Context:
+
+**(a_{t-1}, p_bad_bin, r_bucket)**
+
+That’s still small: `3 * 3 * 5 = 45` contexts.
+
+---
+
+### 5) Only then consider CA/motif features (coarse!)
+
+CA features can explode contexts if you’re not careful.
+
+Use **tiny quantizations**, like:
+
+* `tension_bucket ∈ {low, mid, high}`
+* `change_rate_bucket(scale=4) ∈ {low, high}`
+* or “motif present?” as a boolean
+
+Then try:
+
+**(a_{t-1}, p_bad_bin, r_bucket, tension_bucket)**
+
+Keep total contexts under a few hundred at first.
+
+---
+
+## Practical guardrails (so it doesn’t get worse)
+
+### A) Backoff / smoothing is mandatory
+
+Some contexts will be rare → if you fit raw frequencies, rANS will overfit and get worse.
+
+Use:
+
+* add-α smoothing (Dirichlet), or
+* backoff: if context count < K, drop the last feature.
+
+### B) Measure “bits per trit” per added feature
+
+Add one feature at a time and track:
+
+* cross-entropy on a held-out segment
+* final compressed size (rANS)
+
+If bits/trit doesn’t drop, that feature doesn’t belong (or needs coarser bins).
+
+---
+
+## A concrete first version (I’d implement this tomorrow)
+
+Encode `a_t ∈ {-1,0,+1}` with contexts:
+
+1. `c0 = ()` (global)
+2. `c1 = (a_{t-1})`
+3. `c2 = (a_{t-1}, p_bad_bin)`
+4. `c3 = (a_{t-1}, p_bad_bin, r_bucket)`
+
+Use backoff: prefer deepest available context with enough counts.
+
+This is small, robust, and usually produces a very visible gain.
+
+---
+
+If you tell me what exact triadic stream you want to compress first (actions? CA cell deltas? motif events?), I’ll pin down the context variables + bin edges that match your logs and won’t blow up.
+
+
+Yep — what you pasted is exactly the situation: you’re *measuring residual+gzip-ish*, not “triadic+context”.
+
+If you want to **exercise the triadic claim**, you need two things at once:
+
+1. a **real entropy coder** (ANS/rANS *or* a proper arithmetic/range coder), and
+2. a **context model** that makes the ternary stream low-entropy (otherwise you’ll just rediscover (\log_2 3 \approx 1.585) bits/trit).
+
+Given repo constraints + speed, the “legal” move is: **implement a range coder behind the `rans` API**, and run it on the **triadic action stream** with your backoff contexts. Range coding is not “cheating”; it’s a real entropy coder and will validate the model.
+
+Below is a drop-in, *repo-friendly* implementation plan with concrete deliverables and code.
+
+---
+
+## Deliverables for your team
+
+### A) Replace the shim with a real coder
+
+* **`compression/rans.py`**: implement **range encoder/decoder** (arithmetic coding).
+* Keep the existing API shape (e.g. `compress(data, ...)` / `decompress(...)`) but add a triadic path.
+
+### B) Add a triadic stream + context model
+
+* **`compression/triadic_context.py`**:
+
+  * map actions to symbols `{0,1,2}` for `{-1,0,+1}`
+  * context features: `(prev_action)`, `(prev_action, p_bad_bin)`, `(prev_action, p_bad_bin, runlen_bucket)`
+  * **backoff** + **smoothing** so it doesn’t blow up.
+
+### C) Add a benchmark script
+
+* **`scripts/bench_triadic_actions.py`**
+
+  * read your `logs/trading_log*.csv`
+  * build `a_t`, `p_bad_bin`, `runlen_bucket`
+  * report:
+
+    * empirical entropy (bits/trit) per context depth
+    * compressed bytes / bits per trit
+    * compare vs `gzip` (stdlib), optionally `zstd` / `xz` if installed
+
+### D) Tests that prove correctness
+
+* **`tests/test_triadic_codec.py`**:
+
+  * roundtrip correctness for random triadic streams
+  * roundtrip correctness for *contexted* stream
+  * sanity: compressed size <= raw size for “sticky HOLD” synthetic stream
+
+---
+
+## Code: a real range coder (entropy coder)
+
+This is a compact **byte-oriented range coder** (classic arithmetic coding style) using cumulative frequencies. It supports any small alphabet (here 3), and works fine with context models.
+
+Create/replace: **`compression/rans.py`** (even if you keep the filename, it won’t be “rANS” anymore — but it *will* be a real coder and will unblock you. You can later swap to rANS with the same model.)
+
+```python
+# compression/rans.py
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import List, Tuple
+
+# A small, correct range coder suitable for benchmarking models.
+# Not an optimized production codec, but *real* entropy coding (unlike zlib shim).
+
+TOP = 1 << 24          # normalization threshold
+MASK32 = (1 << 32) - 1
+
+@dataclass
+class FreqTable:
+    # cumulative frequencies: cum[0]=0, cum[i+1]=cum[i]+freq[i]
+    cum: List[int]      # length = K+1
+    total: int          # cum[-1]
+
+    @classmethod
+    def from_freqs(cls, freqs: List[int]) -> "FreqTable":
+        cum = [0]
+        s = 0
+        for f in freqs:
+            if f <= 0:
+                raise ValueError("All freqs must be positive")
+            s += int(f)
+            cum.append(s)
+        return cls(cum=cum, total=s)
+
+    def sym_to_range(self, sym: int) -> Tuple[int, int]:
+        lo = self.cum[sym]
+        hi = self.cum[sym + 1]
+        return lo, hi
+
+    def range_to_sym(self, x: int) -> int:
+        # Find sym such that cum[sym] <= x < cum[sym+1]
+        # K is tiny (3), linear search is fine and deterministic.
+        for s in range(len(self.cum) - 1):
+            if self.cum[s] <= x < self.cum[s + 1]:
+                return s
+        raise ValueError("Bad cumulative lookup")
+
+
+class RangeEncoder:
+    def __init__(self) -> None:
+        self.low = 0
+        self.range = 0xFFFFFFFF
+        self.out = bytearray()
+
+    def _normalize(self) -> None:
+        while self.range < TOP:
+            self.out.append((self.low >> 24) & 0xFF)
+            self.low = (self.low << 8) & MASK32
+            self.range = (self.range << 8) & MASK32
+
+    def encode(self, sym: int, ft: FreqTable) -> None:
+        self._normalize()
+        r = self.range // ft.total
+        lo, hi = ft.sym_to_range(sym)
+        self.low = (self.low + r * lo) & MASK32
+        self.range = (r * (hi - lo)) & MASK32
+
+    def finish(self) -> bytes:
+        # Flush 4 bytes of low for decoder bootstrap
+        for _ in range(4):
+            self.out.append((self.low >> 24) & 0xFF)
+            self.low = (self.low << 8) & MASK32
+        return bytes(self.out)
+
+
+class RangeDecoder:
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+        self.pos = 0
+        self.low = 0
+        self.range = 0xFFFFFFFF
+        self.code = 0
+        for _ in range(4):
+            self.code = ((self.code << 8) | self._read_byte()) & MASK32
+
+    def _read_byte(self) -> int:
+        if self.pos >= len(self.data):
+            return 0
+        b = self.data[self.pos]
+        self.pos += 1
+        return b
+
+    def _normalize(self) -> None:
+        while self.range < TOP:
+            self.code = ((self.code << 8) | self._read_byte()) & MASK32
+            self.low = (self.low << 8) & MASK32
+            self.range = (self.range << 8) & MASK32
+
+    def decode(self, ft: FreqTable) -> int:
+        self._normalize()
+        r = self.range // ft.total
+        # value in [0, total)
+        x = ((self.code - self.low) // r) if r else 0
+        sym = ft.range_to_sym(int(x))
+        lo, hi = ft.sym_to_range(sym)
+        self.low = (self.low + r * lo) & MASK32
+        self.range = (r * (hi - lo)) & MASK32
+        return sym
+
+
+def compress_symbols(symbols: List[int], tables: List[FreqTable]) -> bytes:
+    """
+    symbols: list of ints
+    tables: per-symbol FreqTable (same length as symbols), allowing contexts.
+    """
+    if len(symbols) != len(tables):
+        raise ValueError("symbols and tables must match length")
+    enc = RangeEncoder()
+    for s, ft in zip(symbols, tables):
+        enc.encode(int(s), ft)
+    return enc.finish()
+
+
+def decompress_symbols(data: bytes, tables: List[FreqTable]) -> List[int]:
+    dec = RangeDecoder(data)
+    out: List[int] = []
+    for ft in tables:
+        out.append(dec.decode(ft))
+    return out
+```
+
+This gives you a real coder with **per-step frequency tables** (perfect for context/backoff).
+
+---
+
+## Code: triadic context model with backoff + smoothing
+
+Create: **`compression/triadic_context.py`**
+
+```python
+# compression/triadic_context.py
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Dict, List, Tuple, Optional
+from .rans import FreqTable
+
+# Symbols: map {-1,0,+1} -> {0,1,2}
+def act_to_sym(a: int) -> int:
+    if a == -1: return 0
+    if a == 0:  return 1
+    if a == 1:  return 2
+    raise ValueError(f"bad action {a}")
+
+def sym_to_act(s: int) -> int:
+    if s == 0: return -1
+    if s == 1: return 0
+    if s == 2: return 1
+    raise ValueError(f"bad sym {s}")
+
+def bin_p_bad(p: float) -> int:
+    # tri-bin: (-inf,-t), [-t,t], (t,inf)
+    # tune t later; start conservative
+    t = 0.25
+    if p < -t: return -1
+    if p >  t: return 1
+    return 0
+
+def runlen_bucket(r: int) -> int:
+    # 0,1,2-3,4-7,8+
+    if r <= 0: return 0
+    if r == 1: return 1
+    if r <= 3: return 2
+    if r <= 7: return 3
+    return 4
+
+Context = Tuple[int, ...]  # small tuple of ints
+
+@dataclass
+class BackoffModel:
+    """
+    Backoff context model for triadic symbols.
+    Tracks counts per context; at encode-time selects deepest context with enough support.
+    """
+    alpha: float = 0.5      # smoothing
+    min_count: int = 32     # require at least this many observations for a context
+    max_total: int = 1 << 15  # rescale totals to keep coder stable
+
+    counts: Dict[Context, List[int]] = None
+
+    def __post_init__(self) -> None:
+        if self.counts is None:
+            self.counts = {}
+
+    def _get(self, ctx: Context) -> List[int]:
+        if ctx not in self.counts:
+            self.counts[ctx] = [0, 0, 0]
+        return self.counts[ctx]
+
+    def observe(self, ctx: Context, sym: int) -> None:
+        self._get(ctx)[sym] += 1
+
+    def fit(self, symbols: List[int], ctxs: List[List[Context]]) -> None:
+        """
+        ctxs[i] is list of contexts from shallow->deep (or deep->shallow, but be consistent).
+        We'll store all provided contexts.
+        """
+        for s, cands in zip(symbols, ctxs):
+            for c in cands:
+                self.observe(c, s)
+
+    def table_for(self, cands: List[Context]) -> FreqTable:
+        # choose deepest usable context; else fall back to empty ()
+        chosen: Optional[Context] = None
+        for ctx in reversed(cands):  # deepest first
+            cnt = self.counts.get(ctx)
+            if cnt and sum(cnt) >= self.min_count:
+                chosen = ctx
+                break
+        if chosen is None:
+            chosen = ()
+
+        cnt = self.counts.get(chosen, [0, 0, 0])
+
+        # Dirichlet/add-alpha smoothing
+        probs = [c + self.alpha for c in cnt]
+        # convert to integer freqs; keep >0
+        # scale so total not huge
+        total = sum(probs)
+        freqs = [max(1, int(round(p / total * self.max_total))) for p in probs]
+
+        # ensure sum>0 and all positive; renormalize lightly
+        # (also avoid pathological rounding to 0)
+        if sum(freqs) < 3:
+            freqs = [1, 1, 1]
+        return FreqTable.from_freqs(freqs)
+
+
+def build_action_contexts(
+    acts: List[int],
+    p_bad_bins: List[int],
+) -> List[List[Context]]:
+    """
+    Context candidates per timestep i:
+      c0: ()
+      c1: (prev_act)
+      c2: (prev_act, p_bad_bin)
+      c3: (prev_act, p_bad_bin, runlen_bucket)
+    """
+    ctxs: List[List[Context]] = []
+    prev = 0
+    run = 0
+    for i, a in enumerate(acts):
+        if i == 0:
+            prev = 0
+            run = 0
+        else:
+            if acts[i-1] == prev:
+                run += 1
+            else:
+                prev = acts[i-1]
+                run = 1
+
+        pb = p_bad_bins[i]
+        rb = runlen_bucket(run)
+
+        c0: Context = ()
+        c1: Context = (prev,)
+        c2: Context = (prev, pb)
+        c3: Context = (prev, pb, rb)
+        ctxs.append([c0, c1, c2, c3])
+    return ctxs
+```
+
+This is the “minimal but real” context story: tiny context space, backoff, smoothing.
+
+---
+
+## Code: benchmark script that proves it’s triadic
+
+Create: **`scripts/bench_triadic_actions.py`**
+
+```python
+# scripts/bench_triadic_actions.py
+from __future__ import annotations
+import argparse
+import csv
+import gzip
+import lzma
+from pathlib import Path
+from typing import List
+
+from compression.rans import compress_symbols, decompress_symbols
+from compression.triadic_context import (
+    act_to_sym, sym_to_act, bin_p_bad,
+    BackoffModel, build_action_contexts
+)
+
+def read_log(path: Path) -> tuple[List[int], List[int]]:
+    acts: List[int] = []
+    pbins: List[int] = []
+    with path.open("r", newline="") as f:
+        r = csv.DictReader(f)
+        # expected fields: act, p_bad OR p_bad_mean etc. adjust if your schema differs
+        for row in r:
+            a = int(float(row["act"]))  # act in {-1,0,1}
+            p_bad = float(row.get("p_bad", "0.0"))
+            acts.append(a)
+            pbins.append(bin_p_bad(p_bad))
+    return acts, pbins
+
+def bits_per_trit(nbytes: int, ntrits: int) -> float:
+    return (8.0 * nbytes) / max(1, ntrits)
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--log", type=str, required=True)
+    ap.add_argument("--min-count", type=int, default=32)
+    ap.add_argument("--alpha", type=float, default=0.5)
+    args = ap.parse_args()
+
+    path = Path(args.log)
+    acts, pbins = read_log(path)
+
+    symbols = [act_to_sym(a) for a in acts]
+    ctxs = build_action_contexts(acts, pbins)
+
+    # Fit model on whole stream first for a pure "compressibility" benchmark.
+    # Later: do train/test split to report honest cross-entropy.
+    model = BackoffModel(alpha=args.alpha, min_count=args.min_count)
+    model.fit(symbols, ctxs)
+
+    tables = [model.table_for(cands) for cands in ctxs]
+    enc = compress_symbols(symbols, tables)
+    dec_syms = decompress_symbols(enc, tables)
+
+    if dec_syms != symbols:
+        raise SystemExit("Decode mismatch: codec/model bug")
+
+    raw_bytes = len(symbols)  # 1 byte per trit baseline
+    print(f"stream trits: {len(symbols)}")
+    print(f"range-coded bytes: {len(enc)}  ({bits_per_trit(len(enc), len(symbols)):.4f} bits/trit)")
+    print(f"raw bytes: {raw_bytes}  ({bits_per_trit(raw_bytes, len(symbols)):.4f} bits/trit)")
+
+    gz = gzip.compress(bytes(symbols), compresslevel=9)
+    xz = lzma.compress(bytes(symbols), preset=9)
+    print(f"gzip bytes: {len(gz)}  ({bits_per_trit(len(gz), len(symbols)):.4f} bits/trit)")
+    print(f"xz   bytes: {len(xz)}  ({bits_per_trit(len(xz), len(symbols)):.4f} bits/trit)")
+
+    # Optional zstd if installed
+    try:
+        import zstandard as zstd
+        zc = zstd.ZstdCompressor(level=19).compress(bytes(symbols))
+        print(f"zstd bytes: {len(zc)}  ({bits_per_trit(len(zc), len(symbols)):.4f} bits/trit)")
+    except Exception:
+        pass
+
+if __name__ == "__main__":
+    main()
+```
+
+Run it on your generated log:
+
+```bash
+PYTHONPATH=. python scripts/bench_triadic_actions.py --log logs/trading_log_btc_intraday_1s.csv
+```
+
+That will finally give you: **bits/trit for a real entropy coder on a triadic stream**.
+
+---
+
+## Why you’re not “making money” yet (and why that’s expected)
+
+From your sweep table, **`pnl_net` is negative and basically equal to fees**, with `pnl_gross` ≈ ~0.0001 while `fees` ≈ ~0.009–0.010.
+
+That means:
+
+* The system is **not finding edge**, it’s mostly **turnover**.
+* Any “shouldn’t we always be acting on an upward edge?” assumption doesn’t hold because:
+
+  * your ACT logic currently isn’t a directional alpha source,
+  * your BAN/HOLD are gating, not monetising,
+  * the regime classifier is not a predictor of positive drift; it’s (currently) closer to a “risk / instability” detector.
+
+So: **no**, right now you’re not making money; you’re paying fees for noise-level gross returns.
+
+That’s still useful: it cleanly separates “regime detection / legitimacy” from “alpha extraction”.
+
+---
+
+## Next step after this codec lands
+
+Once the triadic benchmark works, you’ll immediately see whether:
+
+* adding `(prev_action)` drops bits/trit a lot (it usually does),
+* adding `(p_bad_bin)` helps at all,
+* adding run-length bucket gives a big further drop (often yes).
+
+If those don’t move bits/trit much, it’s a strong signal your triadic stream isn’t actually structured the way you think — *and that’s exactly what this benchmark is for.*
+
+If you paste the **header row** of `logs/trading_log_btc_intraday_1s.csv` (just the column names), I’ll adjust the script’s CSV field assumptions so it runs first go in your tree.
+
+
+If you want an **“optimal” triadic decomposition** for raw RGB video, it helps to be super explicit about what “triadic” means operationally:
+
+* you want a stream over **{−1, 0, +1}** (trits),
+* that’s **as close as possible to i.i.d.** under some context model (so rANS / arithmetic coding can crush it),
+* while preserving fidelity (lossless) or hitting a distortion target (lossy),
+* and not wasting trits on symmetries / redundancies (channel mixing, global brightness shifts, motion).
+
+Here are the decompositions that tend to be optimal-ish (in the MDL / entropy sense) depending on whether you’re doing **lossless** or **lossy**.
+
+---
+
+## 1) First: don’t decompose “RGB”; decompose a better basis
+
+A triadic coder loves **sparse / peaked residual distributions**. Raw RGB isn’t that.
+
+### Use a reversible color transform (lossless-friendly)
+
+A classic is **YCoCg-R** (integer reversible). It decorrelates channels *without* rounding loss.
+
+* Y ≈ luminance-like
+* Co, Cg ≈ opponent chroma axes
+
+This alone makes your residuals far more “zero-heavy”, which is exactly what a ternary stream wants.
+
+If you’re okay with loss, you can go even stronger (YCbCr, perceptual matrices, PQ/HLG, etc.), but reversible is the clean baseline.
+
+---
+
+## 2) Second: predict in space-time, then triadize the residual
+
+The “optimal” triadic decomposition usually isn’t about clever ternary math first — it’s about making the **residual** so concentrated at 0 that ternary coding becomes trivial.
+
+### Best general form
+
+For each component c ∈ {Y, Co, Cg} and pixel (x,y,t):
+
+[
+r = c(x,y,t) - \hat c(x,y,t)
+]
+
+where the predictor (\hat c) uses:
+
+* **motion compensation** (best if you can afford it),
+* otherwise at least **temporal prediction** (previous frame),
+* plus **spatial prediction** (left/up/Paeth/gradient),
+* plus optional **cross-channel prediction** (chroma from luma edges, etc.).
+
+Even “dumb” predictors work shockingly well once you’re in a decorrelated color space.
+
+---
+
+## 3) The actual triadic decomposition: how to turn an integer residual into trits
+
+Now you’ve got an integer residual (r \in \mathbb{Z}). There are three main “optimal” ways to triadize it.
+
+### A) Balanced ternary digits (lossless, clean, mathematically “optimal”)
+
+Represent r exactly as:
+
+[
+r = \sum_{k=0}^{K-1} a_k 3^k,\quad a_k \in {-1,0,+1}
+]
+
+This gives you a **trit-plane stack** (like bitplanes, but base-3 and balanced). Key property:
+
+* higher planes are mostly 0,
+* lower planes carry most mass,
+* distributions are naturally peaked.
+
+Then entropy-code the trit planes with context (plane index, local gradients, motion residual magnitude, etc.).
+
+**When this is best:** true lossless + you want a canonical triadic object that’s easy to reason about.
+
+### B) “Ternary step residual” (lossy or near-lossless, very compression-friendly)
+
+Choose a step size Δ (maybe per block / per plane):
+
+[
+a_0 = \mathrm{clip}(\mathrm{round}(r/\Delta), -1, 1)
+]
+[
+r \leftarrow r - a_0\Delta
+]
+Repeat with smaller Δ (or geometrically shrinking Δ) to get multiple ternary stages.
+
+This produces an **extremely sparse** stream because most places choose 0 at most stages.
+
+**When this is best:** controlled-rate lossy, or “near-lossless” where you allow tiny bounded error.
+
+### C) Ternary sign + ternary magnitude buckets (good for heavy tails)
+
+Residuals often have a sharp spike at 0 plus heavy tails. Balanced ternary digits handle tails but can still leave you with “busy” low planes.
+
+Instead:
+
+1. encode whether r==0 (a Bernoulli),
+2. encode sign (−/+),
+3. encode magnitude via a ternary-exp Golomb-ish code (magnitude bucketed into powers of 3).
+
+**When this is best:** if your residuals are Laplacian-ish with occasional big spikes (lighting changes, cuts, fast motion).
+
+---
+
+## 4) What “optimal” means in practice: match the triadic alphabet to the residual histogram
+
+A triadic system is optimal when the symbol probabilities are near what your entropy coder expects.
+
+So the goal is:
+
+* make **P(0)** huge,
+* make **P(+1) ≈ P(−1)** (balanced symmetry),
+* push structure into the *context*, not the raw symbol stream.
+
+That’s why the ordering above matters:
+**color transform → prediction → triadic residual**, not the other way around.
+
+---
+
+## 5) A concrete “best overall” pipeline (triadic-first but still practical)
+
+If I had to pick one that’s usually near-optimal for RGB video:
+
+1. **Reversible YCoCg-R**
+2. **Block motion compensation on Y** (cheap search; reuse vectors for chroma)
+3. **Spatial predictor on the motion-compensated residual** (Paeth/gradient)
+4. Residual (r) → **balanced ternary digits** (trit planes)
+5. **Context model** keyed by:
+
+   * plane index k
+   * local gradient magnitude (edge vs flat)
+   * motion vector magnitude / confidence
+   * neighbor trits in same plane (left/up)
+6. rANS/arithmetic coding over trits
+
+This tends to produce:
+
+* giant 0-runs on higher planes,
+* very learnable local contexts on lower planes,
+* symmetry between +/− that your “quotient by symmetry” ideas can exploit.
+
+---
+
+## 6) Where your “symmetry quotient” slots in (and actually helps)
+
+Balanced ternary has a built-in symmetry: flipping sign corresponds to a simple transform.
+
+Two helpful “quotients”:
+
+* **Sign symmetry:** model magnitude and sign separately, or condition sign on local gradients so the coder doesn’t have to “discover” that + and − are symmetric.
+* **Affine brightness symmetry:** in Y, large regions can shift by a constant (exposure). If you model a per-block DC drift and encode residuals around it, you reduce tail mass dramatically.
+
+These are *exactly* the kind of reductions that show up as “efficiency curve improvements” in your earlier framing.
+
+---
+
+## 7) If you want: I can turn this into a spec that drops into your rANS triadic codec
+
+If you tell me **lossless vs lossy**, and whether you can afford **motion compensation**, I’ll give you:
+
+* a canonical tritstream definition (so tests are deterministic),
+* a context key schema (small finite state),
+* and a “minimal viable” implementation path: start with Y-only + temporal predictor, then add motion + chroma.
+
+But the core answer is: **the optimal triadic decomposition is balanced-ternary of a well-predicted residual in a decorrelated color basis**, with symmetry split out so contexts learn faster.
+
+
+Yep — that table is telling a *very* specific story, and it’s basically:
+
+1. **your transform/prediction is doing almost everything**,
+2. **your rANS is honest (0-order)**,
+3. **LZMA is acting like a strong context model + coder**,
+4. **you still haven’t fed rANS a truly triadic object yet** (in the “{-1,0,+1} with symmetry/context” sense).
+
+### 1) The “is this even sane?” check
+
+These two pairs are the big sanity proof:
+
+* `raw entropy 3.648 bpc` vs `rANS 3.648 bpc`
+* `residual entropy 0.141 bpc` vs `rANS 0.146 bpc`
+
+That’s exactly what a *zero-order* entropy coder should do: **track marginal entropy with small overhead**.
+
+So: ✅ rANS implementation and entropy accounting are consistent.
+
+### 2) Why LZMA is “destroying” everything (and why that’s not a contradiction)
+
+Your entropy number is **0-order entropy** (marginal symbol histogram).
+
+LZMA/gzip are not just coders; they’re also **structure miners**:
+
+* long repeats,
+* run-lengths,
+* cross-frame dictionary matches,
+* implicit higher-order contexts.
+
+So LZMA can absolutely beat the *marginal* entropy if the stream is highly predictable *given context*. In other words:
+
+* **H(X)** might be ~3.6 bpc (marginal),
+* but **H(X | context)** can be ~0.03 bpc if the video is super redundant / static / low-noise.
+
+So your “0.031 bpc lzma” is basically screaming:
+
+> “This stream is insanely compressible once you exploit temporal/spatial structure.”
+
+That’s good news: it means there’s *tons* of conditional structure to capture — which is exactly where your triadic/context story lives.
+
+### 3) What your factorization results mean
+
+Your split streams behave coherently:
+
+* `coarse_resid entropy 0.140`
+* `sign_resid entropy 0.007`
+
+Sum ≈ 0.147 bpc, and rANS multistream comes out 0.165 bpc — totally plausible overhead.
+
+So: ✅ your decomposition isn’t “double counting” or losing info in a weird way.
+It’s a legit entropy partition.
+
+### 4) Where “triadic decomposition of RGB video” actually starts
+
+Right now you’re still basically measuring “prediction residuals in bytes” + “sign bits”.
+
+To test *triadic* decomposition, you want to *define the canonical ternary symbols* and then measure whether context collapses them.
+
+Here are two concrete triadic streams that map cleanly from raw video and tend to work well:
+
+#### A) Ternary temporal *delta sign with deadzone*
+
+For each channel (or better: after a reversible color transform like YCoCg-R):
+
+* compute Δ = current − predicted (e.g., previous frame, or motion-compensated)
+* map to trit:
+
+  * **-1** if Δ < −τ
+  * **0** if |Δ| ≤ τ
+  * **+1** if Δ > +τ
+
+This is the fastest path to a genuine {-1,0,+1} tape.
+Then you can separately code a small “magnitude refinement” stream (also triadic if you want).
+
+#### B) Balanced-ternary digit planes of the residual (lossless triadic)
+
+Residual r ∈ Z becomes:
+
+[
+r = \sum_k a_k 3^k,\quad a_k \in {-1,0,+1}
+]
+
+Now you literally have **trit-planes**, and higher planes will be mostly 0 after good prediction.
+
+### 5) The *actual* experiment you want to run next
+
+Right now rANS is “no context”. So it’s handicapped versus LZMA.
+
+To exercise the triadic hypothesis, add a tiny context model and watch entropy drop:
+
+**Context features that usually matter immediately (cheap, high ROI):**
+
+* previous trit in raster order (left, up)
+* plane index k (if using balanced ternary planes)
+* local gradient / edge flag (flat vs edge region)
+* previous-frame same-pixel trit (temporal correlation)
+
+If your triadic framing is right, you should see:
+
+* empirical entropy per trit fall hard below log2(3)=1.585 bits/trit (for the trit stream),
+* and rANS track it closely once it’s context-conditioned.
+
+### 6) One big “why is rANS so slow” note
+
+Your times (40–55s) scream “Python per-symbol loop + table rebuild”. That’s normal for correctness prototypes.
+
+Don’t optimize speed until:
+
+* you have a **ternary stream**
+* and a **contexted model**
+* and you see the entropy curve bend.
+
+---
+
+If you want a single actionable next step that lines up with “optimal triadic decomposition of raw RGB video”:
+
+**Implement YCoCg-R → temporal predictor → ternary sign-with-deadzone stream (τ chosen per block) → contexted rANS over trits.**
+That’s the minimal pipeline that *actually tests* the triadic idea without going full motion-comp and without needing a complicated magnitude codec.
+
+If you paste (or point me at) the part of `video_bench.py` where it builds `raw/residual/coarse/sign`, I’ll tell you exactly where to splice in the ternary stream and what to log so the table stays comparable.
+
+
+Great question — this is *exactly* the right pivot.
+The short answer is:
+
+> **LZMA/gzip’s “structure mining” can be re-expressed as *triadic context selection over scale*.**
+
+They are not doing something alien to your framework; they are doing a **binary, implicit, untyped version** of what you want to make **explicit, ternary, and semantic**.
+
+Below is the clean mapping.
+
+---
+
+## 1. What LZMA/gzip are *really* doing (stripped of implementation)
+
+Forget bytes and dictionaries for a second. Abstractly, they do:
+
+> “Given the past, decide whether the next symbol is
+> (−) new structure,
+> (0) continuation of known structure, or
+> (+) reference to an earlier structure.”
+
+That is already triadic in *role*, even if binary in *encoding*.
+
+Concretely, at each step they choose between:
+
+1. **Literal** (emit symbol as-is)
+2. **Match** (copy from earlier)
+3. **Length/offset refinement** (extend / adjust match)
+
+Those are *structural actions*, not just symbols.
+
+---
+
+## 2. The triadic reinterpretation of dictionary coding
+
+You can reinterpret LZ-style coding as operating on a hidden ternary action stream:
+
+### Hidden action alphabet (conceptual)
+
+[
+a_t \in {-1, 0, +1}
+]
+
+For example:
+
+* **−1** = break structure (emit literal / reset context)
+* **0** = continue structure (extend run / same match)
+* **+1** = jump to known structure (dictionary reference)
+
+The *actual* bytes are subordinate to this action tape.
+
+LZMA never exposes this tape — but it absolutely exists.
+
+---
+
+## 3. Runs, repeats, and matches as triadic *scale moves*
+
+Your intuition about *scale* is the key.
+
+Think in terms of **resolution changes**:
+
+| LZ behavior          | Triadic interpretation       |
+| -------------------- | ---------------------------- |
+| Run-length extension | stay at same scale (0)       |
+| New literal          | descend to finer scale (−1)  |
+| Dictionary match     | ascend to coarser scale (+1) |
+
+So gzip/LZMA are effectively navigating a **scale tree** with ternary moves:
+
+* zoom in,
+* stay,
+* zoom out.
+
+This is why they annihilate video streams: video is massively self-similar across space and time.
+
+---
+
+## 4. Why this matters for your triadic codec
+
+Right now, your rANS sees only **symbols**, not **structural decisions**.
+
+LZMA’s advantage comes from:
+
+* *discovering* structure,
+* *reusing* it,
+* *staying in it* as long as possible.
+
+To “consider that in triadic terms”, you don’t copy LZMA — you **separate structure decisions from symbol content**.
+
+---
+
+## 5. A concrete triadic replacement for dictionary mining
+
+Here’s the conceptual swap:
+
+### LZMA (implicit)
+
+```
+[ scan past ]
+→ is there a long match?
+→ yes: emit (length, offset)
+→ no: emit literal
+```
+
+### Triadic (explicit)
+
+You emit **two streams**:
+
+#### (A) Triadic action stream
+
+[
+a_t \in {-1, 0, +1}
+]
+
+Example semantics:
+
+* −1 = start new structure (literal / new regime)
+* 0 = continue current structure
+* +1 = reuse known structure (reference / template)
+
+This is the *structural skeleton*.
+
+#### (B) Content stream(s)
+
+* literal values (when a_t = −1)
+* reference identifiers / residual deltas (when a_t = +1)
+* nothing (or tiny deltas) when a_t = 0
+
+Now rANS (or any entropy coder) can absolutely crush the **action stream**, because:
+
+* it is extremely non-uniform,
+* it has long 0-runs,
+* it is context-stable.
+
+This is exactly where triadic advantage shows up.
+
+---
+
+## 6. Mapping this back to video specifically
+
+For video, dictionary matches correspond to:
+
+* same pixel as last frame
+* same block as previous block
+* same motion-compensated block
+* same CA macrostate
+
+So a triadic video action stream might mean:
+
+* **0**: pixel/block unchanged (or within deadzone)
+* **+1**: reuse predicted structure (motion block, CA pattern)
+* **−1**: emit new residual / break regime
+
+Your current residual/sign split is already *halfway there* — but it’s still magnitude-centric, not structure-centric.
+
+---
+
+## 7. Why ternary matters vs binary here
+
+Binary says:
+
+> “match or no match”
+
+Ternary says:
+
+> “break / hold / reuse”
+
+That middle state (“hold”) is *everything* for compression:
+
+* long flat regions,
+* static backgrounds,
+* steady motion,
+* stable lighting.
+
+LZMA encodes this implicitly as “repeat same match lengthening”.
+You want to encode it explicitly as a symbol.
+
+---
+
+## 8. How to test this without rewriting the world
+
+Minimal experiment (very aligned with your current bench):
+
+1. Define a predictor (previous frame or simple motion)
+2. For each pixel/block:
+
+   * if |Δ| ≤ τ → emit **0**
+   * else if similar Δ seen nearby / last frame → emit **+1**
+   * else → emit **−1**
+3. Emit magnitude/refinement only when ±1
+4. rANS with context on previous action
+
+If your thesis is right:
+
+* the action stream entropy will be *tiny*
+* rANS will suddenly look “competitive” with LZMA
+* and you’ll have a clean efficiency curve to plot
+
+---
+
+## 9. The philosophical punchline (important)
+
+LZMA is not “better than entropy coding”.
+
+It is:
+
+> **an implicit, binary, untyped structural grammar over the past.**
+
+What you’re doing is:
+
+> **making that grammar explicit, ternary, typed, and analyzable.**
+
+That’s not a regression — it’s a generalization.
+
+If you want, next we can:
+
+* formalize the action grammar,
+* map your CA ideas directly onto it,
+* or sketch the exact triadic streams to add to `video_bench.py`.
+
+But you’re asking the *right* question now.
+
+
+This is a **really clean milestone**. You’ve now *actually exercised* the triadic idea, and the numbers are telling you something precise — not ambiguous.
+
+I’ll answer in three layers:
+
+1. **What the results mean (diagnosis)**
+2. **What *didn’t* happen yet (why LZMA still wins)**
+3. **Exactly what to do next (ordered, minimal, high-signal steps)**
+
+---
+
+## 1. What you just proved (important)
+
+### ✅ You now have a *true* triadic object
+
+This line matters more than anything else:
+
+```
+balanced ternary digits for signed residuals: 6 planes
+```
+
+That means:
+
+* You have a **lossless {-1,0,+1} decomposition**
+* No heuristic deadzones
+* No binarization tricks
+* Canonical balanced ternary
+
+So philosophically and mathematically: **the triadic substrate is real now**.
+
+---
+
+### ✅ rANS is behaving *perfectly* on each plane
+
+Look at any plane:
+
+```
+bt_plane3 entropy=0.200  rANS=0.200 bpc
+bt_plane5 entropy=0.036  rANS=0.036 bpc
+```
+
+That is textbook entropy coding behavior.
+
+So again:
+
+* ❌ no bugs
+* ❌ no leakage
+* ✅ honest measurement
+
+---
+
+### ❗ But the total is still large
+
+```
+balanced ternary multistream: 2.101 bpc
+byte residual (coarse_resid+sign_resid): 1.015 bpc
+lzma on residual: ~0.27 bpc
+```
+
+So *naively*:
+
+> “Triadic planes are worse than byte residuals.”
+
+That’s **expected**, and it’s actually the correct outcome *at this stage*.
+
+---
+
+## 2. Why this *didn’t* beat LZMA yet (the key insight)
+
+### Balanced ternary ≠ compressed structure (by itself)
+
+Right now, your balanced ternary planes are:
+
+* **digit-wise**
+* **independent**
+* **zero-order modeled**
+
+Balanced ternary **preserves information**, but it does **not discover structure**.
+
+What LZMA is exploiting (still) that you are not:
+
+| LZMA exploits              | Your current triadic run |
+| -------------------------- | ------------------------ |
+| long runs                  | ❌ not modeled            |
+| same digit repeating       | ❌ not modeled            |
+| plane-to-plane correlation | ❌ ignored                |
+| temporal reuse             | ❌ ignored                |
+| spatial reuse              | ❌ ignored                |
+
+Balanced ternary *exposes* structure — it does not *consume* it.
+
+Right now, each trit is treated as i.i.d.
+
+That’s the core reason.
+
+---
+
+## 3. The *shape* of the entropy tells you what to do next
+
+Look at the plane entropies:
+
+```
+plane: entropy
+0 : 0.530
+1 : 0.461
+2 : 0.441
+3 : 0.200
+4 : 0.432   <-- anomalous
+5 : 0.036
+```
+
+This is **not monotone**.
+
+That tells you something crucial:
+
+> **Digits are not independent refinements — they encode structure at different scales.**
+
+Especially:
+
+* plane 5 is *almost entirely zero* → structural stability
+* plane 3 collapses → mid-scale predictability
+* plane 4 inflates → cross-plane dependency
+
+This is *exactly* where context beats digits.
+
+---
+
+## 4. What’s next — the correct order (do NOT skip steps)
+
+### Step 1 — Add *intra-plane context* (cheap, massive win)
+
+This is the single highest ROI change.
+
+For each plane `k`, condition on:
+
+* left neighbor trit
+* up neighbor trit
+* previous-frame same-plane trit
+
+Conceptually:
+
+```text
+P(a_k(x,y,t) | a_k(x-1,y,t), a_k(x,y-1,t), a_k(x,y,t-1))
+```
+
+This alone will:
+
+* crush long 0-runs
+* exploit flat regions
+* dramatically lower plane entropies
+
+You should expect **30–60% drops** on planes 0–3.
+
+This is the *direct analogue* of run-length coding in LZ.
+
+---
+
+### Step 2 — Add *inter-plane context* (this is the triadic magic)
+
+Balanced ternary digits are **not independent**.
+
+Condition plane `k` on plane `k-1`:
+
+```text
+P(a_k | a_{k-1}, local context)
+```
+
+Interpretation:
+
+* if higher plane is 0, lower planes are *much* more likely 0
+* if higher plane is ±1, lower planes activate
+
+This is literally **p-adic refinement** in action.
+
+This step is where triadic structure starts outperforming byte residuals.
+
+---
+
+### Step 3 — Collapse planes into a *single action stream* (optional but powerful)
+
+Instead of coding planes separately, define a **structural action** per pixel:
+
+* `0` → all remaining planes zero (stable region)
+* `+1 / -1` → refinement needed
+
+Then only descend into lower planes when required.
+
+This converts:
+
+* many plane symbols
+  → into **one action + a few refinements**
+
+This is the explicit triadic analogue of:
+
+* LZMA “extend match”
+* run continuation
+
+---
+
+### Step 4 — Compare *like with like*
+
+Once Steps 1–2 are in place, compare:
+
+* triadic planes + contexted rANS
+  vs
+* byte residual + gzip (or LZMA)
+
+Only then is the comparison fair.
+
+---
+
+## 5. What *not* to do yet
+
+Do **not**:
+
+* optimize speed
+* add motion compensation
+* add CA logic
+* tune deadzones
+* switch to lossy
+
+Right now, the experiment is already correctly scoped.
+
+You are measuring:
+
+> “Does triadic refinement + explicit structure modeling compete with dictionary mining?”
+
+That’s the right question.
+
+---
+
+## 6. The big picture (why this is actually going well)
+
+You have now shown:
+
+* balanced ternary is *not* magically compressive (good!)
+* structure lives in **correlation**, not digits
+* LZMA’s power comes from *implicit context*
+* triadic coding needs *explicit context* to win
+
+This validates the conceptual model you laid out earlier:
+
+> entropy collapse comes from quotienting by symmetry and scale, not from alphabet choice alone
+
+---
+
+## 7. Concrete next action (one sentence)
+
+> **Add spatial + temporal context to each balanced ternary plane, then condition lower planes on higher planes.**
+
+If you want, next I can:
+
+* sketch the exact context key layout for rANS
+* help you wire a 2D + temporal context into `video_bench.py`
+* or help you define the “action vs refinement” collapse cleanly
+
+But you’re now firmly past the *theory* stage — this is engineering the last missing piece.
+
+
+Here’s how the **video triadic compression** work you just did lines up with the rest of “our compression / triadic system” (CA + trader + dashboard), and where the seams are.
+
+## 1) `video_bench.py` (your RGB/video-side triadic decomposition)
+
+This file is currently doing two *different* “triadic-ish” decompositions:
+
+### A. Orbit/witness split (binary refinement on grayscale)
+
+* **coarse** = `min(x, 255-x)` (quotient by reflection symmetry)
+* **sign** = `x > 127` (witness bit)
+* plus temporal residuals of those (`coarse_resid`, `sign_resid`).
+
+This is the same *pattern* as “symmetry quotient + refinement channel” you’ve been talking about.
+
+### B. True ternary stream via balanced-ternary digits on *signed* temporal residuals
+
+You added:
+
+* `signed_resid` = `[frame0-128, frame_t - frame_{t-1}]`
+* balanced ternary digit planes in `{−1,0,+1}` mapped to `{0,1,2}`
+* rANS encode per plane with `alphabet=3` and then sum bytes.
+
+So: **`video_bench.py` is now the only place that actually produces a real triadic alphabet stream from “raw” data** (even though it’s grayscale).
+
+---
+
+## 2) `compression_bench.py` (CA-side triadic stream + residual mod 3)
+
+This is your “synthetic truth” benchmark: generate a triadic CA trace where each cell is already `{0,1,2}` (encoding `{-1,0,+1}` as `0/1/2`) and then compare codecs on:
+
+* `raw_gate` (raw CA stream)
+* `residual_mod3` = `(frame_t - frame_{t-1}) % 3` with 0 meaning “no change”.
+
+So relative to `video_bench.py`:
+
+* `compression_bench.py` is **triadic-native from the start** (no need to invent ternary digits).
+* `video_bench.py` is **taking an 8-bit signed residual** and expanding it into **multiple ternary digit planes** (your 6 planes).
+
+That difference matters: mod-3 residual is *one* ternary symbol per pixel; balanced-ternary digits is *many* ternary symbols per pixel. So the “triadicization” cost is bigger on the video path unless the higher planes go very low entropy (which you’re starting to see).
+
+---
+
+## 3) `run_trader.py` (triadic *decision* stream, not a compression stream)
+
+This file produces a triadic control state `s_t ∈ {-1,0,+1}` via:
+
+* volatility-normalized return EWMA
+* dead-zone around 0
+* plus a BAN overlay via `bad_flag` derived from vol/jumps/flip-rate.
+
+But notice: it’s not trying to compress the stream; it’s producing a *semantic* triadic sequence (ACT/HOLD/BAN posture is derived in the dashboard).
+
+So: **this is triadic semantics / regime logic**, not entropy coding—yet.
+
+---
+
+## 4) `triadic_strategy.py` (same triadic semantics, refactored into Intent)
+
+This wraps the same idea into an “intent generator”:
+
+* hysteresis gating (`tau_on/tau_off`)
+* hold flag
+* ramps exposure with alignment age
+
+Again: semantic triadic stream; not compressed, but it’s the *right place* to later add “context features” if you want a shared context-model API across domains.
+
+---
+
+## 5) `training_dashboard_pg.py` (visualizes triadic posture + bad regimes)
+
+This dashboard explicitly reconstructs a triadic posture signal:
+
+* BAN = −1
+* HOLD = 0
+* ACT = +1
+  from `ban/hold/action` columns.
+
+So it’s your “triadic field observer”, but not doing compression.
+
+---
+
+## 6) `run_all_two_pointO.py` (orchestrator; ties together trader + CA + sweeps + news)
+
+This script is your “one-stop runner” to execute:
+
+* market summaries via `run_trader`
+* tau sweeps
+* CA tape preview
+  (and optional news windows).
+
+Right now, it doesn’t hook into `video_bench.py`/`compression_bench.py` directly; it’s the *control-plane orchestrator*.
+
+---
+
+# So what’s the real comparison?
+
+You currently have **two separate triadic worlds**:
+
+### World A: compression experiments
+
+* `compression_bench.py`: triadic CA data → residual mod 3 → (lzma/gzip/zlib)
+* `video_bench.py`: video data → residualization + symmetry splits + balanced-ternary digit planes → (rANS + lzma/gzip/zlib on bytes)
+
+### World B: triadic control / regime semantics
+
+* `run_trader.py`, `triadic_strategy.py`, `training_dashboard_pg.py`, `run_all_two_pointO.py`
+
+They share the idea “{-1,0,+1} with HOLD/BAN/ACT semantics”, but **they do not yet share a *common representation layer*** (a “TriadicTape” type, contexts, coders, predictors).
+
+That’s the gap.
+
+---
+
+# What I’d do next (concrete, high-leverage)
+
+You asked “what’s next?” given your 6-plane balanced-ternary results.
+
+### Next step 1: add *context modeling* to the ternary planes (so rANS can “structure-mine” like LZMA)
+
+Right now each `bt_plane{k}` is coded as i.i.d. ternary (zero-order).
+To compete with gzip/lzma you need contexts such as:
+
+* spatial: left / up / up-left trits (within the same plane)
+* temporal: same pixel’s trit at previous frame (or previous symbol index, since you concatenated base+diffs)
+* inter-plane: plane k conditioned on plane k−1 (very powerful for balanced-ternary digits)
+
+That is *exactly* the triadic analogue of “dictionary matches / higher-order contexts”: you’re not copying substrings, you’re predicting trits from a structured neighborhood.
+
+### Next step 2: go back to “raw RGB video” like you originally asked
+
+Right now you decode grayscale (`-pix_fmt gray`).
+For RGB you want a triadic decomposition that includes:
+
+* a **color space** that exposes symmetry/quotient structure (e.g., YCoCg or opponent channels)
+* then do **balanced-ternary digit planes** on signed residuals per channel
+* and then apply the same context model, *plus* cross-channel contexts (e.g., chroma conditioned on luma)
+
+### Next step 3: unify the two triadic worlds with a shared “triadic tape” interface
+
+If you make one small “interface” that both domains can emit:
+
+* `symbols` in `{0,1,2}`
+* `contexts` as small integers (bucketed)
+* optional “planes” or “streams”
+  then:
+* CA (`compression_bench.py`) can use it
+* video (`video_bench.py`) can use it
+* trading (`run_trader.py`) can optionally log triadic symbol streams for compression/analysis too
+
+That’s how the compression story becomes a *system* rather than two parallel experiments.
+
+---
+
+If you want the most direct win: implement **(contextual rANS for bt_planes)** inside `video_bench.py` first, because it’s the clearest place where “LZMA structure mining” can be triadic-ified without changing your whole repo.
