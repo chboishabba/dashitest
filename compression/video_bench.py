@@ -12,10 +12,10 @@ from typing import Dict, Tuple
 import numpy as np
 
 try:
-    from . import rans  # type: ignore
+    from . import mdl_sideinfo, rans  # type: ignore
 except ImportError:  # direct script execution
     sys.path.append(str(Path(__file__).resolve().parents[1]))
-    from compression import rans  # type: ignore
+    from compression import mdl_sideinfo, rans  # type: ignore
 
 
 def ffprobe_video(path: Path) -> Tuple[int, int, int]:
@@ -97,8 +97,16 @@ def _balanced_digits_needed(values: np.ndarray) -> int:
     return digits
 
 
+def _downsample_3x(frame: np.ndarray) -> np.ndarray:
+    h, w = frame.shape
+    h3 = (h // 3) * 3
+    w3 = (w // 3) * 3
+    cropped = frame[:h3, :w3]
+    return cropped.reshape(h3 // 3, 3, w3 // 3, 3).mean(axis=(1, 3)).astype(np.int16)
+
+
 def _motion_compensated_residual(
-    frames: np.ndarray, block: int = 8, search: int = 4
+    frames: np.ndarray, block: int = 8, search: int = 4, pyramid_levels: int = 0
 ) -> tuple[np.ndarray, dict]:
     """Return signed residuals after blockwise translational motion compensation."""
     t, h, w = frames.shape
@@ -117,23 +125,72 @@ def _motion_compensated_residual(
             continue
         prev = frames[ti - 1].astype(np.int16)
         cur = frames[ti].astype(np.int16)
+        if pyramid_levels > 0:
+            prev_pyr = [prev]
+            cur_pyr = [cur]
+            for _ in range(pyramid_levels):
+                prev_pyr.append(_downsample_3x(prev_pyr[-1]))
+                cur_pyr.append(_downsample_3x(cur_pyr[-1]))
+        else:
+            prev_pyr = [prev]
+            cur_pyr = [cur]
         pred = np.zeros_like(cur)
         for y in range(0, h, block):
             for x in range(0, w, block):
                 y0 = min(y, h - block)
                 x0 = min(x, w - block)
                 block_cur = cur[y0 : y0 + block, x0 : x0 + block]
-                best_sad = None
                 best = (0, 0)
-                for dy in range(-search, search + 1):
-                    for dx in range(-search, search + 1):
-                        y1 = np.clip(y0 + dy, 0, h - block)
-                        x1 = np.clip(x0 + dx, 0, w - block)
-                        cand = prev[y1 : y1 + block, x1 : x1 + block]
-                        sad = int(np.abs(block_cur - cand).sum())
-                        if best_sad is None or sad < best_sad:
-                            best_sad = sad
-                            best = (dy, dx)
+                best_sad = None
+                if pyramid_levels > 0:
+                    coarse_h, coarse_w = prev_pyr[-1].shape
+                    cy = y0 // (3**pyramid_levels)
+                    cx = x0 // (3**pyramid_levels)
+                    coarse_block = cur_pyr[-1][cy : cy + max(1, block // (3**pyramid_levels)),
+                                                cx : cx + max(1, block // (3**pyramid_levels))]
+                    csearch = max(1, search // (3**pyramid_levels))
+                    for dy in range(-csearch, csearch + 1):
+                        for dx in range(-csearch, csearch + 1):
+                            y1 = np.clip(cy + dy, 0, coarse_h - coarse_block.shape[0])
+                            x1 = np.clip(cx + dx, 0, coarse_w - coarse_block.shape[1])
+                            cand = prev_pyr[-1][y1 : y1 + coarse_block.shape[0], x1 : x1 + coarse_block.shape[1]]
+                            sad = int(np.abs(coarse_block - cand).sum())
+                            if best_sad is None or sad < best_sad:
+                                best_sad = sad
+                                best = (dy * (3**pyramid_levels), dx * (3**pyramid_levels))
+                    for level in range(pyramid_levels - 1, -1, -1):
+                        scale = 3**level
+                        yb = y0 // scale
+                        xb = x0 // scale
+                        block_h = max(1, block // scale)
+                        block_w = max(1, block // scale)
+                        cur_block = cur_pyr[level][yb : yb + block_h, xb : xb + block_w]
+                        search_r = max(1, search // scale)
+                        dy0, dx0 = best
+                        dy0 //= 3
+                        dx0 //= 3
+                        best_ref = (dy0, dx0)
+                        best_sad = None
+                        for dy in range(-search_r, search_r + 1):
+                            for dx in range(-search_r, search_r + 1):
+                                y1 = np.clip(yb + dy0 + dy, 0, cur_pyr[level].shape[0] - block_h)
+                                x1 = np.clip(xb + dx0 + dx, 0, cur_pyr[level].shape[1] - block_w)
+                                cand = prev_pyr[level][y1 : y1 + block_h, x1 : x1 + block_w]
+                                sad = int(np.abs(cur_block - cand).sum())
+                                if best_sad is None or sad < best_sad:
+                                    best_sad = sad
+                                    best_ref = (dy0 + dy, dx0 + dx)
+                        best = (best_ref[0] * scale, best_ref[1] * scale)
+                else:
+                    for dy in range(-search, search + 1):
+                        for dx in range(-search, search + 1):
+                            y1 = np.clip(y0 + dy, 0, h - block)
+                            x1 = np.clip(x0 + dx, 0, w - block)
+                            cand = prev[y1 : y1 + block, x1 : x1 + block]
+                            sad = int(np.abs(block_cur - cand).sum())
+                            if best_sad is None or sad < best_sad:
+                                best_sad = sad
+                                best = (dy, dx)
                 mv_counts[best] = mv_counts.get(best, 0) + 1
                 y1 = np.clip(y0 + best[0], 0, h - block)
                 x1 = np.clip(x0 + best[1], 0, w - block)
@@ -146,14 +203,20 @@ def _motion_compensated_residual(
     return stacked.ravel(), {"mv_counts": mv_counts, "max_abs": max_abs}
 
 
-def _triadic_block_actions(
+def _block_reuse_actions_and_mask(
     planes: np.ndarray, block: int = 8, dict_size: int = 256
-) -> np.ndarray:
-    """Return triadic action stream for block reuse based on the first two planes."""
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return triadic action stream, encode mask, and sign-flip witness bits."""
     if planes.shape[0] < 2:
-        return np.array([], dtype=np.int8)
+        return (
+            np.array([], dtype=np.int8),
+            np.zeros((planes.shape[1], planes.shape[2], planes.shape[3]), dtype=bool),
+            np.array([], dtype=np.uint8),
+        )
     _, t, h, w = planes.shape
     actions = []
+    mask = np.zeros((t, h, w), dtype=bool)
+    flips = []
     recent = deque(maxlen=dict_size)
     recent_set: set[int] = set()
     prev_sig = None
@@ -164,6 +227,10 @@ def _triadic_block_actions(
                 x0 = min(x, w - block)
                 block0 = planes[0, ti, y0 : y0 + block, x0 : x0 + block]
                 block1 = planes[1, ti, y0 : y0 + block, x0 : x0 + block]
+                flip = 1 if block0.sum() < 0 else 0
+                if flip:
+                    block0 = -block0
+                    block1 = -block1
                 sig = zlib.crc32(block0.tobytes()) ^ zlib.crc32(block1.tobytes())
                 if prev_sig is not None and sig == prev_sig:
                     act = 0
@@ -172,6 +239,9 @@ def _triadic_block_actions(
                 else:
                     act = -1
                 actions.append(act)
+                flips.append(flip)
+                if act == -1:
+                    mask[ti, y0 : y0 + block, x0 : x0 + block] = True
                 prev_sig = sig
                 if sig not in recent_set:
                     if len(recent) == dict_size:
@@ -179,7 +249,7 @@ def _triadic_block_actions(
                         recent_set.discard(old)
                     recent.append(sig)
                     recent_set.add(sig)
-    return np.array(actions, dtype=np.int8)
+    return np.array(actions, dtype=np.int8), mask, np.array(flips, dtype=np.uint8)
 
 
 def _build_context_tables(
@@ -544,13 +614,23 @@ def _report_triadic(
     pixels: int,
     train_split: float,
     block_reuse: bool,
+    reuse_block: int,
+    reuse_dict: int,
+    bt_planes_u8: np.ndarray | None = None,
+    bt_planes_i8: np.ndarray | None = None,
+    bt_mag: np.ndarray | None = None,
+    bt_sign: np.ndarray | None = None,
+    bt_digits_override: int | None = None,
 ) -> None:
-    bt_digits = _balanced_digits_needed(signed_resid)
-    bt_planes = _balanced_ternary_digits(signed_resid, bt_digits)
-    bt_planes_u8 = (bt_planes + 1).astype(np.uint8)  # map {-1,0,1} -> {0,1,2}
-    bt_planes_i8 = bt_planes.astype(np.int8).reshape(bt_digits, frames.shape[0], height, width)
-    bt_mag = np.abs(bt_planes_i8).astype(np.uint8)
-    bt_sign = (bt_planes_i8 > 0).astype(np.uint8)
+    if bt_planes_u8 is None or bt_planes_i8 is None or bt_mag is None or bt_sign is None:
+        bt_digits = _balanced_digits_needed(signed_resid)
+        bt_planes = _balanced_ternary_digits(signed_resid, bt_digits)
+        bt_planes_u8 = (bt_planes + 1).astype(np.uint8)  # map {-1,0,1} -> {0,1,2}
+        bt_planes_i8 = bt_planes.astype(np.int8).reshape(bt_digits, frames.shape[0], height, width)
+        bt_mag = np.abs(bt_planes_i8).astype(np.uint8)
+        bt_sign = (bt_planes_i8 > 0).astype(np.uint8)
+    else:
+        bt_digits = int(bt_digits_override if bt_digits_override is not None else bt_planes_u8.shape[0])
 
     train_frames = max(1, int(frames.shape[0] * train_split))
 
@@ -687,7 +767,9 @@ def _report_triadic(
         print(f"{label} multistream (bt mag ctx + sign ctx test-only): {total_q_ctx_sign_test} bytes ({bpc_test:5.3f} bpc)")
 
     if block_reuse:
-        actions = _triadic_block_actions(bt_mag.astype(np.int8), block=8)
+        actions, mask, flips = _block_reuse_actions_and_mask(
+            bt_mag.astype(np.int8), block=reuse_block, dict_size=reuse_dict
+        )
         if actions.size:
             action_syms = (actions + 1).astype(np.uint8)
             ent = stream_entropy(action_syms)
@@ -697,60 +779,96 @@ def _report_triadic(
             bpb = (len(enc) * 8) / max(1, action_syms.size)
             print(f"{label} block_action entropy={ent:6.3f}  rANS {len(enc):8d} ({bpb:5.3f} bpb, {ms:5.1f} ms)")
 
+            masked_ctx_bytes = []
+            for idx in range(bt_digits):
+                plane = bt_planes_i8[idx].copy()
+                plane[~mask] = 0
+                prev_plane = bt_planes_i8[idx - 1].copy() if idx > 0 else None
+                if prev_plane is not None:
+                    prev_plane[~mask] = 0
+                tables = _build_context_tables(plane, prev_plane)
+                enc_plane = _encode_plane_contexted(plane, prev_plane, tables)
+                masked_ctx_bytes.append(len(enc_plane))
+            flip_bytes = 0
+            if flips.size:
+                flip_bytes = len(rans.encode(flips.astype(np.uint8), alphabet=2))
+            total_masked_ctx = sum(masked_ctx_bytes) + len(enc) + flip_bytes
+            bpc_masked = (total_masked_ctx * 8) / pixels
+            print(
+                f"{label} block_reuse ctx_rANS (masked planes + actions + flips): "
+                f"{total_masked_ctx} bytes ({bpc_masked:5.3f} bpc)"
+            )
+
 
 def run_video_bench(
     path: Path,
     max_frames: int,
     mc: bool,
+    jax_mc: bool,
+    jax_pipeline: bool,
     mc_block: int,
     mc_search: int,
+    mc_pyramid: int,
     train_split: float,
     block_reuse: bool,
+    reuse_block: int,
+    reuse_dict: int,
 ) -> None:
     width, height, nb_frames = ffprobe_video(path)
     frames = decode_gray(path, width, height, max_frames)
     actual_frames = frames.shape[0]
     pixels = frames.size
 
-    # Streams
-    raw_stream = frames.ravel()
-    residual = np.empty_like(raw_stream)
-    residual[: width * height] = raw_stream[: width * height]
-    if actual_frames > 1:
-        diffs = (frames[1:] - frames[:-1]) & 0xFF
-        residual[width * height :] = diffs.ravel()
-
-    # Signed temporal residuals for balanced ternary coding
-    base = frames[0].astype(np.int16) - 128
-    if actual_frames > 1:
-        diffs_signed = frames[1:].astype(np.int16) - frames[:-1].astype(np.int16)
-        signed_resid = np.concatenate([base.ravel(), diffs_signed.ravel()])
+    if jax_pipeline:
+        try:
+            from JAX import pipeline as jax_pipeline_mod
+        except ImportError as exc:
+            raise SystemExit(
+                "JAX pipeline requested but JAX modules are unavailable. Install JAX or run without --jax-pipeline."
+            ) from exc
+        streams, signed_resid, aux = jax_pipeline_mod.compute_streams(frames)
+        bt_cache = jax_pipeline_mod.compute_bt_planes(signed_resid, frames.shape)
     else:
-        signed_resid = base.ravel()
+        # Streams
+        raw_stream = frames.ravel()
+        residual = np.empty_like(raw_stream)
+        residual[: width * height] = raw_stream[: width * height]
+        if actual_frames > 1:
+            diffs = (frames[1:] - frames[:-1]) & 0xFF
+            residual[width * height :] = diffs.ravel()
 
-    # Orbit canonicalization for grayscale: reflect around mid (127.5)
-    coarse = np.minimum(raw_stream, 255 - raw_stream).astype(np.uint8)  # orbit ID
-    sign = (raw_stream > 127).astype(np.uint8)  # witness/refinement
+        # Signed temporal residuals for balanced ternary coding
+        base = frames[0].astype(np.int16) - 128
+        if actual_frames > 1:
+            diffs_signed = frames[1:].astype(np.int16) - frames[:-1].astype(np.int16)
+            signed_resid = np.concatenate([base.ravel(), diffs_signed.ravel()])
+        else:
+            signed_resid = base.ravel()
 
-    # Temporal residuals on canonicalized streams
-    coarse_resid = np.empty_like(coarse)
-    sign_resid = np.empty_like(sign)
-    coarse_resid[: width * height] = coarse[: width * height]
-    sign_resid[: width * height] = sign[: width * height]
-    if actual_frames > 1:
-        coarse_frames = coarse.reshape(actual_frames, height, width)
-        sign_frames = sign.reshape(actual_frames, height, width)
-        coarse_resid[width * height :] = ((coarse_frames[1:] - coarse_frames[:-1]) & 0xFF).ravel()
-        sign_resid[width * height :] = (sign_frames[1:] ^ sign_frames[:-1]).ravel()
+        # Orbit canonicalization for grayscale: reflect around mid (127.5)
+        coarse = np.minimum(raw_stream, 255 - raw_stream).astype(np.uint8)  # orbit ID
+        sign = (raw_stream > 127).astype(np.uint8)  # witness/refinement
 
-    streams = {
-        "raw": raw_stream,
-        "residual": residual,
-        "coarse": coarse,
-        "sign": sign,
-        "coarse_resid": coarse_resid,
-        "sign_resid": sign_resid,
-    }
+        # Temporal residuals on canonicalized streams
+        coarse_resid = np.empty_like(coarse)
+        sign_resid = np.empty_like(sign)
+        coarse_resid[: width * height] = coarse[: width * height]
+        sign_resid[: width * height] = sign[: width * height]
+        if actual_frames > 1:
+            coarse_frames = coarse.reshape(actual_frames, height, width)
+            sign_frames = sign.reshape(actual_frames, height, width)
+            coarse_resid[width * height :] = ((coarse_frames[1:] - coarse_frames[:-1]) & 0xFF).ravel()
+            sign_resid[width * height :] = (sign_frames[1:] ^ sign_frames[:-1]).ravel()
+
+        streams = {
+            "raw": raw_stream,
+            "residual": residual,
+            "coarse": coarse,
+            "sign": sign,
+            "coarse_resid": coarse_resid,
+            "sign_resid": sign_resid,
+        }
+        bt_cache = None
 
     print(f"Video: {path.name} | {width}x{height} | frames decoded: {actual_frames} (probe reported {nb_frames})")
     print(f"Original file bytes: {os.path.getsize(path)}")
@@ -792,14 +910,71 @@ def run_video_bench(
         pixels=pixels,
         train_split=train_split,
         block_reuse=block_reuse,
+        reuse_block=reuse_block,
+        reuse_dict=reuse_dict,
+        bt_planes_u8=bt_cache["bt_planes_u8"] if bt_cache else None,
+        bt_planes_i8=bt_cache["bt_planes_i8"] if bt_cache else None,
+        bt_mag=bt_cache["bt_mag"] if bt_cache else None,
+        bt_sign=bt_cache["bt_sign"] if bt_cache else None,
+        bt_digits_override=int(bt_cache["bt_digits"]) if bt_cache else None,
     )
 
     if mc:
-        mc_resid, stats = _motion_compensated_residual(frames, block=mc_block, search=mc_search)
-        print(
-            f"\nmc stats: block={mc_block} search={mc_search} "
-            f"max_abs={stats['max_abs']} mv_unique={len(stats['mv_counts'])}"
-        )
+        if jax_mc:
+            try:
+                from JAX import mdl_sideinfo as jax_mdl
+                from JAX import motion_search as jax_motion
+                import jax.numpy as jnp
+            except ImportError as exc:
+                raise SystemExit(
+                    "JAX modules not available. Install JAX or run without --jax-mc."
+                ) from exc
+
+            mc_resid, stats = jax_motion.motion_compensated_residual(
+                frames, block=mc_block, search=mc_search
+            )
+            mv_alpha = 0.6
+            mv_blocks = sum(stats["mv_counts"].values())
+            mv_list = []
+            for (u, v), count in stats["mv_counts"].items():
+                mv_list.extend([(u, v)] * count)
+            if mv_list:
+                mv_grid = jnp.asarray(mv_list, dtype=jnp.int32).reshape(-1, 1, 2)
+                mv_side_bits = float(
+                    jax_mdl.motion_translation_side_bits(
+                        mv_grid, alpha_u=mv_alpha, alpha_v=mv_alpha, radius=mc_search
+                    )
+                )
+            else:
+                mv_side_bits = 0.0
+            mv_bpb = (mv_side_bits / mv_blocks) if mv_blocks else 0.0
+            mv_bpp = mv_side_bits / pixels if pixels else 0.0
+            print(
+                f"\nmc stats (jax): block={mc_block} search={mc_search} pyramid=0 "
+                f"max_abs={stats['max_abs']} mv_unique={len(stats['mv_counts'])} "
+                f"mv_side_bits={mv_side_bits:.1f} mv_bpb={mv_bpb:.3f} mv_bpp={mv_bpp:.6f} "
+                f"mv_alpha={mv_alpha:.2f}"
+            )
+        else:
+            mc_resid, stats = _motion_compensated_residual(
+                frames, block=mc_block, search=mc_search, pyramid_levels=mc_pyramid
+            )
+            mv_alpha = 0.6
+            mv_blocks = sum(stats["mv_counts"].values())
+            mv_side_bits = mdl_sideinfo.motion_translation_side_bits(
+                stats["mv_counts"],
+                alpha_u=mv_alpha,
+                alpha_v=mv_alpha,
+                radius=mc_search,
+            )
+            mv_bpb = (mv_side_bits / mv_blocks) if mv_blocks else 0.0
+            mv_bpp = mv_side_bits / pixels if pixels else 0.0
+            print(
+                f"\nmc stats: block={mc_block} search={mc_search} pyramid={mc_pyramid} "
+                f"max_abs={stats['max_abs']} mv_unique={len(stats['mv_counts'])} "
+                f"mv_side_bits={mv_side_bits:.1f} mv_bpb={mv_bpb:.3f} mv_bpp={mv_bpp:.6f} "
+                f"mv_alpha={mv_alpha:.2f}"
+            )
         _report_triadic(
             label="mc",
             signed_resid=mc_resid,
@@ -809,6 +984,8 @@ def run_video_bench(
             pixels=pixels,
             train_split=train_split,
             block_reuse=block_reuse,
+            reuse_block=reuse_block,
+            reuse_dict=reuse_dict,
         )
 
 
@@ -817,10 +994,15 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("video", type=Path, help="Path to input video (e.g., MP4).")
     parser.add_argument("--frames", type=int, default=120, help="Max frames to decode for the benchmark.")
     parser.add_argument("--mc", action="store_true", help="Enable blockwise motion compensation.")
+    parser.add_argument("--jax-mc", action="store_true", help="Use JAX for motion compensation search.")
+    parser.add_argument("--jax-pipeline", action="store_true", help="Use JAX for stream prep and triadic digits.")
     parser.add_argument("--mc-block", type=int, default=8, help="Block size for motion compensation.")
     parser.add_argument("--mc-search", type=int, default=4, help="Search radius for motion compensation.")
+    parser.add_argument("--mc-pyramid", type=int, default=0, help="Factor-3 pyramid levels for motion search.")
     parser.add_argument("--train-split", type=float, default=0.5, help="Fraction of frames used for context training.")
     parser.add_argument("--block-reuse", action="store_true", help="Emit block reuse action stream stats.")
+    parser.add_argument("--reuse-block", type=int, default=8, help="Block size for reuse actions.")
+    parser.add_argument("--reuse-dict", type=int, default=256, help="Block reuse dictionary size.")
     args = parser.parse_args(argv)
 
     if not args.video.exists():
@@ -830,11 +1012,16 @@ def main(argv: list[str] | None = None) -> None:
     run_video_bench(
         args.video,
         max_frames=args.frames,
-        mc=args.mc,
+        mc=args.mc or args.jax_mc,
+        jax_mc=args.jax_mc,
+        jax_pipeline=args.jax_pipeline,
         mc_block=args.mc_block,
         mc_search=args.mc_search,
+        mc_pyramid=args.mc_pyramid,
         train_split=args.train_split,
         block_reuse=args.block_reuse,
+        reuse_block=args.reuse_block,
+        reuse_dict=args.reuse_dict,
     )
 
 
