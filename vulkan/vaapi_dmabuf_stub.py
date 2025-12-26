@@ -343,6 +343,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Minimal VAAPI dmabuf -> Vulkan import stub.")
     parser.add_argument("video", type=Path, help="Path to input video.")
     parser.add_argument("--vaapi-device", default="/dev/dri/renderD128")
+    parser.add_argument("--timeout-s", type=float, default=5.0, help="Max seconds to wait for export.")
+    parser.add_argument(
+        "--force-linear",
+        action="store_true",
+        help="Force VAAPI download/upload to get a linear dmabuf when modifiers are implicit.",
+    )
     args = parser.parse_args()
 
     source = Path(__file__).with_name("vaapi_dmabuf_export.c")
@@ -350,10 +356,14 @@ def main() -> int:
     _build_helper(source, binary)
 
     parent_sock, child_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+    parent_sock.settimeout(args.timeout_s)
     env = os.environ.copy()
     env["DMABUF_STUB_SOCK_FD"] = str(child_sock.fileno())
+    cmd = [str(binary), str(args.video), args.vaapi_device]
+    if args.force_linear:
+        cmd.append("--force-linear")
     proc = subprocess.Popen(
-        [str(binary), str(args.video), args.vaapi_device],
+        cmd,
         pass_fds=[child_sock.fileno()],
         env=env,
         stdout=subprocess.PIPE,
@@ -362,9 +372,19 @@ def main() -> int:
     )
     child_sock.close()
 
-    info, fds = _recv_dmabuf(parent_sock)
+    try:
+        info, fds = _recv_dmabuf(parent_sock)
+    except socket.timeout as exc:
+        proc.kill()
+        out, err = proc.communicate()
+        raise RuntimeError(f"timed out waiting for dmabuf export ({args.timeout_s}s)") from exc
     parent_sock.close()
-    out, err = proc.communicate()
+    try:
+        out, err = proc.communicate(timeout=args.timeout_s)
+    except subprocess.TimeoutExpired as exc:
+        proc.kill()
+        out, err = proc.communicate()
+        raise RuntimeError(f"export helper did not exit in {args.timeout_s}s") from exc
     if proc.returncode != 0:
         raise RuntimeError(out + err)
 

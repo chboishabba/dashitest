@@ -127,7 +127,7 @@ static int send_dmabuf_info(int sock_fd, const AVFrame *drm_frame) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <video> [vaapi_device]\n", argv[0]);
+        fprintf(stderr, "usage: %s <video> [vaapi_device] [--force-linear] [--debug]\n", argv[0]);
         return 1;
     }
     const char *sock_env = getenv("DMABUF_STUB_SOCK_FD");
@@ -141,7 +141,21 @@ int main(int argc, char **argv) {
         return 1;
     }
     const char *input = argv[1];
-    const char *vaapi_device = argc > 2 ? argv[2] : "/dev/dri/renderD128";
+    const char *vaapi_device = "/dev/dri/renderD128";
+    int force_linear = 0;
+    int debug = 0;
+    for (int i = 2; i < argc; i++) {
+        if (strcmp(argv[i], "--force-linear") == 0) {
+            force_linear = 1;
+        } else if (strcmp(argv[i], "--debug") == 0) {
+            debug = 1;
+        } else {
+            vaapi_device = argv[i];
+        }
+    }
+    if (debug) {
+        fprintf(stderr, "vaapi dmabuf export: input=%s device=%s force_linear=%d\n", input, vaapi_device, force_linear);
+    }
 
     av_log_set_level(AV_LOG_ERROR);
 
@@ -206,15 +220,57 @@ int main(int argc, char **argv) {
         avformat_close_input(&fmt_ctx);
         return 1;
     }
+    if (debug) {
+        fprintf(stderr, "vaapi dmabuf export: decoder opened (%dx%d)\n", codec_ctx->width, codec_ctx->height);
+    }
+
+    AVBufferRef *drm_device_ctx = NULL;
+    AVBufferRef *drm_frames_ctx = NULL;
+    if (force_linear) {
+        if (av_hwdevice_ctx_create(&drm_device_ctx, AV_HWDEVICE_TYPE_DRM, vaapi_device, NULL, 0) < 0) {
+            fprintf(stderr, "vaapi dmabuf export: failed to create DRM device (%s)\n", vaapi_device);
+            av_buffer_unref(&hw_device_ctx);
+            avcodec_free_context(&codec_ctx);
+            avformat_close_input(&fmt_ctx);
+            return 1;
+        }
+        drm_frames_ctx = av_hwframe_ctx_alloc(drm_device_ctx);
+        if (!drm_frames_ctx) {
+            fprintf(stderr, "vaapi dmabuf export: failed to alloc DRM frames ctx\n");
+            av_buffer_unref(&drm_device_ctx);
+            av_buffer_unref(&hw_device_ctx);
+            avcodec_free_context(&codec_ctx);
+            avformat_close_input(&fmt_ctx);
+            return 1;
+        }
+        AVHWFramesContext *frames_ctx = (AVHWFramesContext *)drm_frames_ctx->data;
+        frames_ctx->format = AV_PIX_FMT_DRM_PRIME;
+        frames_ctx->sw_format = AV_PIX_FMT_NV12;
+        frames_ctx->width = codec_ctx->width;
+        frames_ctx->height = codec_ctx->height;
+        if (av_hwframe_ctx_init(drm_frames_ctx) < 0) {
+            fprintf(stderr, "vaapi dmabuf export: failed to init DRM frames ctx\n");
+            av_buffer_unref(&drm_frames_ctx);
+            av_buffer_unref(&drm_device_ctx);
+            av_buffer_unref(&hw_device_ctx);
+            avcodec_free_context(&codec_ctx);
+            avformat_close_input(&fmt_ctx);
+            return 1;
+        }
+    }
 
     AVPacket *pkt = av_packet_alloc();
     AVFrame *frame = av_frame_alloc();
     AVFrame *drm_frame = av_frame_alloc();
-    if (!pkt || !frame || !drm_frame) {
+    AVFrame *sw_frame = av_frame_alloc();
+    if (!pkt || !frame || !drm_frame || !sw_frame) {
         fprintf(stderr, "vaapi dmabuf export: allocation failure\n");
         av_packet_free(&pkt);
         av_frame_free(&frame);
         av_frame_free(&drm_frame);
+        av_frame_free(&sw_frame);
+        av_buffer_unref(&drm_frames_ctx);
+        av_buffer_unref(&drm_device_ctx);
         av_buffer_unref(&hw_device_ctx);
         avcodec_free_context(&codec_ctx);
         avformat_close_input(&fmt_ctx);
@@ -233,17 +289,52 @@ int main(int argc, char **argv) {
             continue;
         }
         while ((ret = avcodec_receive_frame(codec_ctx, frame)) == 0) {
+            if (debug) {
+                fprintf(stderr, "vaapi dmabuf export: got frame format=%d\n", frame->format);
+            }
             if (frame->format != AV_PIX_FMT_VAAPI) {
                 fprintf(stderr, "vaapi dmabuf export: decoded frame not VAAPI\n");
                 break;
             }
-            drm_frame->format = AV_PIX_FMT_DRM_PRIME;
-            drm_frame->width = frame->width;
-            drm_frame->height = frame->height;
-            if (av_hwframe_map(drm_frame, frame, AV_HWFRAME_MAP_READ | AV_HWFRAME_MAP_DIRECT) < 0) {
-                fprintf(stderr, "vaapi dmabuf export: failed to map to DRM PRIME\n");
-                break;
+            if (force_linear) {
+                sw_frame->format = AV_PIX_FMT_NV12;
+                sw_frame->width = frame->width;
+                sw_frame->height = frame->height;
+                if (av_frame_get_buffer(sw_frame, 1) < 0) {
+                    fprintf(stderr, "vaapi dmabuf export: failed to alloc sw frame\n");
+                    break;
+                }
+                if (av_hwframe_transfer_data(sw_frame, frame, 0) < 0) {
+                    fprintf(stderr, "vaapi dmabuf export: failed to download to sw frame\n");
+                    av_frame_unref(sw_frame);
+                    break;
+                }
+                drm_frame->format = AV_PIX_FMT_DRM_PRIME;
+                drm_frame->width = frame->width;
+                drm_frame->height = frame->height;
+                drm_frame->hw_frames_ctx = av_buffer_ref(drm_frames_ctx);
+                if (av_hwframe_get_buffer(drm_frames_ctx, drm_frame, 0) < 0) {
+                    fprintf(stderr, "vaapi dmabuf export: failed to alloc DRM frame\n");
+                    av_frame_unref(sw_frame);
+                    break;
+                }
+                if (av_hwframe_transfer_data(drm_frame, sw_frame, 0) < 0) {
+                    fprintf(stderr, "vaapi dmabuf export: failed to upload to DRM frame\n");
+                    av_frame_unref(sw_frame);
+                    av_frame_unref(drm_frame);
+                    break;
+                }
+                av_frame_unref(sw_frame);
+            } else {
+                drm_frame->format = AV_PIX_FMT_DRM_PRIME;
+                drm_frame->width = frame->width;
+                drm_frame->height = frame->height;
+                if (av_hwframe_map(drm_frame, frame, AV_HWFRAME_MAP_READ | AV_HWFRAME_MAP_DIRECT) < 0) {
+                    fprintf(stderr, "vaapi dmabuf export: failed to map to DRM PRIME\n");
+                    break;
+                }
             }
+
             if (send_dmabuf_info(sock_fd, drm_frame) == 0) {
                 sent = 1;
             }
@@ -258,6 +349,9 @@ int main(int argc, char **argv) {
     av_packet_free(&pkt);
     av_frame_free(&frame);
     av_frame_free(&drm_frame);
+    av_frame_free(&sw_frame);
+    av_buffer_unref(&drm_frames_ctx);
+    av_buffer_unref(&drm_device_ctx);
     av_buffer_unref(&hw_device_ctx);
     avcodec_free_context(&codec_ctx);
     avformat_close_input(&fmt_ctx);

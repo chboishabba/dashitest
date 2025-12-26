@@ -73,6 +73,15 @@ Run:
 ```
 python vulkan/vaapi_dmabuf_stub.py path/to/video.mp4 --vaapi-device /dev/dri/renderD128
 ```
+Add a shorter timeout if decode stalls:
+```
+python vulkan/vaapi_dmabuf_stub.py path/to/video.mp4 --timeout-s 5
+```
+If modifiers are implicit (e.g. `DRM_FORMAT_MOD_INVALID`), force a linear
+dmabuf by downloading to NV12 and re-uploading into a DRM buffer:
+```
+python vulkan/vaapi_dmabuf_stub.py path/to/video.mp4 --force-linear
+```
 
 Notes:
 - Currently supports NV12 (`NV12`) and P010 (`P010`) multi-plane formats, plus
