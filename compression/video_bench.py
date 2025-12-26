@@ -322,6 +322,43 @@ def _build_context_tables(
     return tables
 
 
+def _context_entropy_trit(plane: np.ndarray, prev_plane: np.ndarray | None) -> float:
+    """Empirical conditional entropy (bits/symbol) for ternary plane contexts."""
+    t, h, w = plane.shape
+    contexts = 81
+    counts = np.zeros((contexts, 3), dtype=np.int64)
+
+    def idx_from_trits(a: int, b: int, c: int, d: int) -> int:
+        return (((a * 3 + b) * 3 + c) * 3 + d)
+
+    for ti in range(t):
+        for yi in range(h):
+            row = plane[ti, yi]
+            up = plane[ti, yi - 1] if yi > 0 else None
+            prev_frame = plane[ti - 1, yi] if ti > 0 else None
+            prev_p = prev_plane[ti, yi] if prev_plane is not None else None
+            for xi in range(w):
+                left = row[xi - 1] if xi > 0 else 0
+                up_val = up[xi] if up is not None else 0
+                prev_val = prev_frame[xi] if prev_frame is not None else 0
+                prevp_val = prev_p[xi] if prev_p is not None else 0
+                ctx = idx_from_trits(prevp_val + 1, prev_val + 1, up_val + 1, left + 1)
+                counts[ctx, row[xi] + 1] += 1
+
+    total = counts.sum()
+    if total == 0:
+        return 0.0
+    ent = 0.0
+    for ctx in range(contexts):
+        cnt = counts[ctx]
+        csum = cnt.sum()
+        if csum == 0:
+            continue
+        probs = cnt[cnt > 0] / csum
+        ent -= (csum / total) * float((probs * np.log2(probs)).sum())
+    return ent
+
+
 def _encode_plane_contexted(
     plane: np.ndarray,
     prev_plane: np.ndarray | None,
@@ -394,6 +431,43 @@ def _build_binary_context_tables(
             scaled[idx[:take]] -= 1
         tables.append(rans.FreqTable.from_freqs(scaled.astype(int).tolist()))
     return tables
+
+
+def _context_entropy_bin(plane: np.ndarray, prev_plane: np.ndarray | None) -> float:
+    """Empirical conditional entropy (bits/symbol) for binary plane contexts."""
+    t, h, w = plane.shape
+    contexts = 16
+    counts = np.zeros((contexts, 2), dtype=np.int64)
+
+    def idx_from_bits(a: int, b: int, c: int, d: int) -> int:
+        return (((a << 1) | b) << 2) | (c << 1) | d
+
+    for ti in range(t):
+        for yi in range(h):
+            row = plane[ti, yi]
+            up = plane[ti, yi - 1] if yi > 0 else None
+            prev_frame = plane[ti - 1, yi] if ti > 0 else None
+            prev_p = prev_plane[ti, yi] if prev_plane is not None else None
+            for xi in range(w):
+                left = int(row[xi - 1]) if xi > 0 else 0
+                up_val = int(up[xi]) if up is not None else 0
+                prev_val = int(prev_frame[xi]) if prev_frame is not None else 0
+                prevp_val = int(prev_p[xi]) if prev_p is not None else 0
+                ctx = idx_from_bits(prevp_val, prev_val, up_val, left)
+                counts[ctx, int(row[xi])] += 1
+
+    total = counts.sum()
+    if total == 0:
+        return 0.0
+    ent = 0.0
+    for ctx in range(contexts):
+        cnt = counts[ctx]
+        csum = cnt.sum()
+        if csum == 0:
+            continue
+        probs = cnt[cnt > 0] / csum
+        ent -= (csum / total) * float((probs * np.log2(probs)).sum())
+    return ent
 
 
 def _encode_binary_plane_contexted(
@@ -477,6 +551,55 @@ def _build_gated_sign_tables(
             scaled[idx[:take]] -= 1
         tables.append(rans.FreqTable.from_freqs(scaled.astype(int).tolist()))
     return tables
+
+
+def _context_entropy_sign(
+    mag: np.ndarray,
+    sign: np.ndarray,
+    prev_sign: np.ndarray | None,
+) -> float:
+    """Empirical conditional entropy (bits/symbol) for gated sign contexts."""
+    t, h, w = sign.shape
+    contexts = 128
+    counts = np.zeros((contexts, 2), dtype=np.int64)
+
+    def idx_from_bits(a: int, b: int, c: int, d: int, e: int, f: int, g: int) -> int:
+        return (((((((a << 1) | b) << 1) | c) << 1 | d) << 1 | e) << 1 | f) << 1 | g
+
+    for ti in range(t):
+        for yi in range(h):
+            row = sign[ti, yi]
+            mag_row = mag[ti, yi]
+            up = sign[ti, yi - 1] if yi > 0 else None
+            up_mag = mag[ti, yi - 1] if yi > 0 else None
+            prev_frame = sign[ti - 1, yi] if ti > 0 else None
+            prev_mag = mag[ti - 1, yi] if ti > 0 else None
+            prev_p = prev_sign[ti, yi] if prev_sign is not None else None
+            for xi in range(w):
+                if mag_row[xi] == 0:
+                    continue
+                left = int(row[xi - 1]) if xi > 0 else 0
+                up_val = int(up[xi]) if up is not None else 0
+                prev_val = int(prev_frame[xi]) if prev_frame is not None else 0
+                prevp_val = int(prev_p[xi]) if prev_p is not None else 0
+                left_mag = int(mag_row[xi - 1]) if xi > 0 else 0
+                up_mag_val = int(up_mag[xi]) if up_mag is not None else 0
+                prev_mag_val = int(prev_mag[xi]) if prev_mag is not None else 0
+                ctx = idx_from_bits(prevp_val, prev_val, up_val, left, prev_mag_val, up_mag_val, left_mag)
+                counts[ctx, int(row[xi])] += 1
+
+    total = counts.sum()
+    if total == 0:
+        return 0.0
+    ent = 0.0
+    for ctx in range(contexts):
+        cnt = counts[ctx]
+        csum = cnt.sum()
+        if csum == 0:
+            continue
+        probs = cnt[cnt > 0] / csum
+        ent -= (csum / total) * float((probs * np.log2(probs)).sum())
+    return ent
 
 
 def _encode_gated_sign_contexted(
@@ -661,9 +784,12 @@ def _report_triadic(
     plane_bytes = []
     ctx_plane_bytes = []
     ctx_test_bytes = []
+    ctx_entropies = []
     for idx in range(bt_digits):
         plane = bt_planes_u8[idx]
         ent = stream_entropy(plane)
+        ctx_ent = _context_entropy_trit(bt_planes_i8[idx], bt_planes_i8[idx - 1] if idx > 0 else None)
+        ctx_entropies.append(ctx_ent)
         start = time.perf_counter()
         enc = rans.encode(plane, alphabet=3)
         ms = (time.perf_counter() - start) * 1000.0
@@ -707,6 +833,8 @@ def _report_triadic(
     sign_bytes = []
     sign_ctx_bytes = []
     sign_ctx_test_bytes = []
+    mag_ctx_entropies = []
+    sign_ctx_entropies = []
     for idx in range(bt_digits):
         mag = bt_mag[idx]
         sign = bt_sign[idx]
@@ -727,6 +855,7 @@ def _report_triadic(
         mag_ctx_ms = (time.perf_counter() - ctx_start) * 1000.0
         mag_ctx_bytes.append(len(mag_ctx_enc))
         mag_ctx_bpc = (len(mag_ctx_enc) * 8) / pixels
+        mag_ctx_entropies.append(_context_entropy_bin(mag, prev_mag))
 
         sign_ent = stream_entropy(sign_stream.astype(np.uint8)) if sign_stream.size else 0.0
         start = time.perf_counter()
@@ -743,8 +872,10 @@ def _report_triadic(
             sign_ctx_enc = _encode_gated_sign_contexted(mag, sign, prev_sign, sign_tables)
             ctx_sign_ms = (time.perf_counter() - ctx_start) * 1000.0
             sign_ctx_bytes.append(len(sign_ctx_enc))
+            sign_ctx_entropies.append(_context_entropy_sign(mag, sign, prev_sign))
         else:
             sign_ctx_bytes.append(0)
+            sign_ctx_entropies.append(0.0)
         sign_ctx_bpc = (sign_ctx_bytes[-1] * 8) / pixels
 
         if train_frames < frames.shape[0] and sign_stream.size:
@@ -842,6 +973,31 @@ def _report_triadic(
                 f"action={len(enc)} ref={ref_bytes} flip={flip_bytes} planes={sum(masked_ctx_bytes)}"
             )
 
+    # Shannon efficiency summary (context-conditional entropy vs coded length)
+    h_ctx_bits = 0.0
+    for idx, h in enumerate(ctx_entropies):
+        h_ctx_bits += h * bt_planes_u8[idx].size
+    l_ctx_bits = total_ctx * 8
+    eta_ctx = (h_ctx_bits / l_ctx_bits) if l_ctx_bits else 0.0
+    print(f"{label} eta_ctx_trit={eta_ctx:5.3f} (H={h_ctx_bits:.1f} bits, L={l_ctx_bits:.1f} bits)")
+
+    h_mag_bits = 0.0
+    h_sign_bits = 0.0
+    for idx, h in enumerate(mag_ctx_entropies):
+        h_mag_bits += h * bt_mag[idx].size
+    for idx, h in enumerate(sign_ctx_entropies):
+        # gated signs only where mag != 0
+        h_sign_bits += h * int(bt_mag[idx].sum())
+    l_mag_bits = sum(mag_ctx_bytes) * 8
+    l_sign_bits = sum(sign_ctx_bytes) * 8
+    eta_mag = (h_mag_bits / l_mag_bits) if l_mag_bits else 0.0
+    eta_sign = (h_sign_bits / l_sign_bits) if l_sign_bits else 0.0
+    eta_mdl = ((h_mag_bits + h_sign_bits) / (l_mag_bits + l_sign_bits)) if (l_mag_bits + l_sign_bits) else 0.0
+    print(
+        f"{label} eta_mag_ctx={eta_mag:5.3f} eta_sign_ctx={eta_sign:5.3f} "
+        f"eta_MDL={eta_mdl:5.3f}"
+    )
+
 
 def run_video_bench(
     path: Path,
@@ -918,6 +1074,13 @@ def run_video_bench(
     print(f"Original file bytes: {os.path.getsize(path)}")
     print(f"Total pixels: {pixels}")
     print()
+
+    # Explained energy by temporal residuals (L2)
+    centered = frames.astype(np.int32) - 128
+    base_energy = float((centered * centered).sum())
+    resid_energy = float((signed_resid.astype(np.int64) ** 2).sum())
+    explained_l2 = 1.0 - (resid_energy / base_energy) if base_energy else 0.0
+    print(f"explained_L2 (temporal residual): {explained_l2:6.4f}")
 
     for name, arr in streams.items():
         ent = stream_entropy(arr)
