@@ -1,4 +1,4 @@
-# VAAPI Zero-Copy Path (WIP)
+# VAAPI Zero-Copy Path
 
 Goal: decode via VAAPI and import GPU frames directly into Vulkan without
 `hwdownload` or CPU staging.
@@ -17,7 +17,7 @@ Current pipeline still pulls frames back to CPU for upload. Zero-copy aims to:
 - Vulkan device extensions:
   - `VK_KHR_external_memory_fd`
   - `VK_EXT_external_memory_dma_buf`
-  - `VK_EXT_image_drm_format_modifier`
+  - `VK_EXT_image_drm_format_modifier` (optional; required for image import with modifiers)
 
 Run the probe:
 ```
@@ -32,10 +32,10 @@ python vulkan/vaapi_probe.py
 4. Bind imported memory to the Vulkan image
 5. Run compute + render without CPU staging
 
-## Minimal dmabuf interop stub (next experiment)
+## Minimal dmabuf interop stub
 
-Goal: prove zero-copy decode -> Vulkan import works for a single frame. No diff,
-no render, no entropy coding.
+Goal: prove zero-copy decode -> Vulkan import works for a single frame, plus a
+GPU NV12/P010 -> RGBA conversion path. No diff, no entropy coding.
 
 1) Decode one VAAPI frame as DRM PRIME (dmabuf-backed), not `hwdownload`:
 ```
@@ -58,7 +58,7 @@ ffmpeg \
    - `VkImportMemoryFdInfoKHR` with `VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT`
 4) Bind memory to the image and transition layout to `GENERAL` or
    `SHADER_READ_ONLY_OPTIMAL`.
-5) Stop. Success = image import works without CPU copies.
+5) Stop. Success = image or buffer import works without CPU copies.
 
 ## Stub implementation
 
@@ -66,8 +66,9 @@ ffmpeg \
 
 - Builds `vulkan/vaapi_dmabuf_export.c` (libavformat/libavcodec/libavutil)
 - Decodes one VAAPI frame and exports a dmabuf via `AV_PIX_FMT_DRM_PRIME`
-- Imports the dmabuf into Vulkan with the external memory + DRM modifier path
-- Performs a single layout transition barrier and exits
+- Imports the dmabuf into Vulkan with the external memory path
+- Falls back to buffer import if modifier-based image import is not available
+- Runs an NV12/P010 -> RGBA compute shader on the GPU
 
 Run:
 ```
@@ -82,6 +83,21 @@ dmabuf by downloading to NV12 and re-uploading into a DRM buffer:
 ```
 python vulkan/vaapi_dmabuf_stub.py path/to/video.mp4 --force-linear
 ```
+Debug the exporter if it hangs:
+```
+python vulkan/vaapi_dmabuf_stub.py path/to/video.mp4 --force-linear --debug --timeout-s 5
+```
+If DRM allocation fails, try using a card node for the upload path:
+```
+python vulkan/vaapi_dmabuf_stub.py path/to/video.mp4 --force-linear --drm-device /dev/dri/card0
+```
+If image import fails due to modifiers, the stub falls back to importing dmabufs
+as Vulkan buffers and runs an NV12/P010 -> RGBA compute shader.
+
+Preview in the Vulkan bench (single-frame dmabuf path):
+```
+python vulkan/video_bench_vk.py path/to/video.mp4 --vaapi-dmabuf --dmabuf-debug
+```
 
 Notes:
 - Currently supports NV12 (`NV12`) and P010 (`P010`) multi-plane formats, plus
@@ -90,10 +106,12 @@ Notes:
 - If `VK_EXT_image_drm_format_modifier` is missing, try setting
   `VK_ICD_FILENAMES` to your Mesa RADV ICD (the stub will report the device
   and related extensions when it fails).
-- Without `VK_EXT_image_drm_format_modifier`, the stub only accepts linear
-  dmabufs (modifier 0). Non-linear modifiers will fail. The exporter may report
-  `DRM_FORMAT_MOD_INVALID` (all 1s); the stub treats that as linear for the
-  minimal experiment.
+- Without `VK_EXT_image_drm_format_modifier`, image import is blocked unless
+  modifiers are explicit and linear. The stub still works via buffer import.
+- `--force-linear` requires a DRM primary node (`/dev/dri/card*`) for the
+  upload path.
+- The helper uses libva-drm to create a `vaGetDisplayDRM` display when
+  `av_hwdevice_ctx_create` fails. Ensure `libva-drm` is installed.
 - Requires Vulkan extensions listed above, plus working VAAPI decode.
 
 ## Status
@@ -104,6 +122,5 @@ Notes:
 
 ## Next steps
 
-- Confirm device extensions via `vaapi_probe.py`.
-- Evaluate Python bindings for external memory structs.
-- Prototype importing a single dmabuf into Vulkan.
+- Extend dmabuf export to multiple frames for playback.
+- Add a GPU diff/triadic path on top of the buffer-import color conversion.

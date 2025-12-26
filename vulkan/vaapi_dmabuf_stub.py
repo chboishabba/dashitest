@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import socket
-import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -14,18 +12,11 @@ try:
 except Exception as exc:  # pragma: no cover - runtime dependency
     raise SystemExit(f"python-vulkan is required: {exc}") from exc
 
+try:
+    from .dmabuf_export import export_dmabuf
+except Exception:
+    from dmabuf_export import export_dmabuf
 
-MAX_OBJECTS = 4
-MAX_PLANES = 4
-
-HEADER_FMT = "<IIIII"
-OBJ_FMT = "<QQ"
-PLANE_FMT = "<III"
-INFO_SIZE = (
-    struct.calcsize(HEADER_FMT)
-    + MAX_OBJECTS * struct.calcsize(OBJ_FMT)
-    + MAX_PLANES * struct.calcsize(PLANE_FMT)
-)
 
 def _fourcc(a: str, b: str, c: str, d: str) -> int:
     return ord(a) | (ord(b) << 8) | (ord(c) << 16) | (ord(d) << 24)
@@ -40,65 +31,21 @@ DRM_FORMAT_P010 = _fourcc("P", "0", "1", "0")
 DRM_FORMAT_R16 = _fourcc("R", "1", "6", " ")
 DRM_FORMAT_MOD_INVALID = 0xFFFFFFFFFFFFFFFF
 
-
-def _run(cmd: List[str]) -> str:
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise RuntimeError(proc.stdout + proc.stderr)
-    return proc.stdout.strip()
+SHADER_DIR = Path(__file__).resolve().parent / "shaders"
 
 
-def _build_helper(source: Path, binary: Path) -> None:
-    if binary.exists() and binary.stat().st_mtime >= source.stat().st_mtime:
-        return
-    cflags = _run(["pkg-config", "--cflags", "libavformat", "libavcodec", "libavutil"]).split()
-    libs = _run(["pkg-config", "--libs", "libavformat", "libavcodec", "libavutil"]).split()
-    cmd = [
-        "cc",
-        "-std=c11",
-        "-O2",
-        "-Wall",
-        "-Wextra",
-        "-o",
-        str(binary),
-        str(source),
-    ] + cflags + libs
-    subprocess.run(cmd, check=True)
+def _ensure_spirv(spv_path: Path, src_path: Path) -> None:
+    if spv_path.exists():
+        try:
+            if spv_path.stat().st_mtime >= src_path.stat().st_mtime:
+                return
+        except OSError:
+            pass
+    subprocess.run(["glslc", str(src_path), "-o", str(spv_path)], check=True)
 
 
-def _recv_dmabuf(sock: socket.socket) -> Tuple[dict, List[int]]:
-    data, ancdata, _, _ = sock.recvmsg(INFO_SIZE, socket.CMSG_SPACE(MAX_OBJECTS * 4))
-    if len(data) < INFO_SIZE:
-        raise RuntimeError("short dmabuf metadata read")
-    fds: List[int] = []
-    for cmsg_level, cmsg_type, cmsg_data in ancdata:
-        if cmsg_level == socket.SOL_SOCKET and cmsg_type == socket.SCM_RIGHTS:
-            fds.extend(struct.unpack(f"<{len(cmsg_data) // 4}i", cmsg_data))
-    offset = 0
-    width, height, drm_format, nb_objects, nb_planes = struct.unpack_from(HEADER_FMT, data, offset)
-    offset += struct.calcsize(HEADER_FMT)
-    objects = []
-    for _ in range(MAX_OBJECTS):
-        modifier, size = struct.unpack_from(OBJ_FMT, data, offset)
-        objects.append({"modifier": modifier, "size": size})
-        offset += struct.calcsize(OBJ_FMT)
-    planes = []
-    for _ in range(MAX_PLANES):
-        obj_index, plane_offset, pitch = struct.unpack_from(PLANE_FMT, data, offset)
-        planes.append({"object_index": obj_index, "offset": plane_offset, "pitch": pitch})
-        offset += struct.calcsize(PLANE_FMT)
-    return (
-        {
-            "width": width,
-            "height": height,
-            "drm_format": drm_format,
-            "nb_objects": nb_objects,
-            "nb_planes": nb_planes,
-            "objects": objects,
-            "planes": planes,
-        },
-        fds,
-    )
+def _read_spirv_bytes(spv_path: Path) -> bytes:
+    return spv_path.read_bytes()
 
 
 def _choose_queue_family(physical_device) -> int:
@@ -339,6 +286,369 @@ def _import_dmabuf_image(info: dict, fds: List[int]) -> None:
     vkDestroyInstance(instance, None)
 
 
+def _import_dmabuf_buffers(info: dict, fds: List[int]) -> None:
+    app_info = VkApplicationInfo(
+        sType=VK_STRUCTURE_TYPE_APPLICATION_INFO,
+        pApplicationName="vaapi_dmabuf_stub",
+        applicationVersion=VK_MAKE_VERSION(1, 0, 0),
+        pEngineName="none",
+        engineVersion=VK_MAKE_VERSION(1, 0, 0),
+        apiVersion=VK_MAKE_VERSION(1, 0, 0),
+    )
+    instance = vkCreateInstance(
+        VkInstanceCreateInfo(
+            sType=VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+            pApplicationInfo=app_info,
+        ),
+        None,
+    )
+    devices = vkEnumeratePhysicalDevices(instance)
+    if not devices:
+        raise RuntimeError("no Vulkan physical devices found")
+    physical_device = devices[0]
+
+    required_exts = [
+        "VK_KHR_external_memory",
+        "VK_KHR_external_memory_fd",
+        "VK_EXT_external_memory_dma_buf",
+    ]
+    queue_family_index = _choose_queue_family(physical_device)
+    queue_info = VkDeviceQueueCreateInfo(
+        sType=VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+        queueFamilyIndex=queue_family_index,
+        queueCount=1,
+        pQueuePriorities=[1.0],
+    )
+    device = vkCreateDevice(
+        physical_device,
+        VkDeviceCreateInfo(
+            sType=VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+            queueCreateInfoCount=1,
+            pQueueCreateInfos=[queue_info],
+            enabledExtensionCount=len(required_exts),
+            ppEnabledExtensionNames=required_exts,
+        ),
+        None,
+    )
+    queue = vkGetDeviceQueue(device, queue_family_index, 0)
+
+    imported = []
+    for obj_idx in range(info["nb_objects"]):
+        size = int(info["objects"][obj_idx]["size"])
+        fd = fds[obj_idx]
+        buf = vkCreateBuffer(
+            device,
+            VkBufferCreateInfo(
+                sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                size=size,
+                usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                sharingMode=VK_SHARING_MODE_EXCLUSIVE,
+            ),
+            None,
+        )
+        mem_req = vkGetBufferMemoryRequirements(device, buf)
+        memory_type = _find_memory_type(physical_device, mem_req.memoryTypeBits)
+        import_info = VkImportMemoryFdInfoKHR(
+            sType=VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
+            handleType=VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+            fd=fd,
+        )
+        alloc_info = VkMemoryAllocateInfo(
+            sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            allocationSize=mem_req.size,
+            memoryTypeIndex=memory_type,
+            pNext=import_info,
+        )
+        memory = vkAllocateMemory(device, alloc_info, None)
+        vkBindBufferMemory(device, buf, memory, 0)
+        imported.append((buf, memory, size))
+
+    print("dmabuf buffer-import OK")
+    for idx, (_, __, size) in enumerate(imported):
+        print(f"  object {idx}: size={size} bytes")
+
+    if info["nb_objects"] < 1 or info["nb_planes"] < 2:
+        raise RuntimeError("buffer import requires at least one object and two planes")
+
+    shader_src = SHADER_DIR / "nv12_to_rgba.comp"
+    shader_spv = shader_src.with_suffix(".spv")
+    _ensure_spirv(shader_spv, shader_src)
+    shader_bytes = _read_spirv_bytes(shader_spv)
+    shader_module = vkCreateShaderModule(
+        device,
+        VkShaderModuleCreateInfo(
+            sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            codeSize=len(shader_bytes),
+            pCode=shader_bytes,
+        ),
+        None,
+    )
+
+    set_layout = vkCreateDescriptorSetLayout(
+        device,
+        VkDescriptorSetLayoutCreateInfo(
+            sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            bindingCount=2,
+            pBindings=[
+                VkDescriptorSetLayoutBinding(
+                    binding=0,
+                    descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    descriptorCount=1,
+                    stageFlags=VK_SHADER_STAGE_COMPUTE_BIT,
+                ),
+                VkDescriptorSetLayoutBinding(
+                    binding=1,
+                    descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    descriptorCount=1,
+                    stageFlags=VK_SHADER_STAGE_COMPUTE_BIT,
+                ),
+            ],
+        ),
+        None,
+    )
+    push_size = 7 * 4
+    pipeline_layout = vkCreatePipelineLayout(
+        device,
+        VkPipelineLayoutCreateInfo(
+            sType=VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            setLayoutCount=1,
+            pSetLayouts=[set_layout],
+            pushConstantRangeCount=1,
+            pPushConstantRanges=[
+                VkPushConstantRange(
+                    stageFlags=VK_SHADER_STAGE_COMPUTE_BIT,
+                    offset=0,
+                    size=push_size,
+                )
+            ],
+        ),
+        None,
+    )
+    pipeline = vkCreateComputePipelines(
+        device,
+        VK_NULL_HANDLE,
+        1,
+        [
+            VkComputePipelineCreateInfo(
+                sType=VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                stage=VkPipelineShaderStageCreateInfo(
+                    sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                    stage=VK_SHADER_STAGE_COMPUTE_BIT,
+                    module=shader_module,
+                    pName=ffi.new("char[]", b"main"),
+                ),
+                layout=pipeline_layout,
+            )
+        ],
+        None,
+    )[0]
+
+    out_info = VkImageCreateInfo(
+        sType=VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        imageType=VK_IMAGE_TYPE_2D,
+        format=VK_FORMAT_R8G8B8A8_UNORM,
+        extent=VkExtent3D(width=info["width"], height=info["height"], depth=1),
+        mipLevels=1,
+        arrayLayers=1,
+        samples=VK_SAMPLE_COUNT_1_BIT,
+        tiling=VK_IMAGE_TILING_OPTIMAL,
+        usage=VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        sharingMode=VK_SHARING_MODE_EXCLUSIVE,
+        initialLayout=VK_IMAGE_LAYOUT_UNDEFINED,
+    )
+    out_image = vkCreateImage(device, out_info, None)
+    out_reqs = vkGetImageMemoryRequirements(device, out_image)
+    out_type = _find_memory_type(physical_device, out_reqs.memoryTypeBits)
+    out_mem = vkAllocateMemory(
+        device,
+        VkMemoryAllocateInfo(
+            sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            allocationSize=out_reqs.size,
+            memoryTypeIndex=out_type,
+        ),
+        None,
+    )
+    vkBindImageMemory(device, out_image, out_mem, 0)
+    out_view = vkCreateImageView(
+        device,
+        VkImageViewCreateInfo(
+            sType=VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            image=out_image,
+            viewType=VK_IMAGE_VIEW_TYPE_2D,
+            format=VK_FORMAT_R8G8B8A8_UNORM,
+            subresourceRange=VkImageSubresourceRange(
+                aspectMask=VK_IMAGE_ASPECT_COLOR_BIT,
+                baseMipLevel=0,
+                levelCount=1,
+                baseArrayLayer=0,
+                layerCount=1,
+            ),
+        ),
+        None,
+    )
+
+    descriptor_pool = vkCreateDescriptorPool(
+        device,
+        VkDescriptorPoolCreateInfo(
+            sType=VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+            poolSizeCount=2,
+            pPoolSizes=[
+                VkDescriptorPoolSize(type=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount=1),
+                VkDescriptorPoolSize(type=VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, descriptorCount=1),
+            ],
+            maxSets=1,
+        ),
+        None,
+    )
+    descriptor_set = vkAllocateDescriptorSets(
+        device,
+        VkDescriptorSetAllocateInfo(
+            sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            descriptorPool=descriptor_pool,
+            descriptorSetCount=1,
+            pSetLayouts=[set_layout],
+        ),
+    )[0]
+    vkUpdateDescriptorSets(
+        device,
+        2,
+        [
+            VkWriteDescriptorSet(
+                sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                dstSet=descriptor_set,
+                dstBinding=0,
+                descriptorCount=1,
+                descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                pBufferInfo=[VkDescriptorBufferInfo(buffer=imported[0][0], offset=0, range=imported[0][2])],
+            ),
+            VkWriteDescriptorSet(
+                sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                dstSet=descriptor_set,
+                dstBinding=1,
+                descriptorCount=1,
+                descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                pImageInfo=[VkDescriptorImageInfo(imageView=out_view, imageLayout=VK_IMAGE_LAYOUT_GENERAL)],
+            ),
+        ],
+        0,
+        None,
+    )
+
+    command_pool = vkCreateCommandPool(
+        device,
+        VkCommandPoolCreateInfo(
+            sType=VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+            queueFamilyIndex=queue_family_index,
+        ),
+        None,
+    )
+    cmd = vkAllocateCommandBuffers(
+        device,
+        VkCommandBufferAllocateInfo(
+            sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            commandPool=command_pool,
+            level=VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            commandBufferCount=1,
+        ),
+    )[0]
+    vkBeginCommandBuffer(cmd, VkCommandBufferBeginInfo(sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO))
+    vkCmdPipelineBarrier(
+        cmd,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0,
+        0,
+        None,
+        0,
+        None,
+        1,
+        [
+            VkImageMemoryBarrier(
+                sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                srcAccessMask=0,
+                dstAccessMask=VK_ACCESS_SHADER_WRITE_BIT,
+                oldLayout=VK_IMAGE_LAYOUT_UNDEFINED,
+                newLayout=VK_IMAGE_LAYOUT_GENERAL,
+                image=out_image,
+                subresourceRange=VkImageSubresourceRange(
+                    aspectMask=VK_IMAGE_ASPECT_COLOR_BIT,
+                    baseMipLevel=0,
+                    levelCount=1,
+                    baseArrayLayer=0,
+                    layerCount=1,
+                ),
+            )
+        ],
+    )
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline)
+    vkCmdBindDescriptorSets(
+        cmd,
+        VK_PIPELINE_BIND_POINT_COMPUTE,
+        pipeline_layout,
+        0,
+        1,
+        [descriptor_set],
+        0,
+        None,
+    )
+    if info["drm_format"] == DRM_FORMAT_NV12:
+        fmt_id = 0
+    else:
+        fmt_id = 1
+    pc_values = ffi.new(
+        "uint32_t[]",
+        [
+            info["width"],
+            info["height"],
+            info["planes"][0]["offset"],
+            info["planes"][1]["offset"],
+            info["planes"][0]["pitch"],
+            info["planes"][1]["pitch"],
+            fmt_id,
+        ],
+    )
+    vkCmdPushConstants(
+        cmd,
+        pipeline_layout,
+        VK_SHADER_STAGE_COMPUTE_BIT,
+        0,
+        push_size,
+        pc_values,
+    )
+    vkCmdDispatch(cmd, (info["width"] + 15) // 16, (info["height"] + 15) // 16, 1)
+    vkEndCommandBuffer(cmd)
+    vkQueueSubmit(
+        queue,
+        1,
+        [
+            VkSubmitInfo(
+                sType=VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                commandBufferCount=1,
+                pCommandBuffers=[cmd],
+            )
+        ],
+        VK_NULL_HANDLE,
+    )
+    vkQueueWaitIdle(queue)
+    print("nv12/p010 buffer -> rgba conversion OK")
+
+    vkDestroyCommandPool(device, command_pool, None)
+    vkDestroyDescriptorPool(device, descriptor_pool, None)
+    vkDestroyImageView(device, out_view, None)
+    vkDestroyImage(device, out_image, None)
+    vkFreeMemory(device, out_mem, None)
+    vkDestroyPipeline(device, pipeline, None)
+    vkDestroyPipelineLayout(device, pipeline_layout, None)
+    vkDestroyDescriptorSetLayout(device, set_layout, None)
+    vkDestroyShaderModule(device, shader_module, None)
+
+    for buf, memory, _ in imported:
+        vkDestroyBuffer(device, buf, None)
+        vkFreeMemory(device, memory, None)
+    vkDestroyDevice(device, None)
+    vkDestroyInstance(instance, None)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Minimal VAAPI dmabuf -> Vulkan import stub.")
     parser.add_argument("video", type=Path, help="Path to input video.")
@@ -349,50 +659,37 @@ def main() -> int:
         action="store_true",
         help="Force VAAPI download/upload to get a linear dmabuf when modifiers are implicit.",
     )
+    parser.add_argument("--debug", action="store_true", help="Print exporter debug logs.")
+    parser.add_argument(
+        "--drm-device",
+        default=None,
+        help="DRM device path for force-linear uploads (defaults to --vaapi-device).",
+    )
     args = parser.parse_args()
 
-    source = Path(__file__).with_name("vaapi_dmabuf_export.c")
-    binary = Path(__file__).with_name("vaapi_dmabuf_export")
-    _build_helper(source, binary)
-
-    parent_sock, child_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
-    parent_sock.settimeout(args.timeout_s)
-    env = os.environ.copy()
-    env["DMABUF_STUB_SOCK_FD"] = str(child_sock.fileno())
-    cmd = [str(binary), str(args.video), args.vaapi_device]
     if args.force_linear:
-        cmd.append("--force-linear")
-    proc = subprocess.Popen(
-        cmd,
-        pass_fds=[child_sock.fileno()],
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+        if not args.drm_device or not os.path.exists(args.drm_device):
+            raise SystemExit(
+                f"--force-linear requested but --drm-device '{args.drm_device}' does not exist.\n"
+                "Your /dev/dri only exposes a render node; disable --force-linear or expose /dev/dri/card*.\n"
+                "Tip: `ls -la /dev/dri`"
+            )
+
+    info, fds, _log = export_dmabuf(
+        args.video,
+        args.vaapi_device,
+        force_linear=args.force_linear,
+        drm_device=args.drm_device,
+        timeout_s=args.timeout_s,
+        debug=args.debug,
     )
-    child_sock.close()
 
     try:
-        info, fds = _recv_dmabuf(parent_sock)
-    except socket.timeout as exc:
-        proc.kill()
-        out, err = proc.communicate()
-        raise RuntimeError(f"timed out waiting for dmabuf export ({args.timeout_s}s)") from exc
-    parent_sock.close()
-    try:
-        out, err = proc.communicate(timeout=args.timeout_s)
-    except subprocess.TimeoutExpired as exc:
-        proc.kill()
-        out, err = proc.communicate()
-        raise RuntimeError(f"export helper did not exit in {args.timeout_s}s") from exc
-    if proc.returncode != 0:
-        raise RuntimeError(out + err)
-
-    fds = fds[: info["nb_objects"]]
-    if len(fds) < info["nb_objects"]:
-        raise RuntimeError("did not receive enough dmabuf fds")
-
-    _import_dmabuf_image(info, fds)
+        _import_dmabuf_image(info, fds)
+    except RuntimeError as exc:
+        print(f"image import failed: {exc}")
+        print("falling back to dmabuf buffer import")
+        _import_dmabuf_buffers(info, fds)
     print(
         f"imported dmabuf frame {info['width']}x{info['height']} "
         f"format=0x{info['drm_format']:08x} modifier=0x{info['objects'][0]['modifier']:x}"

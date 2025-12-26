@@ -68,6 +68,33 @@ def decode_gray(path: Path, width: int, height: int, max_frames: int) -> np.ndar
     return arr.reshape(frames, height, width)
 
 
+def decode_rgb(path: Path, width: int, height: int, max_frames: int) -> np.ndarray:
+    """Decode video to RGB frames via ffmpeg; returns array [T,H,W,3] uint8."""
+    cmd = [
+        "ffmpeg",
+        "-i",
+        str(path),
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        "-vframes",
+        str(max_frames),
+        "-loglevel",
+        "error",
+        "-",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, check=True)
+    raw = proc.stdout
+    frame_size = width * height * 3
+    total_pixels = len(raw)
+    if total_pixels % frame_size != 0:
+        raise ValueError("Decoded byte count not divisible by frame size; ffmpeg decode mismatch.")
+    frames = total_pixels // frame_size
+    arr = np.frombuffer(raw, dtype=np.uint8)
+    return arr.reshape(frames, height, width, 3)
+
+
 def stream_entropy(symbols: np.ndarray) -> float:
     counts = np.bincount(symbols, minlength=int(symbols.max()) + 1)
     probs = counts[counts > 0] / counts.sum()
@@ -1013,12 +1040,84 @@ def run_video_bench(
     reuse_block: int,
     reuse_dict: int,
     reuse_planes: int,
+    color: bool,
 ) -> None:
     width, height, nb_frames = ffprobe_video(path)
+    if color:
+        frames_rgb = decode_rgb(path, width, height, max_frames)
+        actual_frames = frames_rgb.shape[0]
+        pixels = frames_rgb.shape[0] * frames_rgb.shape[1] * frames_rgb.shape[2]
+        print(f"Video: {path.name} | {width}x{height} | frames decoded: {actual_frames} (probe reported {nb_frames})")
+        print(f"Original file bytes: {os.path.getsize(path)}")
+        print(f"Total pixels per channel: {pixels}")
+        print("color mode: per-channel bpc (sum R+G+B for bpp)")
+        print()
+
+        for ch, name in enumerate(["r", "g", "b"]):
+            print(f"--- channel {name} ---")
+            _bench_frames(
+                frames_rgb[..., ch],
+                label_prefix=f"{name}_",
+                width=width,
+                height=height,
+                pixels=pixels,
+                mc=mc,
+                jax_mc=jax_mc,
+                jax_pipeline=jax_pipeline,
+                mc_block=mc_block,
+                mc_search=mc_search,
+                mc_pyramid=mc_pyramid,
+                train_split=train_split,
+                block_reuse=block_reuse,
+                reuse_block=reuse_block,
+                reuse_dict=reuse_dict,
+                reuse_planes=reuse_planes,
+            )
+        return
+
     frames = decode_gray(path, width, height, max_frames)
     actual_frames = frames.shape[0]
     pixels = frames.size
 
+    _bench_frames(
+        frames,
+        label_prefix="",
+        width=width,
+        height=height,
+        pixels=pixels,
+        mc=mc,
+        jax_mc=jax_mc,
+        jax_pipeline=jax_pipeline,
+        mc_block=mc_block,
+        mc_search=mc_search,
+        mc_pyramid=mc_pyramid,
+        train_split=train_split,
+        block_reuse=block_reuse,
+        reuse_block=reuse_block,
+        reuse_dict=reuse_dict,
+        reuse_planes=reuse_planes,
+    )
+
+
+def _bench_frames(
+    frames: np.ndarray,
+    label_prefix: str,
+    width: int,
+    height: int,
+    pixels: int,
+    mc: bool,
+    jax_mc: bool,
+    jax_pipeline: bool,
+    mc_block: int,
+    mc_search: int,
+    mc_pyramid: int,
+    train_split: float,
+    block_reuse: bool,
+    reuse_block: int,
+    reuse_dict: int,
+    reuse_planes: int,
+) -> None:
+    actual_frames = frames.shape[0]
     if jax_pipeline:
         try:
             from JAX import pipeline as jax_pipeline_mod
@@ -1070,17 +1169,12 @@ def run_video_bench(
         }
         bt_cache = None
 
-    print(f"Video: {path.name} | {width}x{height} | frames decoded: {actual_frames} (probe reported {nb_frames})")
-    print(f"Original file bytes: {os.path.getsize(path)}")
-    print(f"Total pixels: {pixels}")
-    print()
-
     # Explained energy by temporal residuals (L2)
     centered = frames.astype(np.int32) - 128
     base_energy = float((centered * centered).sum())
     resid_energy = float((signed_resid.astype(np.int64) ** 2).sum())
     explained_l2 = 1.0 - (resid_energy / base_energy) if base_energy else 0.0
-    print(f"explained_L2 (temporal residual): {explained_l2:6.4f}")
+    print(f"{label_prefix}explained_L2 (temporal residual): {explained_l2:6.4f}")
 
     for name, arr in streams.items():
         ent = stream_entropy(arr)
@@ -1091,7 +1185,7 @@ def run_video_bench(
         rans_ms = (time.perf_counter() - rans_start) * 1000.0
         bpc = lambda n: (n * 8) / pixels
         print(
-            f"{name:<9} entropy={ent:6.3f}  "
+            f"{label_prefix}{name:<9} entropy={ent:6.3f}  "
             f"lzma {stats['lzma']:8d} ({bpc(stats['lzma']):5.3f} bpc, {stats['lzma_ms']:5.1f} ms)  "
             f"gzip {stats['gzip']:8d} ({bpc(stats['gzip']):5.3f} bpc, {stats['gzip_ms']:5.1f} ms)  "
             f"zlib {stats['zlib']:8d} ({bpc(stats['zlib']):5.3f} bpc, {stats['zlib_ms']:5.1f} ms)  "
@@ -1106,10 +1200,10 @@ def run_video_bench(
     for label, keys in combos:
         total_bytes = sum(len(rans.encode(streams[k])) for k in keys)
         bpc_combined = (total_bytes * 8) / pixels
-        print(f"\nmultistream ({label} via rANS): {total_bytes} bytes ({bpc_combined:5.3f} bpc)")
+        print(f"\n{label_prefix}multistream ({label} via rANS): {total_bytes} bytes ({bpc_combined:5.3f} bpc)")
 
     _report_triadic(
-        label="base",
+        label=f"{label_prefix}base",
         signed_resid=signed_resid,
         frames=frames,
         height=height,
@@ -1158,7 +1252,7 @@ def run_video_bench(
             mv_bpb = (mv_side_bits / mv_blocks) if mv_blocks else 0.0
             mv_bpp = mv_side_bits / pixels if pixels else 0.0
             print(
-                f"\nmc stats (jax): block={mc_block} search={mc_search} pyramid=0 "
+                f"\n{label_prefix}mc stats (jax): block={mc_block} search={mc_search} pyramid=0 "
                 f"max_abs={stats['max_abs']} mv_unique={len(stats['mv_counts'])} "
                 f"mv_side_bits={mv_side_bits:.1f} mv_bpb={mv_bpb:.3f} mv_bpp={mv_bpp:.6f} "
                 f"mv_alpha={mv_alpha:.2f}"
@@ -1178,13 +1272,13 @@ def run_video_bench(
             mv_bpb = (mv_side_bits / mv_blocks) if mv_blocks else 0.0
             mv_bpp = mv_side_bits / pixels if pixels else 0.0
             print(
-                f"\nmc stats: block={mc_block} search={mc_search} pyramid={mc_pyramid} "
+                f"\n{label_prefix}mc stats: block={mc_block} search={mc_search} pyramid={mc_pyramid} "
                 f"max_abs={stats['max_abs']} mv_unique={len(stats['mv_counts'])} "
                 f"mv_side_bits={mv_side_bits:.1f} mv_bpb={mv_bpb:.3f} mv_bpp={mv_bpp:.6f} "
                 f"mv_alpha={mv_alpha:.2f}"
             )
         _report_triadic(
-            label="mc",
+            label=f"{label_prefix}mc",
             signed_resid=mc_resid,
             frames=frames,
             height=height,
@@ -1205,6 +1299,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--mc", action="store_true", help="Enable blockwise motion compensation.")
     parser.add_argument("--jax-mc", action="store_true", help="Use JAX for motion compensation search.")
     parser.add_argument("--jax-pipeline", action="store_true", help="Use JAX for stream prep and triadic digits.")
+    parser.add_argument("--color", action="store_true", help="Process RGB channels separately.")
     parser.add_argument("--mc-block", type=int, default=8, help="Block size for motion compensation.")
     parser.add_argument("--mc-search", type=int, default=4, help="Search radius for motion compensation.")
     parser.add_argument("--mc-pyramid", type=int, default=0, help="Factor-3 pyramid levels for motion search.")
@@ -1233,6 +1328,7 @@ def main(argv: list[str] | None = None) -> None:
         reuse_block=args.reuse_block,
         reuse_dict=args.reuse_dict,
         reuse_planes=args.reuse_planes,
+        color=args.color,
     )
 
 

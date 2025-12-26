@@ -30,6 +30,11 @@ VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json \
   python vulkan/video_bench_vk.py path/to/video.mp4 --frames 240 --vaapi
 ```
 
+VAAPI dmabuf (single-frame, buffer import + GPU NV12/P010 -> RGBA):
+```
+python vulkan/video_bench_vk.py path/to/video.mp4 --vaapi-dmabuf --dmabuf-debug
+```
+
 Shader compile:
 ```
 glslc vulkan/shaders/diff.comp -o vulkan/shaders/diff.spv
@@ -39,6 +44,7 @@ Notes:
 - The preview uses the shared shaders in `vulkan_compute/shaders/`.
 - This is a scaffolding step; compression kernels are not on the GPU yet.
 - `--vaapi-zero-copy` currently validates prerequisites only (see `vulkan/VAAPI_ZERO_COPY.md`).
+- `--vaapi-dmabuf` is a single-frame validation path (no playback yet).
 
 Zero-copy VAAPI notes:
 - See `vulkan/VAAPI_ZERO_COPY.md` and `vulkan/vaapi_probe.py`.

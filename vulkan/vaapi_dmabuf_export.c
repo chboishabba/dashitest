@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -6,10 +7,15 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <va/va.h>
+#include <va/va_drm.h>
+
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
+#include <libavutil/error.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_drm.h>
+#include <libavutil/hwcontext_vaapi.h>
 
 #define MAX_OBJECTS 4
 #define MAX_PLANES 4
@@ -127,7 +133,7 @@ static int send_dmabuf_info(int sock_fd, const AVFrame *drm_frame) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <video> [vaapi_device] [--force-linear] [--debug]\n", argv[0]);
+        fprintf(stderr, "usage: %s <video> [vaapi_device] [--force-linear] [--debug] [--drm-device <path>]\n", argv[0]);
         return 1;
     }
     const char *sock_env = getenv("DMABUF_STUB_SOCK_FD");
@@ -142,6 +148,7 @@ int main(int argc, char **argv) {
     }
     const char *input = argv[1];
     const char *vaapi_device = "/dev/dri/renderD128";
+    const char *drm_device = NULL;
     int force_linear = 0;
     int debug = 0;
     for (int i = 2; i < argc; i++) {
@@ -149,12 +156,18 @@ int main(int argc, char **argv) {
             force_linear = 1;
         } else if (strcmp(argv[i], "--debug") == 0) {
             debug = 1;
+        } else if (strcmp(argv[i], "--drm-device") == 0 && i + 1 < argc) {
+            drm_device = argv[i + 1];
+            i++;
         } else {
             vaapi_device = argv[i];
         }
     }
+    if (!drm_device) {
+        drm_device = vaapi_device;
+    }
     if (debug) {
-        fprintf(stderr, "vaapi dmabuf export: input=%s device=%s force_linear=%d\n", input, vaapi_device, force_linear);
+        fprintf(stderr, "vaapi dmabuf export: input=%s device=%s force_linear=%d drm_device=%s\n", input, vaapi_device, force_linear, drm_device);
     }
 
     av_log_set_level(AV_LOG_ERROR);
@@ -205,11 +218,51 @@ int main(int argc, char **argv) {
     codec_ctx->get_format = get_hw_format;
 
     AVBufferRef *hw_device_ctx = NULL;
-    if (av_hwdevice_ctx_create(&hw_device_ctx, AV_HWDEVICE_TYPE_VAAPI, vaapi_device, NULL, 0) < 0) {
-        fprintf(stderr, "vaapi dmabuf export: failed to create VAAPI device (%s)\n", vaapi_device);
-        avcodec_free_context(&codec_ctx);
-        avformat_close_input(&fmt_ctx);
-        return 1;
+    int va_fd = -1;
+    VADisplay va_display = NULL;
+    int ret_hw = av_hwdevice_ctx_create(&hw_device_ctx, AV_HWDEVICE_TYPE_VAAPI, vaapi_device, NULL, 0);
+    if (ret_hw < 0) {
+        if (debug) {
+            fprintf(stderr, "vaapi dmabuf export: av_hwdevice_ctx_create failed, trying vaGetDisplayDRM\n");
+        }
+        va_fd = open(vaapi_device, O_RDWR);
+        if (va_fd < 0) {
+            fprintf(stderr, "vaapi dmabuf export: failed to open %s: %s\n", vaapi_device, strerror(errno));
+            avcodec_free_context(&codec_ctx);
+            avformat_close_input(&fmt_ctx);
+            return 1;
+        }
+        if (fcntl(va_fd, F_SETFD, FD_CLOEXEC) == -1) {
+            fprintf(stderr, "vaapi dmabuf export: failed to set CLOEXEC: %s\n", strerror(errno));
+        }
+        va_display = vaGetDisplayDRM(va_fd);
+        if (!va_display) {
+            fprintf(stderr, "vaapi dmabuf export: vaGetDisplayDRM failed\n");
+            close(va_fd);
+            avcodec_free_context(&codec_ctx);
+            avformat_close_input(&fmt_ctx);
+            return 1;
+        }
+        hw_device_ctx = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_VAAPI);
+        if (!hw_device_ctx) {
+            fprintf(stderr, "vaapi dmabuf export: failed to allocate VAAPI hwdevice ctx\n");
+            close(va_fd);
+            avcodec_free_context(&codec_ctx);
+            avformat_close_input(&fmt_ctx);
+            return 1;
+        }
+        AVHWDeviceContext *hwdev = (AVHWDeviceContext *)hw_device_ctx->data;
+        AVVAAPIDeviceContext *va_ctx = (AVVAAPIDeviceContext *)hwdev->hwctx;
+        va_ctx->display = va_display;
+        if (av_hwdevice_ctx_init(hw_device_ctx) < 0) {
+            fprintf(stderr, "vaapi dmabuf export: failed to init VAAPI hwdevice ctx\n");
+            av_buffer_unref(&hw_device_ctx);
+            vaTerminate(va_display);
+            close(va_fd);
+            avcodec_free_context(&codec_ctx);
+            avformat_close_input(&fmt_ctx);
+            return 1;
+        }
     }
     codec_ctx->hw_device_ctx = av_buffer_ref(hw_device_ctx);
 
@@ -227,8 +280,8 @@ int main(int argc, char **argv) {
     AVBufferRef *drm_device_ctx = NULL;
     AVBufferRef *drm_frames_ctx = NULL;
     if (force_linear) {
-        if (av_hwdevice_ctx_create(&drm_device_ctx, AV_HWDEVICE_TYPE_DRM, vaapi_device, NULL, 0) < 0) {
-            fprintf(stderr, "vaapi dmabuf export: failed to create DRM device (%s)\n", vaapi_device);
+        if (av_hwdevice_ctx_create(&drm_device_ctx, AV_HWDEVICE_TYPE_DRM, drm_device, NULL, 0) < 0) {
+            fprintf(stderr, "vaapi dmabuf export: failed to create DRM device (%s)\n", drm_device);
             av_buffer_unref(&hw_device_ctx);
             avcodec_free_context(&codec_ctx);
             avformat_close_input(&fmt_ctx);
@@ -248,6 +301,7 @@ int main(int argc, char **argv) {
         frames_ctx->sw_format = AV_PIX_FMT_NV12;
         frames_ctx->width = codec_ctx->width;
         frames_ctx->height = codec_ctx->height;
+        frames_ctx->initial_pool_size = 1;
         if (av_hwframe_ctx_init(drm_frames_ctx) < 0) {
             fprintf(stderr, "vaapi dmabuf export: failed to init DRM frames ctx\n");
             av_buffer_unref(&drm_frames_ctx);
@@ -304,8 +358,14 @@ int main(int argc, char **argv) {
                     fprintf(stderr, "vaapi dmabuf export: failed to alloc sw frame\n");
                     break;
                 }
-                if (av_hwframe_transfer_data(sw_frame, frame, 0) < 0) {
-                    fprintf(stderr, "vaapi dmabuf export: failed to download to sw frame\n");
+                if (debug) {
+                    fprintf(stderr, "vaapi dmabuf export: downloading to sw NV12\n");
+                }
+                ret = av_hwframe_transfer_data(sw_frame, frame, 0);
+                if (ret < 0) {
+                    char errbuf[AV_ERROR_MAX_STRING_SIZE] = {0};
+                    av_strerror(ret, errbuf, sizeof(errbuf));
+                    fprintf(stderr, "vaapi dmabuf export: failed to download to sw frame: %s\n", errbuf);
                     av_frame_unref(sw_frame);
                     break;
                 }
@@ -313,13 +373,22 @@ int main(int argc, char **argv) {
                 drm_frame->width = frame->width;
                 drm_frame->height = frame->height;
                 drm_frame->hw_frames_ctx = av_buffer_ref(drm_frames_ctx);
-                if (av_hwframe_get_buffer(drm_frames_ctx, drm_frame, 0) < 0) {
-                    fprintf(stderr, "vaapi dmabuf export: failed to alloc DRM frame\n");
+                ret = av_hwframe_get_buffer(drm_frames_ctx, drm_frame, 0);
+                if (ret < 0) {
+                    char errbuf[AV_ERROR_MAX_STRING_SIZE] = {0};
+                    av_strerror(ret, errbuf, sizeof(errbuf));
+                    fprintf(stderr, "vaapi dmabuf export: failed to alloc DRM frame: %s\n", errbuf);
                     av_frame_unref(sw_frame);
                     break;
                 }
-                if (av_hwframe_transfer_data(drm_frame, sw_frame, 0) < 0) {
-                    fprintf(stderr, "vaapi dmabuf export: failed to upload to DRM frame\n");
+                if (debug) {
+                    fprintf(stderr, "vaapi dmabuf export: uploading to DRM frame\n");
+                }
+                ret = av_hwframe_transfer_data(drm_frame, sw_frame, 0);
+                if (ret < 0) {
+                    char errbuf[AV_ERROR_MAX_STRING_SIZE] = {0};
+                    av_strerror(ret, errbuf, sizeof(errbuf));
+                    fprintf(stderr, "vaapi dmabuf export: failed to upload to DRM frame: %s\n", errbuf);
                     av_frame_unref(sw_frame);
                     av_frame_unref(drm_frame);
                     break;
@@ -353,6 +422,12 @@ int main(int argc, char **argv) {
     av_buffer_unref(&drm_frames_ctx);
     av_buffer_unref(&drm_device_ctx);
     av_buffer_unref(&hw_device_ctx);
+    if (va_display) {
+        vaTerminate(va_display);
+    }
+    if (va_fd >= 0) {
+        close(va_fd);
+    }
     avcodec_free_context(&codec_ctx);
     avformat_close_input(&fmt_ctx);
 
