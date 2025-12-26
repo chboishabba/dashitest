@@ -3,7 +3,7 @@
 ## Current codecs compared
 - lzma (xz preset 6)
 - gzip/zlib (level 6)
-- `compression/rans.py` (placeholder wrapping zlib; interface-compatible with future ANS/rANS swap)
+- `compression/rans.py` (real range coder with static frequency table)
 
 ## Bench 1: Synthetic triadic CA trace (48x48, 96 steps, seed=0)
 Command:
@@ -47,7 +47,35 @@ Results (bpc):
 
 Takeaway: adding canonicalization and residuals on coarse/sign did not beat the simple temporal residual (0.032 bpc) with the current placeholder rANS; lzma still wins density but is very slow. A real ANS coder and better orbit/predictive modeling are needed to see a triadic win.
 
+## Bench 4: Triadic planes + context + quotient (current)
+Command:
+```
+python compression/video_bench.py "/home/c/2025-12-10 12-25-05.mp4" --frames 500
+```
+Observed (bpc, order of magnitude):
+- Balanced-ternary planes, contexted: ~0.04 bpc
+- Per-plane mag+sign quotient, contexted: ~0.04 bpc
+- Test-only rates stay low but rise on short clips (insufficient frames).
+
+Notes:
+- Entropy collapse is driven by triadic digit planes + local spatio-temporal contexts.
+- Train/test split requires enough frames (30+); very short clips overfit contexts.
+- Motion compensation did not materially reduce residual support on this clip.
+
+## Bench 5: Block reuse action stream (quotient over spatio-temporal repeats)
+Command:
+```
+python compression/video_bench.py "/home/c/2025-12-10 12-25-05.mp4" --frames 60 --block-reuse --reuse-block 16 --reuse-dict 256 --reuse-planes 2
+```
+Observed:
+- Action stream mix shows substantial reuse on static video.
+- Masked plane coding with actions/refs reduces bpc further vs context-only.
+
+Notes:
+- Reuse is indexed by canonicalized block signatures (sign-normalized) over low planes.
+- This is a first-order approximation of spatio-temporal quotient reuse.
+
 ## Gaps / TODO
-- Replace placeholder rANS with a real ANS/rANS coder.
-- Add richer orbit canonicalization and predictive modeling for video-like data.
-- Benchmark on real kernel/CA/motif logs and compare against zstd/xz with the new coder.
+- Add dictionary verification (e.g., plane-2 match) to reduce false reuse hits.
+- Add motion-compensated reuse lookup and record side-information cost.
+- Benchmark on real kernel/CA/motif logs and compare against zstd/xz.

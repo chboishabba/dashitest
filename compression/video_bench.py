@@ -204,52 +204,74 @@ def _motion_compensated_residual(
 
 
 def _block_reuse_actions_and_mask(
-    planes: np.ndarray, block: int = 8, dict_size: int = 256
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return triadic action stream, encode mask, and sign-flip witness bits."""
-    if planes.shape[0] < 2:
+    planes: np.ndarray, block: int = 16, dict_size: int = 256, hash_planes: int = 2
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return action stream, encode mask, flip witness bits, and reuse refs."""
+    if planes.shape[0] < 1:
         return (
             np.array([], dtype=np.int8),
             np.zeros((planes.shape[1], planes.shape[2], planes.shape[3]), dtype=bool),
             np.array([], dtype=np.uint8),
+            np.array([], dtype=np.uint8),
         )
+    planes_used = max(1, min(hash_planes, planes.shape[0]))
     _, t, h, w = planes.shape
     actions = []
+    refs = []
     mask = np.zeros((t, h, w), dtype=bool)
     flips = []
-    recent = deque(maxlen=dict_size)
-    recent_set: set[int] = set()
-    prev_sig = None
+    dict_list: list[int] = []
+    dict_map: dict[int, int] = {}
+    blocks_y = (h + block - 1) // block
+    blocks_x = (w + block - 1) // block
+    prev_sig_grid = np.full((blocks_y, blocks_x), -1, dtype=np.int64)
+
     for ti in range(t):
-        for y in range(0, h, block):
-            for x in range(0, w, block):
+        for iy, y in enumerate(range(0, h, block)):
+            for ix, x in enumerate(range(0, w, block)):
                 y0 = min(y, h - block)
                 x0 = min(x, w - block)
-                block0 = planes[0, ti, y0 : y0 + block, x0 : x0 + block]
-                block1 = planes[1, ti, y0 : y0 + block, x0 : x0 + block]
-                flip = 1 if block0.sum() < 0 else 0
-                if flip:
-                    block0 = -block0
-                    block1 = -block1
-                sig = zlib.crc32(block0.tobytes()) ^ zlib.crc32(block1.tobytes())
-                if prev_sig is not None and sig == prev_sig:
-                    act = 0
-                elif sig in recent_set:
-                    act = 1
+                sig = 0
+                block_sum = 0
+                for pi in range(planes_used):
+                    blockp = planes[pi, ti, y0 : y0 + block, x0 : x0 + block]
+                    block_sum += int(blockp.sum())
+                flip = 1 if block_sum < 0 else 0
+                for pi in range(planes_used):
+                    blockp = planes[pi, ti, y0 : y0 + block, x0 : x0 + block]
+                    if flip:
+                        blockp = -blockp
+                    sig = zlib.crc32(blockp.tobytes(), sig)
+
+                prev_sig = int(prev_sig_grid[iy, ix])
+                if prev_sig != -1 and sig == prev_sig:
+                    act = 0  # same as prev frame at same position
+                    ref = 0
+                elif sig in dict_map:
+                    act = 1  # reuse from dictionary
+                    ref = dict_map[sig]
                 else:
-                    act = -1
+                    act = -1  # new
+                    ref = 0
                 actions.append(act)
                 flips.append(flip)
                 if act == -1:
                     mask[ti, y0 : y0 + block, x0 : x0 + block] = True
-                prev_sig = sig
-                if sig not in recent_set:
-                    if len(recent) == dict_size:
-                        old = recent.popleft()
-                        recent_set.discard(old)
-                    recent.append(sig)
-                    recent_set.add(sig)
-    return np.array(actions, dtype=np.int8), mask, np.array(flips, dtype=np.uint8)
+                    dict_list.append(sig)
+                    if len(dict_list) > dict_size:
+                        dict_list.pop(0)
+                        dict_map = {v: i for i, v in enumerate(dict_list)}
+                    else:
+                        dict_map[sig] = len(dict_list) - 1
+                refs.append(ref)
+                prev_sig_grid[iy, ix] = sig
+
+    return (
+        np.array(actions, dtype=np.int8),
+        mask,
+        np.array(flips, dtype=np.uint8),
+        np.array(refs, dtype=np.uint16),
+    )
 
 
 def _build_context_tables(
@@ -616,6 +638,7 @@ def _report_triadic(
     block_reuse: bool,
     reuse_block: int,
     reuse_dict: int,
+    reuse_planes: int,
     bt_planes_u8: np.ndarray | None = None,
     bt_planes_i8: np.ndarray | None = None,
     bt_mag: np.ndarray | None = None,
@@ -767,8 +790,8 @@ def _report_triadic(
         print(f"{label} multistream (bt mag ctx + sign ctx test-only): {total_q_ctx_sign_test} bytes ({bpc_test:5.3f} bpc)")
 
     if block_reuse:
-        actions, mask, flips = _block_reuse_actions_and_mask(
-            bt_mag.astype(np.int8), block=reuse_block, dict_size=reuse_dict
+        actions, mask, flips, refs = _block_reuse_actions_and_mask(
+            bt_planes_i8, block=reuse_block, dict_size=reuse_dict, hash_planes=reuse_planes
         )
         if actions.size:
             action_syms = (actions + 1).astype(np.uint8)
@@ -777,7 +800,14 @@ def _report_triadic(
             enc = rans.encode(action_syms, alphabet=3)
             ms = (time.perf_counter() - start) * 1000.0
             bpb = (len(enc) * 8) / max(1, action_syms.size)
-            print(f"{label} block_action entropy={ent:6.3f}  rANS {len(enc):8d} ({bpb:5.3f} bpb, {ms:5.1f} ms)")
+            new_count = int((actions == -1).sum())
+            same_count = int((actions == 0).sum())
+            reuse_count = int((actions == 1).sum())
+            print(
+                f"{label} block_action entropy={ent:6.3f}  rANS {len(enc):8d} "
+                f"({bpb:5.3f} bpb, {ms:5.1f} ms)  "
+                f"new={new_count} same={same_count} reuse={reuse_count}"
+            )
 
             masked_ctx_bytes = []
             for idx in range(bt_digits):
@@ -789,14 +819,27 @@ def _report_triadic(
                 tables = _build_context_tables(plane, prev_plane)
                 enc_plane = _encode_plane_contexted(plane, prev_plane, tables)
                 masked_ctx_bytes.append(len(enc_plane))
+            ref_bytes = 0
+            if reuse_count:
+                ref_stream = refs[actions == 1]
+                if reuse_dict <= 256:
+                    ref_bytes = len(rans.encode(ref_stream.astype(np.uint8), alphabet=reuse_dict))
+                else:
+                    ref_lo = (ref_stream % 256).astype(np.uint8)
+                    ref_hi = (ref_stream // 256).astype(np.uint8)
+                    hi_alphabet = int(ref_hi.max()) + 1 if ref_hi.size else 1
+                    ref_bytes = len(rans.encode(ref_lo, alphabet=256))
+                    ref_bytes += len(rans.encode(ref_hi, alphabet=max(2, hi_alphabet)))
             flip_bytes = 0
             if flips.size:
-                flip_bytes = len(rans.encode(flips.astype(np.uint8), alphabet=2))
-            total_masked_ctx = sum(masked_ctx_bytes) + len(enc) + flip_bytes
+                flip_stream = flips[actions != -1]
+                flip_bytes = len(rans.encode(flip_stream.astype(np.uint8), alphabet=2))
+            total_masked_ctx = sum(masked_ctx_bytes) + len(enc) + ref_bytes + flip_bytes
             bpc_masked = (total_masked_ctx * 8) / pixels
             print(
-                f"{label} block_reuse ctx_rANS (masked planes + actions + flips): "
-                f"{total_masked_ctx} bytes ({bpc_masked:5.3f} bpc)"
+                f"{label} block_reuse ctx_rANS (masked planes + actions + refs + flips): "
+                f"{total_masked_ctx} bytes ({bpc_masked:5.3f} bpc)  "
+                f"action={len(enc)} ref={ref_bytes} flip={flip_bytes} planes={sum(masked_ctx_bytes)}"
             )
 
 
@@ -813,6 +856,7 @@ def run_video_bench(
     block_reuse: bool,
     reuse_block: int,
     reuse_dict: int,
+    reuse_planes: int,
 ) -> None:
     width, height, nb_frames = ffprobe_video(path)
     frames = decode_gray(path, width, height, max_frames)
@@ -912,6 +956,7 @@ def run_video_bench(
         block_reuse=block_reuse,
         reuse_block=reuse_block,
         reuse_dict=reuse_dict,
+        reuse_planes=reuse_planes,
         bt_planes_u8=bt_cache["bt_planes_u8"] if bt_cache else None,
         bt_planes_i8=bt_cache["bt_planes_i8"] if bt_cache else None,
         bt_mag=bt_cache["bt_mag"] if bt_cache else None,
@@ -986,6 +1031,7 @@ def run_video_bench(
             block_reuse=block_reuse,
             reuse_block=reuse_block,
             reuse_dict=reuse_dict,
+            reuse_planes=reuse_planes,
         )
 
 
@@ -1001,8 +1047,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--mc-pyramid", type=int, default=0, help="Factor-3 pyramid levels for motion search.")
     parser.add_argument("--train-split", type=float, default=0.5, help="Fraction of frames used for context training.")
     parser.add_argument("--block-reuse", action="store_true", help="Emit block reuse action stream stats.")
-    parser.add_argument("--reuse-block", type=int, default=8, help="Block size for reuse actions.")
+    parser.add_argument("--reuse-block", type=int, default=16, help="Block size for reuse actions.")
     parser.add_argument("--reuse-dict", type=int, default=256, help="Block reuse dictionary size.")
+    parser.add_argument("--reuse-planes", type=int, default=2, help="Planes used for block hash.")
     args = parser.parse_args(argv)
 
     if not args.video.exists():
@@ -1022,6 +1069,7 @@ def main(argv: list[str] | None = None) -> None:
         block_reuse=args.block_reuse,
         reuse_block=args.reuse_block,
         reuse_dict=args.reuse_dict,
+        reuse_planes=args.reuse_planes,
     )
 
 

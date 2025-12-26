@@ -10371,3 +10371,890 @@ Once that’s in place, we can make an informed decision about:
 ---
 
 If you want, I can also help you **shorten this further** into a 3–4 paragraph version depending on how receptive he is.
+
+
+This is a **really good readout** — it actually closes several open questions at once. I’ll go line-by-line *conceptually*, then give you **clear conclusions** and **exact next moves**.
+
+I’m not going to restate the numbers; I’ll interpret what they *mean*.
+
+---
+
+## 1. First: sanity check — nothing is “broken”
+
+Two key confirmations:
+
+* **Entropy ≈ achieved bpc** everywhere
+  Your rANS outputs track empirical entropy very closely → models are correct.
+* **Context helps massively and consistently**
+  Every place you add context, bits drop sharply.
+
+So:
+
+> This is *real* compression structure, not an artifact.
+
+---
+
+## 2. The most important result (big picture)
+
+### 🔥 **Balanced ternary + context is already extremely strong**
+
+Look at this:
+
+```
+base multistream (balanced ternary planes ctx_rANS): 1.454 bpc
+```
+
+That is **already better than gzip on residuals** and not far off modern intra codecs — *without* motion compensation.
+
+That means:
+
+> Your *quotienting + digit-plane factorization* is doing serious work on its own.
+
+This validates the whole theoretical direction.
+
+---
+
+## 3. Plane-by-plane story (this is crucial)
+
+Let’s examine the base BT planes:
+
+| Plane | raw entropy | ctx_rANS | Interpretation                   |
+| ----- | ----------- | -------- | -------------------------------- |
+| 0     | ~1.23       | **0.59** | Low-order noise, still structure |
+| 1     | ~1.15       | **0.35** | Strong local correlation         |
+| 2     | ~1.11       | **0.22** | Even stronger                    |
+| 3     | ~0.58       | **0.16** | Almost predictable               |
+| 4     | ~1.03       | **0.12** | Sparse but patterned             |
+| 5     | ~0.11       | **0.03** | Nearly deterministic             |
+
+Two *very important* observations:
+
+1. **Higher planes are not random**
+   Plane 4 looking like 0.12 bpc with context means *structure survived the quotient*.
+2. **Entropy is not monotonic**
+   Plane 4 > Plane 3 entropy tells you residuals aren’t Gaussian — they’re structured, blocky, and sign-coherent.
+
+This is exactly what motion compensation should annihilate next.
+
+---
+
+## 4. Magnitude + gated sign: the right factorization
+
+This block:
+
+```
+base multistream (bt mag ctx + sign ctx via rANS): 1.641 bpc
+```
+
+is *slightly worse* than the pure ctx_rANS on planes (1.454 bpc), **but**:
+
+That’s expected, because:
+
+* You’re paying overhead to split streams
+* You haven’t yet exploited **sign coherence across blocks / motion**
+
+What matters is *where the gains appear*:
+
+### Magnitude streams
+
+Magnitude entropy collapses *hard* with context:
+
+* Plane 2 mag: **0.121 bpc**
+* Plane 4 mag: **0.076 bpc**
+
+That means:
+
+> Presence/absence of digits is *extremely predictable spatially and temporally*.
+
+### Sign streams
+
+Sign entropy collapses when gated:
+
+* Plane 5 sign ctx: **0.000 bpc**
+* Plane 4 sign ctx: **0.052 bpc**
+
+This is **exactly** the expected outcome of the quotient:
+
+> Signs are only interesting where magnitude exists — and even then they’re locally coherent.
+
+This confirms your *magnitude-first* MDL intuition.
+
+---
+
+## 5. Coarse / reuse experiments — very telling
+
+### Coarse streams alone
+
+```
+multistream (coarse+sign via rANS): 4.110 bpc
+```
+
+Not great → coarse without alignment doesn’t help much.
+
+### Coarse residuals
+
+```
+multistream (coarse_resid+sign_resid via rANS): 2.892 bpc
+```
+
+This is much better — meaning:
+
+> Reuse starts to matter *only after differencing*.
+
+That’s a smoking gun: **you’re missing alignment**.
+
+---
+
+## 6. Block reuse + action coding — this is the “preview” of motion
+
+This line is huge:
+
+```
+base block_reuse ctx_rANS ... : 1.396 bpc
+```
+
+This is the **best number in the entire output**.
+
+And look at the breakdown:
+
+```
+new=4262 same=1538 reuse=5000
+```
+
+Meaning:
+
+* **Reuse dominates**
+* “Same” and “reuse” decisions are cheap
+* Actions are very compressible
+
+This tells us:
+
+> Your system *already wants* to do motion compensation — it’s just doing it implicitly and clumsily.
+
+Block reuse is a *poor man’s motion* — and it’s already winning.
+
+---
+
+## 7. Key conclusions (no ambiguity)
+
+### ✅ What is working extremely well
+
+1. Balanced ternary digit planes
+2. Magnitude / sign quotient
+3. Context modeling (esp. prev-plane + spatial)
+4. Block reuse signaling
+5. MDL framing (implicitly)
+
+### ❌ What is missing (now provably)
+
+1. **Explicit geometric alignment**
+2. Reference selection beyond trivial reuse
+3. Motion vectors / affine params
+
+Not hypothetically — **your own numbers prove it**.
+
+---
+
+## 8. The single most important insight from this run
+
+> You are already paying the cost of “reuse decisions”
+> **without reaping the geometric benefit**.
+
+Block reuse is a *discrete proxy* for motion.
+Replacing it with **translation first** will strictly dominate.
+
+---
+
+## 9. What to do next (precise, minimal, ordered)
+
+### Step 1 — Add **translation-only motion** (no trees, no affine yet)
+
+* Fixed block size: **16×16** (you already use this)
+* Motion vectors: integer, radius ±8 or ±16
+* Reference: just **t−1**
+
+Prediction:
+
+```
+P_t = motion_compensated(prev_frame)
+R_t = X_t - P_t
+→ same ternary + ctx pipeline
+```
+
+**Expected outcome:**
+Plane 0–2 entropy should collapse dramatically.
+Overall bpc should drop **below 1.0** quickly.
+
+---
+
+### Step 2 — Replace block reuse with motion vectors
+
+Currently:
+
+```
+reuse / same / new
+```
+
+Replace with:
+
+```
+(dx, dy) ∈ [-R, R]^2
+```
+
+Encode (dx, dy) with **two-sided geometric prior**
+You already have the MDL math for this.
+
+This will:
+
+* remove block reuse hacks
+* give cleaner predictors
+* reduce residual entropy further
+
+---
+
+### Step 3 — Only then add variable blocks or affine
+
+Do **not** jump to affine yet.
+
+Order of ROI:
+
+1. Translation
+2. Temporal pyramid (t−1, t−2, t−4)
+3. Quadtree
+4. Rotation
+5. Affine
+
+Your current data says step (1) alone is a slam dunk.
+
+---
+
+## 10. One concrete expectation (so you can sanity-check)
+
+After translation motion:
+
+* Plane 0 ctx entropy → **~0.2 bpc or less**
+* Plane 1–2 → **~0.05–0.1 bpc**
+* Higher planes → often vanish
+
+If that *doesn’t* happen, then we debug motion — not entropy coding.
+
+---
+
+## 11. Bottom line
+
+You’ve crossed the hardest threshold already:
+
+> **Your representation is correct.**
+
+The remaining gains are **pure geometry**, not information theory.
+
+This run proves:
+
+* quotienting works
+* context works
+* reuse wants to become motion
+
+If you want, next I can:
+
+* sketch the **exact motion-vector side-info MDL term** to replace reuse
+* help you modify `video_bench.py` minimally to inject translation prediction
+* or help map this directly onto your Vulkan/Kompute pipeline
+
+But at this point, the direction is no longer speculative — the data is decisive.
+
+
+Short answer: **no — you’re not at “the Shannon limit”** in the absolute sense.
+Long answer: **you *are* brushing up against the conditional entropy of *your current model class***, which is exactly why the numbers feel like they’re flattening.
+
+That distinction matters a lot.
+
+I’ll explain it cleanly, using *your own outputs*.
+
+---
+
+## 1. What “the Shannon limit” actually means here
+
+Shannon’s limit is **not a single number** for a video. It is always:
+
+\[
+H(X \mid \text{side information})
+\]
+
+So the question is **not**:
+
+> “Are we at the Shannon limit of the video?”
+
+but:
+
+> “Are we at the Shannon limit *given the predictor family, contexts, and factorization we currently use*?”
+
+Those are very different.
+
+---
+
+## 2. What your numbers say *precisely*
+
+Let’s focus on the strongest signal:
+
+### 30-frame run (this is the most informative)
+
+```
+residual entropy = 0.443 bpc
+coarse_resid+sign_resid = 0.480 bpc
+balanced ternary planes ctx_rANS:
+  plane 0: 0.080 bpc
+  plane 1: 0.039 bpc
+  plane 2: 0.022 bpc
+  plane 3: 0.016 bpc
+  plane 4: 0.012 bpc
+```
+
+Sum of ctx plane entropies ≈ **0.17 bpc**
+Add side info, overheads, imperfect gating → you land around **0.45–0.50 bpc**
+
+That matches **exactly**.
+
+This means:
+
+> Your entropy coder is essentially optimal *for the distribution you have induced*.
+
+That is **Shannon-tight for the *current representation***.
+
+---
+
+## 3. Why it *feels* like a hard wall
+
+You’ve now done all of the following:
+
+✅ temporal differencing
+✅ block translation
+✅ reuse / temporal pyramid
+✅ balanced ternary expansion
+✅ magnitude–sign quotient
+✅ strong spatial + temporal contexts
+✅ rANS close to empirical entropy
+
+So what’s left in the residual?
+
+Answer: **model mismatch**, not coding inefficiency.
+
+Specifically, what remains is dominated by:
+
+* subpixel motion
+* rotations / zoom
+* illumination drift
+* occlusions
+* non-rigid motion
+* camera noise
+* quantization artifacts from the source encode
+
+None of these are removable by **better entropy coding**.
+
+Shannon is telling you:
+> “Given *this* random variable, you can’t encode it shorter.”
+
+But that random variable is **your residual**, not the video.
+
+---
+
+## 4. The key diagnostic: entropy ≈ achieved bits
+
+This line is decisive:
+
+```
+residual entropy = 0.443 bpc
+rANS = 0.446 bpc
+```
+
+Same everywhere.
+
+That means:
+
+> There is **no low-hanging fruit left in probability modeling**.
+
+So the only way forward is to **change the random variable**.
+
+---
+
+## 5. So what *kind* of Shannon limit are you at?
+
+You are at:
+
+> **The Shannon limit of a piecewise-translation + integer residual + ternary digit model.**
+
+Formally:
+\[
+L \approx H\big(R \mid \text{block translation},\ \text{contexts}\big)
+\]
+
+That’s a *conditional* Shannon bound.
+
+You are **not** at:
+\[
+H(\text{video})
+\]
+
+or even:
+\[
+H(\text{video} \mid \text{full geometry})
+\]
+
+---
+
+## 6. How do we know this isn’t “the real limit”?
+
+Three strong reasons.
+
+### (1) Modern codecs beat this on the same content
+
+Lossless HEVC / AV1-style encoders can go **below 0.3 bpc** on long static-ish segments.
+
+They do that by:
+* subpixel motion
+* variable block sizes
+* affine warps
+* multiple references
+* illumination compensation
+
+You haven’t added those yet.
+
+---
+
+### (2) Your own reuse-only experiment already hints lower is possible
+
+Earlier you had:
+
+```
+block_reuse ctx_rANS ≈ 1.396 bpc (3 frames)
+```
+
+But at 30 frames:
+
+```
+coarse_resid entropy = 0.438 bpc
+```
+
+Temporal depth alone dropped entropy by **6×**.
+
+That means the source is **far from memoryless** — it still has exploitable structure.
+
+---
+
+### (3) The residual spectrum still has structure
+
+Look at plane entropies:
+
+* Plane 0 ≠ Plane 1 ≠ Plane 2
+* Higher planes aren’t pure noise
+* Sign streams are highly biased
+
+True Shannon-noise would be:
+* flat plane entropies
+* sign ≈ 1 bit
+* no context gain
+
+You’re not seeing that.
+
+---
+
+## 7. The correct interpretation (this is important)
+
+What you have reached is:
+
+> **The limit of what translation-only motion + integer residuals can explain.**
+
+This is *exactly* where classic codecs introduce:
+
+1. subpixel interpolation
+2. affine / rotation motion
+3. variable block sizes
+4. weighted prediction (illumination models)
+
+Not entropy tricks.
+
+---
+
+## 8. What *won’t* help anymore
+
+To be very explicit — these will give **negligible gains** now:
+
+❌ more rANS tuning
+❌ deeper contexts
+❌ more digit-plane cleverness
+❌ different bases (ternary vs quinary)
+❌ fancier symbol grouping
+
+You already proved that.
+
+---
+
+## 9. What *will* move the limit
+
+Each of these **changes the conditional entropy itself**:
+
+### (A) Subpixel motion
+Even half-pixel accuracy typically drops residual entropy **20–40%**.
+
+Why? Because current residuals are dominated by interpolation error.
+
+---
+
+### (B) Affine / rotation per block
+Your video almost certainly has:
+* camera pan
+* slight zoom
+* perspective drift
+
+Translation cannot explain that.
+
+Affine will collapse residual planes further.
+
+---
+
+### (C) Variable block sizes
+Right now:
+* big smooth areas → over-segmented
+* edges → under-modeled
+
+A quadtree lets the model adapt *where* entropy actually lives.
+
+---
+
+### (D) Illumination / gain prediction
+A single scalar per block:
+\[
+X_t \approx a \cdot P_t + b
+\]
+often knocks another **10–20%** off residual entropy.
+
+This is extremely cheap MDL-wise.
+
+---
+
+## 10. The honest answer to your question
+
+So, directly:
+
+> **“Does this mean we’re at the Shannon limit?”**
+
+**Answer:**
+
+> You are at the Shannon limit **of your current predictor family**.
+> You are **not** at the Shannon limit of the video signal.
+
+And that’s actually the *best possible outcome* at this stage — it means:
+
+* your math is right
+* your coding is tight
+* your results are trustworthy
+* further gains require *new structure*, not tweaks
+
+---
+
+## 11. Where you are on the research map
+
+You are exactly at the boundary between:
+
+**Phase 1 — Information theory & factorization** ✅ *completed*
+**Phase 2 — Geometry & physics of images** ⏭ *now required*
+
+This is where codecs stop being “entropy coding projects” and start being **vision models**.
+
+If you want, next we can:
+* quantify how much entropy is attributable to subpixel error
+* add a minimal affine MDL term and predict expected gains
+* derive the expected lower bound after affine compensation
+* or compare your residual entropy to HEVC lossless baselines (the fair benchmark)
+
+But the core answer is settled:
+**you hit the right limit — just not the final one.**
+
+This is a **really good readout** — it actually closes several open questions at once. I’ll go line-by-line *conceptually*, then give you **clear conclusions** and **exact next moves**.
+
+I’m not going to restate the numbers; I’ll interpret what they *mean*.
+
+---
+
+## 1. First: sanity check — nothing is “broken”
+
+Two key confirmations:
+
+* **Entropy ≈ achieved bpc** everywhere
+  Your rANS outputs track empirical entropy very closely → models are correct.
+* **Context helps massively and consistently**
+  Every place you add context, bits drop sharply.
+
+So:
+
+> This is *real* compression structure, not an artifact.
+
+---
+
+## 2. The most important result (big picture)
+
+### 🔥 **Balanced ternary + context is already extremely strong**
+
+Look at this:
+
+```
+base multistream (balanced ternary planes ctx_rANS): 1.454 bpc
+```
+
+That is **already better than gzip on residuals** and not far off modern intra codecs — *without* motion compensation.
+
+That means:
+
+> Your *quotienting + digit-plane factorization* is doing serious work on its own.
+
+This validates the whole theoretical direction.
+
+---
+
+## 3. Plane-by-plane story (this is crucial)
+
+Let’s examine the base BT planes:
+
+| Plane | raw entropy | ctx_rANS | Interpretation                   |
+| ----- | ----------- | -------- | -------------------------------- |
+| 0     | ~1.23       | **0.59** | Low-order noise, still structure |
+| 1     | ~1.15       | **0.35** | Strong local correlation         |
+| 2     | ~1.11       | **0.22** | Even stronger                    |
+| 3     | ~0.58       | **0.16** | Almost predictable               |
+| 4     | ~1.03       | **0.12** | Sparse but patterned             |
+| 5     | ~0.11       | **0.03** | Nearly deterministic             |
+
+Two *very important* observations:
+
+1. **Higher planes are not random**
+   Plane 4 looking like 0.12 bpc with context means *structure survived the quotient*.
+2. **Entropy is not monotonic**
+   Plane 4 > Plane 3 entropy tells you residuals aren’t Gaussian — they’re structured, blocky, and sign-coherent.
+
+This is exactly what motion compensation should annihilate next.
+
+---
+
+## 4. Magnitude + gated sign: the right factorization
+
+This block:
+
+```
+base multistream (bt mag ctx + sign ctx via rANS): 1.641 bpc
+```
+
+is *slightly worse* than the pure ctx_rANS on planes (1.454 bpc), **but**:
+
+That’s expected, because:
+
+* You’re paying overhead to split streams
+* You haven’t yet exploited **sign coherence across blocks / motion**
+
+What matters is *where the gains appear*:
+
+### Magnitude streams
+
+Magnitude entropy collapses *hard* with context:
+
+* Plane 2 mag: **0.121 bpc**
+* Plane 4 mag: **0.076 bpc**
+
+That means:
+
+> Presence/absence of digits is *extremely predictable spatially and temporally*.
+
+### Sign streams
+
+Sign entropy collapses when gated:
+
+* Plane 5 sign ctx: **0.000 bpc**
+* Plane 4 sign ctx: **0.052 bpc**
+
+This is **exactly** the expected outcome of the quotient:
+
+> Signs are only interesting where magnitude exists — and even then they’re locally coherent.
+
+This confirms your *magnitude-first* MDL intuition.
+
+---
+
+## 5. Coarse / reuse experiments — very telling
+
+### Coarse streams alone
+
+```
+multistream (coarse+sign via rANS): 4.110 bpc
+```
+
+Not great → coarse without alignment doesn’t help much.
+
+### Coarse residuals
+
+```
+multistream (coarse_resid+sign_resid via rANS): 2.892 bpc
+```
+
+This is much better — meaning:
+
+> Reuse starts to matter *only after differencing*.
+
+That’s a smoking gun: **you’re missing alignment**.
+
+---
+
+## 6. Block reuse + action coding — this is the “preview” of motion
+
+This line is huge:
+
+```
+base block_reuse ctx_rANS ... : 1.396 bpc
+```
+
+This is the **best number in the entire output**.
+
+And look at the breakdown:
+
+```
+new=4262 same=1538 reuse=5000
+```
+
+Meaning:
+
+* **Reuse dominates**
+* “Same” and “reuse” decisions are cheap
+* Actions are very compressible
+
+This tells us:
+
+> Your system *already wants* to do motion compensation — it’s just doing it implicitly and clumsily.
+
+Block reuse is a *poor man’s motion* — and it’s already winning.
+
+---
+
+## 7. Key conclusions (no ambiguity)
+
+### ✅ What is working extremely well
+
+1. Balanced ternary digit planes
+2. Magnitude / sign quotient
+3. Context modeling (esp. prev-plane + spatial)
+4. Block reuse signaling
+5. MDL framing (implicitly)
+
+### ❌ What is missing (now provably)
+
+1. **Explicit geometric alignment**
+2. Reference selection beyond trivial reuse
+3. Motion vectors / affine params
+
+Not hypothetically — **your own numbers prove it**.
+
+---
+
+## 8. The single most important insight from this run
+
+> You are already paying the cost of “reuse decisions”
+> **without reaping the geometric benefit**.
+
+Block reuse is a *discrete proxy* for motion.
+Replacing it with **translation first** will strictly dominate.
+
+---
+
+## 9. What to do next (precise, minimal, ordered)
+
+### Step 1 — Add **translation-only motion** (no trees, no affine yet)
+
+* Fixed block size: **16×16** (you already use this)
+* Motion vectors: integer, radius ±8 or ±16
+* Reference: just **t−1**
+
+Prediction:
+
+```
+P_t = motion_compensated(prev_frame)
+R_t = X_t - P_t
+→ same ternary + ctx pipeline
+```
+
+**Expected outcome:**
+Plane 0–2 entropy should collapse dramatically.
+Overall bpc should drop **below 1.0** quickly.
+
+---
+
+### Step 2 — Replace block reuse with motion vectors
+
+Currently:
+
+```
+reuse / same / new
+```
+
+Replace with:
+
+```
+(dx, dy) ∈ [-R, R]^2
+```
+
+Encode (dx, dy) with **two-sided geometric prior**
+You already have the MDL math for this.
+
+This will:
+
+* remove block reuse hacks
+* give cleaner predictors
+* reduce residual entropy further
+
+---
+
+### Step 3 — Only then add variable blocks or affine
+
+Do **not** jump to affine yet.
+
+Order of ROI:
+
+1. Translation
+2. Temporal pyramid (t−1, t−2, t−4)
+3. Quadtree
+4. Rotation
+5. Affine
+
+Your current data says step (1) alone is a slam dunk.
+
+---
+
+## 10. One concrete expectation (so you can sanity-check)
+
+After translation motion:
+
+* Plane 0 ctx entropy → **~0.2 bpc or less**
+* Plane 1–2 → **~0.05–0.1 bpc**
+* Higher planes → often vanish
+
+If that *doesn’t* happen, then we debug motion — not entropy coding.
+
+---
+
+## 11. Bottom line
+
+You’ve crossed the hardest threshold already:
+
+> **Your representation is correct.**
+
+The remaining gains are **pure geometry**, not information theory.
+
+This run proves:
+
+* quotienting works
+* context works
+* reuse wants to become motion
+
+If you want, next I can:
+
+* sketch the **exact motion-vector side-info MDL term** to replace reuse
+* help you modify `video_bench.py` minimally to inject translation prediction
+* or help map this directly onto your Vulkan/Kompute pipeline
+
+But at this point, the direction is no longer speculative — the data is decisive.
+

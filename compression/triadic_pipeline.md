@@ -42,6 +42,27 @@ and contexted rANS results for each stream.
 6. **Entropy coding**
    - All streams are coded with the internal range coder (`rans.py`).
 
+## Block reuse (spatio-temporal quotient, current)
+
+This adds an explicit reuse action stream over blocks, treating repeated blocks
+as equivalence classes under translation in time (and within-frame reuse).
+
+Defaults:
+
+- `block_size = 16`
+- `dict_size = 256`
+- `hash_planes = 2` (first two balanced-ternary planes)
+- Actions: `NEW` (encode planes), `SAME` (reuse previous frame at same position), `REUSE` (dictionary hit)
+
+Implementation notes:
+
+- Each block is canonicalized by sign-normalization (flip if summed plane values are negative).
+- A rolling dictionary maps block hashes to indices; `REUSE` emits the index.
+- When `NEW` is false, planes are masked to neutral and only actions/refs/flip bits are coded.
+
+This is a first-order “quotient by translation” step; it captures exact block
+repeats without motion-compensated warping.
+
 ## Why the per-plane Z2 quotient matters
 
 Balanced ternary exposes scale structure, but it does not remove sign symmetry.
@@ -69,4 +90,3 @@ modeling alone.
 1. Context the gated sign stream using magnitude + neighbors.
 2. Add simple backoff/smoothing for rare contexts.
 3. Compare to LZMA on the same residual stream for fair baselines.
-

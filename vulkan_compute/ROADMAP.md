@@ -8,9 +8,10 @@
 
 ## Phase 1: Visual Debug
 
-- [ ] Storage image output (RGBA8).
-- [ ] Simple shader writes visible pattern.
-- [ ] Optional CPU readback to PNG for verification.
+- [x] Storage image output (RGBA8).
+- [x] Simple shader writes visible pattern.
+- [x] Optional CPU readback to PPM for verification.
+- [x] Live preview via GLFW + swapchain (compute -> sample).
 
 ## Phase 2: Domain Kernels
 

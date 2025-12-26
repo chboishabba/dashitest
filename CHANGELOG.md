@@ -1,6 +1,12 @@
 # Changelog
 
 ## Unreleased
+- Compression bench upgrades:
+  - Replaced the lzma shim with a real range coder in `compression/rans.py`.
+  - Added balanced-ternary digit planes, per-plane Z2 quotient (mag + gated sign), and contexted coding in `compression/video_bench.py`.
+  - Added block reuse actions, reference stream, and masked-plane coding to approximate spatio-temporal quotient reuse.
+  - Added optional motion-compensation pyramid search and train/test context split reporting.
+  - Documented the triadic pipeline and quotient composition in `compression/triadic_pipeline.md`.
 - Added severity-ranked bad-window tooling and docs:
   - `scripts/score_bad_windows.py` computes synthetic bad flags (|return| vs σ or drawdown slope) and ranks top-N windows by summed `p_bad` over a sliding window.
   - News fetch summaries now include severity (`sev_sum_p_bad`) and cap windows/days by triggers to avoid spam; 404s/future dates are treated as empty fetches.

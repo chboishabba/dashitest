@@ -26,6 +26,7 @@ thin host code, aligned with the triadic compression pipeline.
 
 ```bash
 glslc vulkan_compute/shaders/add.comp -o vulkan_compute/shaders/add.spv
+glslc vulkan_compute/shaders/write_image.comp -o vulkan_compute/shaders/write_image.spv
 ```
 
 3. Run the sample:
@@ -33,6 +34,27 @@ glslc vulkan_compute/shaders/add.comp -o vulkan_compute/shaders/add.spv
 ```bash
 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json \
   python vulkan_compute/compute_buffer.py
+```
+
+4. Run the storage image sample (optional dump to PPM):
+
+```bash
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json \
+  python vulkan_compute/compute_image.py --width 256 --height 256 --dump out.ppm
+```
+
+5. Compile preview shaders:
+
+```bash
+glslc vulkan_compute/shaders/preview.vert -o vulkan_compute/shaders/preview.vert.spv
+glslc vulkan_compute/shaders/preview.frag -o vulkan_compute/shaders/preview.frag.spv
+```
+
+6. Run the live preview (requires `glfw`):
+
+```bash
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json \
+  python vulkan_compute/compute_image_preview.py --width 512 --height 512 --frames 240
 ```
 
 Expected output shows the first 10 elements incremented by 1.
