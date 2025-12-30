@@ -143,6 +143,7 @@ class Dashboard(QtWidgets.QMainWindow):
         self.day_idx = 0
         self.day_keys = None
         self.progressive_warned = False
+        self.cached_log = pd.DataFrame()
         self.posture_spans = []
         self.init_ui()
         self.timer = QtCore.QTimer()
@@ -250,17 +251,38 @@ class Dashboard(QtWidgets.QMainWindow):
                 print("[progressive-days] Log missing/empty; using synthetic data with hourly timestamps.")
                 self.progressive_warned = True
 
-        log, ts_dt, self.day_keys, self.day_idx = prepare_progressive_view(
-            log=log,
-            day_idx=self.day_idx,
-            day_keys=self.day_keys,
-            refresh_s=self.refresh_s,
-            progressive_days=self.progressive_days,
-        )
-
-        if self.progressive_days and (ts_dt is None or not ts_dt.notna().any()) and not self.progressive_warned:
+        ts_dt_full = pd.to_datetime(log["ts"], errors="coerce") if "ts" in log.columns else None
+        allowed_mask = None
+        if self.progressive_days and ts_dt_full is not None and ts_dt_full.notna().any():
+            ts_days = ts_dt_full.dt.normalize()
+            candidate_keys = np.sort(ts_days.dropna().unique())
+            if self.day_keys is None or len(self.day_keys) != len(candidate_keys) or not np.array_equal(
+                self.day_keys, candidate_keys
+            ):
+                self.day_keys = candidate_keys
+            if self.day_keys is not None and len(self.day_keys) > 0:
+                self.day_idx = min(self.day_idx, len(self.day_keys) - 1)
+                if self.refresh_s > 0 and self.day_idx < len(self.day_keys) - 1:
+                    self.day_idx += 1
+                visible_days = set(self.day_keys[: self.day_idx + 1])
+                allowed_mask = ts_days.isin(visible_days)
+        elif self.progressive_days and not self.progressive_warned:
             print("[progressive-days] ts column missing or unparseable; showing full data.")
             self.progressive_warned = True
+
+        allowed_log = log if allowed_mask is None else log.loc[allowed_mask]
+
+        if self.cached_log.empty:
+            self.cached_log = allowed_log.copy()
+        elif len(allowed_log) < len(self.cached_log):
+            self.cached_log = allowed_log.copy()
+        else:
+            new_rows = allowed_log.iloc[len(self.cached_log) :]
+            if not new_rows.empty:
+                self.cached_log = pd.concat([self.cached_log, new_rows])
+
+        log = self.cached_log
+        ts_dt = pd.to_datetime(log["ts"], errors="coerce") if "ts" in log.columns else None
 
         if ts_dt is not None and ts_dt.notna().any():
             x = ts_dt
