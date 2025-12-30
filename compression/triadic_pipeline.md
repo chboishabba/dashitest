@@ -63,6 +63,59 @@ Implementation notes:
 This is a first-order “quotient by translation” step; it captures exact block
 repeats without motion-compensated warping.
 
+## Color modes (RGB vs YCoCg-R)
+
+The benchmark supports either independent RGB channels or a reversible YCoCg-R
+transform before triadic coding.
+
+Modes:
+
+- `--color --color-transform rgb`: treats R, G, B as independent grayscale streams.
+- `--color --color-transform ycocg`: converts RGB into Y/Co/Cg (reversible), encodes
+  Y/Co/Cg magnitudes with the triadic pipeline, and emits Co/Cg sign streams.
+
+Output notes:
+
+- `rgb combined_total_bpp`: sum of per-channel bpc (or block-reuse bpc when enabled).
+- `ycocg combined_total_bpp`: sum of Y/Co/Cg bpc plus the Co/Cg sign stream bpp.
+
+## GPU symbol-stream contract (Vulkan path)
+
+The Vulkan path emits symbol streams that match the CPU compressor inputs.
+This keeps the entropy coding logic unchanged while moving predictors and
+digit-plane generation to the GPU.
+
+### Block symbols (action/ref/flip)
+
+One entry per block in scan order:
+`block_id = by * blocks_x + bx`.
+
+```
+struct BlockSym {
+    uint32 action;   // 0=NEW, 1=SAME, 2=REUSE
+    uint32 ref;      // dictionary ref or temporal lag
+    uint32 flip;     // sign flip bitmask (per-plane)
+    uint32 aux;      // reserved
+};
+```
+
+Total size: `blocks_x * blocks_y * 16` bytes.
+
+### Residual planes (balanced ternary trits)
+
+Planes are stored as `int32` trits in `{-1,0,+1}` with the index:
+
+```
+idx = plane * (W*H) + (y*W + x)
+```
+
+Total size: `planes * W * H * 4` bytes.
+
+### Validation stub
+
+`python vulkan/symbol_stream_stub.py ...` allocates these SSBOs, runs a
+zero-writer compute kernel, and reads back to validate the GPU->CPU contract.
+
 ## Why the per-plane Z2 quotient matters
 
 Balanced ternary exposes scale structure, but it does not remove sign symmetry.

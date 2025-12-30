@@ -84,6 +84,81 @@ def _recv_dmabuf(sock: socket.socket) -> Tuple[dict, List[int]]:
     )
 
 
+class DmabufExporter:
+    def __init__(
+        self,
+        video: Path,
+        vaapi_device: str,
+        *,
+        force_linear: bool = False,
+        drm_device: str | None = None,
+        timeout_s: float = 5.0,
+        debug: bool = False,
+        frames: int = 1,
+    ) -> None:
+        source = Path(__file__).with_name("vaapi_dmabuf_export.c")
+        binary = Path(__file__).with_name("vaapi_dmabuf_export")
+        _build_helper(source, binary)
+
+        self._timeout_s = timeout_s
+        parent_sock, child_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+        parent_sock.settimeout(timeout_s)
+        env = os.environ.copy()
+        env["DMABUF_STUB_SOCK_FD"] = str(child_sock.fileno())
+        cmd = [str(binary), str(video), vaapi_device, "--frames", str(frames)]
+        if force_linear:
+            cmd.append("--force-linear")
+        if debug:
+            cmd.append("--debug")
+        if drm_device:
+            cmd.extend(["--drm-device", drm_device])
+        proc = subprocess.Popen(
+            cmd,
+            pass_fds=[child_sock.fileno()],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        child_sock.close()
+        self._sock = parent_sock
+        self._proc = proc
+
+    def recv_next(self) -> Tuple[dict, List[int]]:
+        try:
+            info, fds = _recv_dmabuf(self._sock)
+        except socket.timeout as exc:
+            if self._proc.poll() is not None:
+                log = self._flush_logs(kill=False)
+                detail = f" | exporter: {log}" if log else ""
+                raise EOFError(f"dmabuf exporter finished{detail}") from exc
+            log = self._flush_logs(kill=True)
+            detail = f" | exporter: {log}" if log else ""
+            raise RuntimeError(f"timed out waiting for dmabuf export ({self._timeout_s}s){detail}") from exc
+        fds = fds[: info["nb_objects"]]
+        if len(fds) < info["nb_objects"]:
+            raise RuntimeError("did not receive enough dmabuf fds")
+        return info, fds
+
+    def _flush_logs(self, kill: bool) -> str:
+        if self._proc.poll() is None and kill:
+            self._proc.kill()
+        try:
+            out, err = self._proc.communicate(timeout=self._timeout_s)
+        except subprocess.TimeoutExpired:
+            self._proc.kill()
+            out, err = self._proc.communicate()
+        return (err or "") + (out or "")
+
+    def close(self) -> str:
+        log = self._flush_logs(kill=False)
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+        return log.strip()
+
+
 def export_dmabuf(
     video: Path,
     vaapi_device: str,
@@ -93,55 +168,17 @@ def export_dmabuf(
     timeout_s: float = 5.0,
     debug: bool = False,
 ) -> Tuple[dict, List[int], str]:
-    source = Path(__file__).with_name("vaapi_dmabuf_export.c")
-    binary = Path(__file__).with_name("vaapi_dmabuf_export")
-    _build_helper(source, binary)
-
-    parent_sock, child_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
-    parent_sock.settimeout(timeout_s)
-    env = os.environ.copy()
-    env["DMABUF_STUB_SOCK_FD"] = str(child_sock.fileno())
-    cmd = [str(binary), str(video), vaapi_device]
-    if force_linear:
-        cmd.append("--force-linear")
-    if debug:
-        cmd.append("--debug")
-    if drm_device:
-        cmd.extend(["--drm-device", drm_device])
-    proc = subprocess.Popen(
-        cmd,
-        pass_fds=[child_sock.fileno()],
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+    exporter = DmabufExporter(
+        video,
+        vaapi_device,
+        force_linear=force_linear,
+        drm_device=drm_device,
+        timeout_s=timeout_s,
+        debug=debug,
+        frames=1,
     )
-    child_sock.close()
-
     try:
-        info, fds = _recv_dmabuf(parent_sock)
-    except socket.timeout as exc:
-        proc.kill()
-        out, err = proc.communicate()
-        detail = err.strip() or out.strip()
-        if detail:
-            detail = f" | exporter: {detail}"
-        raise RuntimeError(f"timed out waiting for dmabuf export ({timeout_s}s){detail}") from exc
+        info, fds = exporter.recv_next()
     finally:
-        parent_sock.close()
-
-    try:
-        out, err = proc.communicate(timeout=timeout_s)
-    except subprocess.TimeoutExpired as exc:
-        proc.kill()
-        out, err = proc.communicate()
-        raise RuntimeError(f"export helper did not exit in {timeout_s}s") from exc
-    if proc.returncode != 0:
-        raise RuntimeError(out + err)
-
-    fds = fds[: info["nb_objects"]]
-    if len(fds) < info["nb_objects"]:
-        raise RuntimeError("did not receive enough dmabuf fds")
-
-    log = (err or "") + (out or "")
-    return info, fds, log.strip()
+        log = exporter.close()
+    return info, fds, log

@@ -1,0 +1,50 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer PlaneBuffer {
+    uint data[];
+} plane_buf;
+
+layout(set = 0, binding = 1, r8) writeonly uniform image2D out_img;
+
+layout(push_constant) uniform Push {
+    uint width;
+    uint height;
+    uint y_offset;
+    uint uv_offset;
+    uint y_pitch;
+    uint uv_pitch;
+    uint format; // 0 = NV12 (8-bit), 1 = P010/R16 (10-bit in 16-bit)
+} pc;
+
+uint load_u8(uint byte_offset) {
+    uint word = plane_buf.data[byte_offset >> 2];
+    uint shift = (byte_offset & 3u) * 8u;
+    return (word >> shift) & 0xFFu;
+}
+
+uint load_u16(uint byte_offset) {
+    uint word = plane_buf.data[byte_offset >> 2];
+    uint shift = (byte_offset & 2u) * 8u;
+    return (word >> shift) & 0xFFFFu;
+}
+
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    if (x >= pc.width || y >= pc.height) {
+        return;
+    }
+
+    float yf;
+    if (pc.format == 0u) {
+        uint y_byte = pc.y_offset + pc.y_pitch * y + x;
+        yf = float(load_u8(y_byte)) / 255.0;
+    } else {
+        uint y_byte = pc.y_offset + pc.y_pitch * y + x * 2u;
+        uint yv = load_u16(y_byte) >> 6;
+        yf = float(yv) / 1023.0;
+    }
+    imageStore(out_img, ivec2(x, y), vec4(yf, 0.0, 0.0, 1.0));
+}

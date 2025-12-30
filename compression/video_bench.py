@@ -95,6 +95,23 @@ def decode_rgb(path: Path, width: int, height: int, max_frames: int) -> np.ndarr
     return arr.reshape(frames, height, width, 3)
 
 
+def rgb_to_ycocg_r(frames_rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Reversible YCoCg-R transform with sign+mag for Co/Cg."""
+    r = frames_rgb[..., 0].astype(np.int16)
+    g = frames_rgb[..., 1].astype(np.int16)
+    b = frames_rgb[..., 2].astype(np.int16)
+    co = r - b
+    t = b + (co >> 1)
+    cg = g - t
+    y = t + (cg >> 1)
+    y_u8 = np.clip(y, 0, 255).astype(np.uint8)
+    co_sign = (co < 0).astype(np.uint8)
+    cg_sign = (cg < 0).astype(np.uint8)
+    co_mag = np.abs(co).astype(np.uint8)
+    cg_mag = np.abs(cg).astype(np.uint8)
+    return y_u8, co_mag, co_sign, cg_mag, cg_sign
+
+
 def stream_entropy(symbols: np.ndarray) -> float:
     counts = np.bincount(symbols, minlength=int(symbols.max()) + 1)
     probs = counts[counts > 0] / counts.sum()
@@ -794,7 +811,7 @@ def _report_triadic(
     bt_mag: np.ndarray | None = None,
     bt_sign: np.ndarray | None = None,
     bt_digits_override: int | None = None,
-) -> None:
+) -> dict:
     if bt_planes_u8 is None or bt_planes_i8 is None or bt_mag is None or bt_sign is None:
         bt_digits = _balanced_digits_needed(signed_resid)
         bt_planes = _balanced_ternary_digits(signed_resid, bt_digits)
@@ -939,7 +956,8 @@ def _report_triadic(
     total_q_ctx_sign = total_mag_ctx + total_sign_ctx
     print(f"\n{label} multistream (bt mag + sign via rANS): {total_q} bytes ({(total_q * 8) / pixels:5.3f} bpc)")
     print(f"{label} multistream (bt mag ctx + sign via rANS): {total_q_ctx} bytes ({(total_q_ctx * 8) / pixels:5.3f} bpc)")
-    print(f"{label} multistream (bt mag ctx + sign ctx via rANS): {total_q_ctx_sign} bytes ({(total_q_ctx_sign * 8) / pixels:5.3f} bpc)")
+    bpc_mag_sign = (total_q_ctx_sign * 8) / pixels
+    print(f"{label} multistream (bt mag ctx + sign ctx via rANS): {total_q_ctx_sign} bytes ({bpc_mag_sign:5.3f} bpc)")
     if sign_ctx_test_bytes:
         total_sign_ctx_test = sum(sign_ctx_test_bytes)
         total_q_ctx_sign_test = total_mag_ctx + total_sign_ctx_test
@@ -947,6 +965,7 @@ def _report_triadic(
         bpc_test = (total_q_ctx_sign_test * 8) / max(1.0, test_pixels)
         print(f"{label} multistream (bt mag ctx + sign ctx test-only): {total_q_ctx_sign_test} bytes ({bpc_test:5.3f} bpc)")
 
+    block_reuse_bpc = None
     if block_reuse:
         actions, mask, flips, refs = _block_reuse_actions_and_mask(
             bt_planes_i8, block=reuse_block, dict_size=reuse_dict, hash_planes=reuse_planes
@@ -999,6 +1018,7 @@ def _report_triadic(
                 f"{total_masked_ctx} bytes ({bpc_masked:5.3f} bpc)  "
                 f"action={len(enc)} ref={ref_bytes} flip={flip_bytes} planes={sum(masked_ctx_bytes)}"
             )
+            block_reuse_bpc = bpc_masked
 
     # Shannon efficiency summary (context-conditional entropy vs coded length)
     h_ctx_bits = 0.0
@@ -1024,6 +1044,11 @@ def _report_triadic(
         f"{label} eta_mag_ctx={eta_mag:5.3f} eta_sign_ctx={eta_sign:5.3f} "
         f"eta_MDL={eta_mdl:5.3f}"
     )
+    return {
+        "ctx_trit_bpc": bpc_ctx,
+        "mag_sign_bpc": bpc_mag_sign,
+        "block_reuse_bpc": block_reuse_bpc,
+    }
 
 
 def run_video_bench(
@@ -1041,6 +1066,7 @@ def run_video_bench(
     reuse_dict: int,
     reuse_planes: int,
     color: bool,
+    color_transform: str,
 ) -> None:
     width, height, nb_frames = ffprobe_video(path)
     if color:
@@ -1053,11 +1079,12 @@ def run_video_bench(
         print("color mode: per-channel bpc (sum R+G+B for bpp)")
         print()
 
-        for ch, name in enumerate(["r", "g", "b"]):
-            print(f"--- channel {name} ---")
-            _bench_frames(
-                frames_rgb[..., ch],
-                label_prefix=f"{name}_",
+        if color_transform == "ycocg":
+            y, co_mag, co_sign, cg_mag, cg_sign = rgb_to_ycocg_r(frames_rgb)
+            print("--- channel y ---")
+            y_summary = _bench_frames(
+                y,
+                label_prefix="y_",
                 width=width,
                 height=height,
                 pixels=pixels,
@@ -1073,6 +1100,87 @@ def run_video_bench(
                 reuse_dict=reuse_dict,
                 reuse_planes=reuse_planes,
             )
+            print("--- channel co_mag ---")
+            co_summary = _bench_frames(
+                co_mag,
+                label_prefix="co_",
+                width=width,
+                height=height,
+                pixels=pixels,
+                mc=mc,
+                jax_mc=jax_mc,
+                jax_pipeline=jax_pipeline,
+                mc_block=mc_block,
+                mc_search=mc_search,
+                mc_pyramid=mc_pyramid,
+                train_split=train_split,
+                block_reuse=block_reuse,
+                reuse_block=reuse_block,
+                reuse_dict=reuse_dict,
+                reuse_planes=reuse_planes,
+            )
+            print("--- channel cg_mag ---")
+            cg_summary = _bench_frames(
+                cg_mag,
+                label_prefix="cg_",
+                width=width,
+                height=height,
+                pixels=pixels,
+                mc=mc,
+                jax_mc=jax_mc,
+                jax_pipeline=jax_pipeline,
+                mc_block=mc_block,
+                mc_search=mc_search,
+                mc_pyramid=mc_pyramid,
+                train_split=train_split,
+                block_reuse=block_reuse,
+                reuse_block=reuse_block,
+                reuse_dict=reuse_dict,
+                reuse_planes=reuse_planes,
+            )
+            co_sign_bytes = len(rans.encode(co_sign.ravel(), alphabet=2))
+            cg_sign_bytes = len(rans.encode(cg_sign.ravel(), alphabet=2))
+            sign_bpp = (co_sign_bytes + cg_sign_bytes) * 8 / pixels
+            print(
+                f"ycocg sign streams: co={co_sign_bytes} bytes cg={cg_sign_bytes} bytes "
+                f"(sign bpp={sign_bpp:5.3f})"
+            )
+            total_bpp = 0.0
+            for summary in (y_summary, co_summary, cg_summary):
+                if block_reuse and summary["block_reuse_bpc"] is not None:
+                    total_bpp += summary["block_reuse_bpc"]
+                else:
+                    total_bpp += summary["ctx_trit_bpc"]
+            total_bpp += sign_bpp
+            print(f"ycocg combined_total_bpp: {total_bpp:5.3f}")
+        else:
+            for ch, name in enumerate(["r", "g", "b"]):
+                print(f"--- channel {name} ---")
+                summary = _bench_frames(
+                    frames_rgb[..., ch],
+                    label_prefix=f"{name}_",
+                    width=width,
+                    height=height,
+                    pixels=pixels,
+                    mc=mc,
+                    jax_mc=jax_mc,
+                    jax_pipeline=jax_pipeline,
+                    mc_block=mc_block,
+                    mc_search=mc_search,
+                    mc_pyramid=mc_pyramid,
+                    train_split=train_split,
+                    block_reuse=block_reuse,
+                    reuse_block=reuse_block,
+                    reuse_dict=reuse_dict,
+                    reuse_planes=reuse_planes,
+                )
+                if ch == 0:
+                    total_bpp = 0.0
+                if block_reuse and summary["block_reuse_bpc"] is not None:
+                    total_bpp += summary["block_reuse_bpc"]
+                else:
+                    total_bpp += summary["ctx_trit_bpc"]
+            print(f"rgb combined_total_bpp: {total_bpp:5.3f}")
         return
 
     frames = decode_gray(path, width, height, max_frames)
@@ -1202,7 +1310,7 @@ def _bench_frames(
         bpc_combined = (total_bytes * 8) / pixels
         print(f"\n{label_prefix}multistream ({label} via rANS): {total_bytes} bytes ({bpc_combined:5.3f} bpc)")
 
-    _report_triadic(
+    summary = _report_triadic(
         label=f"{label_prefix}base",
         signed_resid=signed_resid,
         frames=frames,
@@ -1290,6 +1398,7 @@ def _bench_frames(
             reuse_dict=reuse_dict,
             reuse_planes=reuse_planes,
         )
+    return summary
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -1300,6 +1409,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--jax-mc", action="store_true", help="Use JAX for motion compensation search.")
     parser.add_argument("--jax-pipeline", action="store_true", help="Use JAX for stream prep and triadic digits.")
     parser.add_argument("--color", action="store_true", help="Process RGB channels separately.")
+    parser.add_argument(
+        "--color-transform",
+        choices=["rgb", "ycocg"],
+        default="rgb",
+        help="Color transform for --color (rgb or reversible ycocg).",
+    )
     parser.add_argument("--mc-block", type=int, default=8, help="Block size for motion compensation.")
     parser.add_argument("--mc-search", type=int, default=4, help="Search radius for motion compensation.")
     parser.add_argument("--mc-pyramid", type=int, default=0, help="Factor-3 pyramid levels for motion search.")
@@ -1329,6 +1444,7 @@ def main(argv: list[str] | None = None) -> None:
         reuse_dict=args.reuse_dict,
         reuse_planes=args.reuse_planes,
         color=args.color,
+        color_transform=args.color_transform,
     )
 
 

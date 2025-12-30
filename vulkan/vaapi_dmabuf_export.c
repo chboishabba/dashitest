@@ -133,7 +133,7 @@ static int send_dmabuf_info(int sock_fd, const AVFrame *drm_frame) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <video> [vaapi_device] [--force-linear] [--debug] [--drm-device <path>]\n", argv[0]);
+        fprintf(stderr, "usage: %s <video> [vaapi_device] [--force-linear] [--debug] [--drm-device <path>] [--frames N]\n", argv[0]);
         return 1;
     }
     const char *sock_env = getenv("DMABUF_STUB_SOCK_FD");
@@ -151,6 +151,7 @@ int main(int argc, char **argv) {
     const char *drm_device = NULL;
     int force_linear = 0;
     int debug = 0;
+    int frames_target = 1;
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--force-linear") == 0) {
             force_linear = 1;
@@ -158,6 +159,9 @@ int main(int argc, char **argv) {
             debug = 1;
         } else if (strcmp(argv[i], "--drm-device") == 0 && i + 1 < argc) {
             drm_device = argv[i + 1];
+            i++;
+        } else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc) {
+            frames_target = atoi(argv[i + 1]);
             i++;
         } else {
             vaapi_device = argv[i];
@@ -167,7 +171,7 @@ int main(int argc, char **argv) {
         drm_device = vaapi_device;
     }
     if (debug) {
-        fprintf(stderr, "vaapi dmabuf export: input=%s device=%s force_linear=%d drm_device=%s\n", input, vaapi_device, force_linear, drm_device);
+        fprintf(stderr, "vaapi dmabuf export: input=%s device=%s force_linear=%d drm_device=%s frames=%d\n", input, vaapi_device, force_linear, drm_device, frames_target);
     }
 
     av_log_set_level(AV_LOG_ERROR);
@@ -332,7 +336,7 @@ int main(int argc, char **argv) {
     }
 
     int sent = 0;
-    while (!sent && av_read_frame(fmt_ctx, pkt) >= 0) {
+    while (av_read_frame(fmt_ctx, pkt) >= 0) {
         if (pkt->stream_index != video_stream) {
             av_packet_unref(pkt);
             continue;
@@ -405,13 +409,16 @@ int main(int argc, char **argv) {
             }
 
             if (send_dmabuf_info(sock_fd, drm_frame) == 0) {
-                sent = 1;
+                sent++;
             }
             av_frame_unref(drm_frame);
             av_frame_unref(frame);
-            if (sent) {
+            if (frames_target > 0 && sent >= frames_target) {
                 break;
             }
+        }
+        if (frames_target > 0 && sent >= frames_target) {
+            break;
         }
     }
 

@@ -1,0 +1,26 @@
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) buffer BlockSyms {
+    uint data[];
+} block_syms;
+
+layout(std430, binding = 1) buffer TritPlanes {
+    int trits[];
+} trit_planes;
+
+layout(push_constant) uniform Params {
+    uint block_words; // 4 * n_blocks
+    uint trit_count;  // planes * width * height
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx < pc.block_words) {
+        block_syms.data[idx] = 0u;
+    }
+    if (idx < pc.trit_count) {
+        trit_planes.trits[idx] = 0;
+    }
+}

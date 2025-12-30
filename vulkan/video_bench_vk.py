@@ -27,9 +27,9 @@ except ImportError:
     sys.path.append(str(Path(__file__).resolve().parents[1]))
     from decode_backend import decode_gray_buffer, ffprobe_video
 try:
-    from .dmabuf_export import export_dmabuf
+    from .dmabuf_export import DmabufExporter, export_dmabuf
 except ImportError:
-    from dmabuf_export import export_dmabuf
+    from dmabuf_export import DmabufExporter, export_dmabuf
 
 
 SHADER_DIR = Path(__file__).resolve().parents[1] / "vulkan_compute" / "shaders"
@@ -171,6 +171,7 @@ def main() -> int:
         default=None,
         help="DRM device for dmabuf force-linear uploads (defaults to --vaapi-device).",
     )
+    parser.add_argument("--dmabuf-ring", type=int, default=2, help="Dmabuf import ring size.")
     parser.add_argument("--dmabuf-debug", action="store_true", help="Print dmabuf exporter logs.")
     parser.add_argument(
         "--mode",
@@ -193,6 +194,8 @@ def main() -> int:
     use_dmabuf = args.vaapi_dmabuf
     dmabuf_info = None
     dmabuf_fds = None
+    dmabuf_exporter = None
+    dmabuf_pending = None
     frames = None
     if use_dmabuf:
         if args.dmabuf_force_linear:
@@ -202,16 +205,17 @@ def main() -> int:
                     f"--dmabuf-force-linear requested but --dmabuf-drm-device '{drm_device}' does not exist.\n"
                     "Expose /dev/dri/card* or disable --dmabuf-force-linear."
                 )
-        dmabuf_info, dmabuf_fds, log = export_dmabuf(
+        dmabuf_exporter = DmabufExporter(
             args.video,
             args.vaapi_device,
             force_linear=args.dmabuf_force_linear,
             drm_device=args.dmabuf_drm_device,
             timeout_s=args.dmabuf_timeout,
             debug=args.dmabuf_debug,
+            frames=args.frames,
         )
-        if args.dmabuf_debug and log:
-            print(log)
+        dmabuf_info, dmabuf_fds = dmabuf_exporter.recv_next()
+        dmabuf_pending = (dmabuf_info, dmabuf_fds)
         width = dmabuf_info["width"]
         height = dmabuf_info["height"]
     else:
@@ -538,6 +542,19 @@ def main() -> int:
         ),
         None,
     )
+    nv12_r8_src = VK_SHADER_DIR / "nv12_to_r8.comp"
+    nv12_r8_shader = VK_SHADER_DIR / "nv12_to_r8.spv"
+    _ensure_spirv(nv12_r8_shader, nv12_r8_src)
+    nv12_r8_bytes = _read_spirv_bytes(nv12_r8_shader)
+    nv12_r8_module = vkCreateShaderModule(
+        device,
+        VkShaderModuleCreateInfo(
+            sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            codeSize=len(nv12_r8_bytes),
+            pCode=nv12_r8_bytes,
+        ),
+        None,
+    )
 
     compute_set_layout = vkCreateDescriptorSetLayout(
         device,
@@ -648,6 +665,39 @@ def main() -> int:
         VK_NULL_HANDLE,
         1,
         ffi.new("VkComputePipelineCreateInfo[]", [nv12_ci]),
+        None,
+    )[0]
+
+    nv12_r8_layout = vkCreatePipelineLayout(
+        device,
+        VkPipelineLayoutCreateInfo(
+            sType=VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            setLayoutCount=1,
+            pSetLayouts=ffi.new("VkDescriptorSetLayout[]", [nv12_set_layout]),
+            pushConstantRangeCount=1,
+            pPushConstantRanges=[VkPushConstantRange(stageFlags=VK_SHADER_STAGE_COMPUTE_BIT, offset=0, size=28)],
+        ),
+        None,
+    )
+    nv12_r8_pipeline = vkCreateComputePipelines(
+        device,
+        VK_NULL_HANDLE,
+        1,
+        ffi.new(
+            "VkComputePipelineCreateInfo[]",
+            [
+                VkComputePipelineCreateInfo(
+                    sType=VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                    stage=VkPipelineShaderStageCreateInfo(
+                        sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                        stage=VK_SHADER_STAGE_COMPUTE_BIT,
+                        module=nv12_r8_module,
+                        pName=compute_entry,
+                    ),
+                    layout=nv12_r8_layout,
+                )
+            ],
+        ),
         None,
     )[0]
 
@@ -789,10 +839,10 @@ def main() -> int:
             poolSizeCount=3,
             pPoolSizes=[
                 VkDescriptorPoolSize(type=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, descriptorCount=1),
-                VkDescriptorPoolSize(type=VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, descriptorCount=4),
-                VkDescriptorPoolSize(type=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount=1),
+                VkDescriptorPoolSize(type=VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, descriptorCount=5),
+                VkDescriptorPoolSize(type=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount=2),
             ],
-            maxSets=3,
+            maxSets=4,
         ),
         None,
     )
@@ -814,7 +864,16 @@ def main() -> int:
             pSetLayouts=[graphics_set_layout],
         ),
     )[0]
-    nv12_set = vkAllocateDescriptorSets(
+    nv12_rgba_set = vkAllocateDescriptorSets(
+        device,
+        VkDescriptorSetAllocateInfo(
+            sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            descriptorPool=descriptor_pool,
+            descriptorSetCount=1,
+            pSetLayouts=[nv12_set_layout],
+        ),
+    )[0]
+    nv12_r8_set = vkAllocateDescriptorSets(
         device,
         VkDescriptorSetAllocateInfo(
             sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
@@ -896,68 +955,14 @@ def main() -> int:
             )
         )
 
-    max_frames_in_flight = max(1, args.in_flight)
+    max_frames_in_flight = max(1, args.dmabuf_ring) if use_dmabuf else max(1, args.in_flight)
     staging_buffers = []
     staging_mems = []
     staging_maps = []
-    dmabuf_buffer = None
-    dmabuf_memory = None
+    dmabuf_buffer = [None] * max_frames_in_flight
+    dmabuf_memory = [None] * max_frames_in_flight
     dmabuf_info_obj = None
-    if use_dmabuf:
-        dmabuf_info_obj = dmabuf_info
-        dmabuf_size = int(dmabuf_info_obj["objects"][0]["size"])
-        dmabuf_buffer = vkCreateBuffer(
-            device,
-            VkBufferCreateInfo(
-                sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-                size=dmabuf_size,
-                usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                sharingMode=VK_SHARING_MODE_EXCLUSIVE,
-            ),
-            None,
-        )
-        dmabuf_reqs = vkGetBufferMemoryRequirements(device, dmabuf_buffer)
-        dmabuf_type = _find_memory_type(mem_props, dmabuf_reqs.memoryTypeBits)
-        dmabuf_import = VkImportMemoryFdInfoKHR(
-            sType=VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
-            handleType=VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
-            fd=dmabuf_fds[0],
-        )
-        dmabuf_alloc = VkMemoryAllocateInfo(
-            sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-            allocationSize=max(dmabuf_reqs.size, dmabuf_size),
-            memoryTypeIndex=dmabuf_type,
-            pNext=dmabuf_import,
-        )
-        dmabuf_memory = vkAllocateMemory(device, dmabuf_alloc, None)
-        vkBindBufferMemory(device, dmabuf_buffer, dmabuf_memory, 0)
-        vkUpdateDescriptorSets(
-            device,
-            2,
-            [
-                VkWriteDescriptorSet(
-                    sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                    dstSet=nv12_set,
-                    dstBinding=0,
-                    descriptorCount=1,
-                    descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    pBufferInfo=[
-                        VkDescriptorBufferInfo(buffer=dmabuf_buffer, offset=0, range=dmabuf_size)
-                    ],
-                ),
-                VkWriteDescriptorSet(
-                    sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                    dstSet=nv12_set,
-                    dstBinding=1,
-                    descriptorCount=1,
-                    descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                    pImageInfo=[VkDescriptorImageInfo(imageView=out_view, imageLayout=VK_IMAGE_LAYOUT_GENERAL)],
-                ),
-            ],
-            0,
-            None,
-        )
-    else:
+    if not use_dmabuf:
         staging_size = width * height
         staging_info = VkBufferCreateInfo(
             sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -1034,7 +1039,7 @@ def main() -> int:
     cpu_record_ms = 0.0
     gpu_submit_ms = 0.0
     cpu_total_ms = 0.0
-    total_frames = 1 if use_dmabuf else frames.shape[0]
+    total_frames = args.frames if use_dmabuf else frames.shape[0]
     while not glfw.window_should_close(window) and frame < total_frames:
         frame_start = time.perf_counter()
         wait_start = time.perf_counter()
@@ -1046,6 +1051,100 @@ def main() -> int:
             device, swapchain, 0xFFFFFFFFFFFFFFFF, image_available[frame_idx], VK_NULL_HANDLE
         )
         cpu_wait_ms += (time.perf_counter() - wait_start) * 1000.0
+
+        if use_dmabuf:
+            if dmabuf_buffer[frame_idx] is not None:
+                vkDestroyBuffer(device, dmabuf_buffer[frame_idx], None)
+                vkFreeMemory(device, dmabuf_memory[frame_idx], None)
+                dmabuf_buffer[frame_idx] = None
+                dmabuf_memory[frame_idx] = None
+
+            try:
+                if dmabuf_pending is not None:
+                    dmabuf_info_obj, dmabuf_fds = dmabuf_pending
+                    dmabuf_pending = None
+                else:
+                    dmabuf_info_obj, dmabuf_fds = dmabuf_exporter.recv_next()
+            except EOFError as exc:
+                if args.dmabuf_debug:
+                    print(str(exc))
+                break
+            if dmabuf_info_obj["nb_objects"] != 1:
+                raise RuntimeError("multi-object dmabuf not supported in preview")
+            dmabuf_size = int(dmabuf_info_obj["objects"][0]["size"])
+            dmabuf_buffer[frame_idx] = vkCreateBuffer(
+                device,
+                VkBufferCreateInfo(
+                    sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                    size=dmabuf_size,
+                    usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                    sharingMode=VK_SHARING_MODE_EXCLUSIVE,
+                ),
+                None,
+            )
+            dmabuf_reqs = vkGetBufferMemoryRequirements(device, dmabuf_buffer[frame_idx])
+            dmabuf_type = _find_memory_type(mem_props, dmabuf_reqs.memoryTypeBits, 0)
+            dmabuf_import = VkImportMemoryFdInfoKHR(
+                sType=VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
+                handleType=VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+                fd=dmabuf_fds[0],
+            )
+            dmabuf_alloc = VkMemoryAllocateInfo(
+                sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                allocationSize=max(dmabuf_reqs.size, dmabuf_size),
+                memoryTypeIndex=dmabuf_type,
+                pNext=dmabuf_import,
+            )
+            dmabuf_memory[frame_idx] = vkAllocateMemory(device, dmabuf_alloc, None)
+            vkBindBufferMemory(device, dmabuf_buffer[frame_idx], dmabuf_memory[frame_idx], 0)
+            vkUpdateDescriptorSets(
+                device,
+                4,
+                [
+                    VkWriteDescriptorSet(
+                        sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                        dstSet=nv12_rgba_set,
+                        dstBinding=0,
+                        descriptorCount=1,
+                        descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                        pBufferInfo=[
+                            VkDescriptorBufferInfo(
+                                buffer=dmabuf_buffer[frame_idx], offset=0, range=dmabuf_size
+                            )
+                        ],
+                    ),
+                    VkWriteDescriptorSet(
+                        sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                        dstSet=nv12_rgba_set,
+                        dstBinding=1,
+                        descriptorCount=1,
+                        descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                        pImageInfo=[VkDescriptorImageInfo(imageView=out_view, imageLayout=VK_IMAGE_LAYOUT_GENERAL)],
+                    ),
+                    VkWriteDescriptorSet(
+                        sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                        dstSet=nv12_r8_set,
+                        dstBinding=0,
+                        descriptorCount=1,
+                        descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                        pBufferInfo=[
+                            VkDescriptorBufferInfo(
+                                buffer=dmabuf_buffer[frame_idx], offset=0, range=dmabuf_size
+                            )
+                        ],
+                    ),
+                    VkWriteDescriptorSet(
+                        sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                        dstSet=nv12_r8_set,
+                        dstBinding=1,
+                        descriptorCount=1,
+                        descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                        pImageInfo=[VkDescriptorImageInfo(imageView=curr_view, imageLayout=VK_IMAGE_LAYOUT_GENERAL)],
+                    ),
+                ],
+                0,
+                None,
+            )
 
         cmd = command_buffers[image_index]
         record_start = time.perf_counter()
@@ -1091,8 +1190,6 @@ def main() -> int:
                 1,
                 [out_to_general],
             )
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, nv12_pipeline)
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, nv12_layout, 0, 1, [nv12_set], 0, None)
             fmt_id = 0 if dmabuf_info_obj["drm_format"] == DRM_FORMAT_NV12 else 1
             pc = ffi.new(
                 "uint32_t[]",
@@ -1106,35 +1203,348 @@ def main() -> int:
                     fmt_id,
                 ],
             )
-            vkCmdPushConstants(cmd, nv12_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 28, pc)
-            vkCmdDispatch(cmd, (width + 15) // 16, (height + 15) // 16, 1)
-            out_to_sample = VkImageMemoryBarrier(
-                sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-                srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT,
-                dstAccessMask=VK_ACCESS_SHADER_READ_BIT,
-                oldLayout=VK_IMAGE_LAYOUT_GENERAL,
-                newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                image=out_image,
-                subresourceRange=VkImageSubresourceRange(
-                    aspectMask=VK_IMAGE_ASPECT_COLOR_BIT,
-                    baseMipLevel=0,
-                    levelCount=1,
-                    baseArrayLayer=0,
-                    layerCount=1,
-                ),
-            )
-            vkCmdPipelineBarrier(
-                cmd,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                0,
-                0,
-                None,
-                0,
-                None,
-                1,
-                [out_to_sample],
-            )
+            if args.mode == "raw":
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, nv12_pipeline)
+                vkCmdBindDescriptorSets(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    nv12_layout,
+                    0,
+                    1,
+                    [nv12_rgba_set],
+                    0,
+                    None,
+                )
+                vkCmdPushConstants(cmd, nv12_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 28, pc)
+                vkCmdDispatch(cmd, (width + 15) // 16, (height + 15) // 16, 1)
+                out_to_sample = VkImageMemoryBarrier(
+                    sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                    srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT,
+                    dstAccessMask=VK_ACCESS_SHADER_READ_BIT,
+                    oldLayout=VK_IMAGE_LAYOUT_GENERAL,
+                    newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    image=out_image,
+                    subresourceRange=VkImageSubresourceRange(
+                        aspectMask=VK_IMAGE_ASPECT_COLOR_BIT,
+                        baseMipLevel=0,
+                        levelCount=1,
+                        baseArrayLayer=0,
+                        layerCount=1,
+                    ),
+                )
+                vkCmdPipelineBarrier(
+                    cmd,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                    0,
+                    0,
+                    None,
+                    0,
+                    None,
+                    1,
+                    [out_to_sample],
+                )
+            else:
+                curr_to_general = VkImageMemoryBarrier(
+                    sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                    srcAccessMask=0,
+                    dstAccessMask=VK_ACCESS_SHADER_WRITE_BIT,
+                    oldLayout=VK_IMAGE_LAYOUT_UNDEFINED if first_frame else VK_IMAGE_LAYOUT_GENERAL,
+                    newLayout=VK_IMAGE_LAYOUT_GENERAL,
+                    image=curr_image,
+                    subresourceRange=VkImageSubresourceRange(
+                        aspectMask=VK_IMAGE_ASPECT_COLOR_BIT,
+                        baseMipLevel=0,
+                        levelCount=1,
+                        baseArrayLayer=0,
+                        layerCount=1,
+                    ),
+                )
+                vkCmdPipelineBarrier(
+                    cmd,
+                    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    0,
+                    0,
+                    None,
+                    0,
+                    None,
+                    1,
+                    [curr_to_general],
+                )
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, nv12_r8_pipeline)
+                vkCmdBindDescriptorSets(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    nv12_r8_layout,
+                    0,
+                    1,
+                    [nv12_r8_set],
+                    0,
+                    None,
+                )
+                vkCmdPushConstants(cmd, nv12_r8_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 28, pc)
+                vkCmdDispatch(cmd, (width + 15) // 16, (height + 15) // 16, 1)
+                if first_frame:
+                    prev_to_transfer = VkImageMemoryBarrier(
+                        sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                        srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT,
+                        dstAccessMask=VK_ACCESS_TRANSFER_READ_BIT,
+                        oldLayout=VK_IMAGE_LAYOUT_GENERAL,
+                        newLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        image=curr_image,
+                        subresourceRange=VkImageSubresourceRange(
+                            aspectMask=VK_IMAGE_ASPECT_COLOR_BIT,
+                            baseMipLevel=0,
+                            levelCount=1,
+                            baseArrayLayer=0,
+                            layerCount=1,
+                        ),
+                    )
+                    prev_dst = VkImageMemoryBarrier(
+                        sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                        srcAccessMask=0,
+                        dstAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT,
+                        oldLayout=VK_IMAGE_LAYOUT_UNDEFINED,
+                        newLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        image=prev_image,
+                        subresourceRange=VkImageSubresourceRange(
+                            aspectMask=VK_IMAGE_ASPECT_COLOR_BIT,
+                            baseMipLevel=0,
+                            levelCount=1,
+                            baseArrayLayer=0,
+                            layerCount=1,
+                        ),
+                    )
+                    vkCmdPipelineBarrier(
+                        cmd,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        0,
+                        0,
+                        None,
+                        0,
+                        None,
+                        2,
+                        [prev_to_transfer, prev_dst],
+                    )
+                    vkCmdCopyImage(
+                        cmd,
+                        curr_image,
+                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        prev_image,
+                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        1,
+                        [VkImageCopy(
+                            srcSubresource=VkImageSubresourceLayers(
+                                aspectMask=VK_IMAGE_ASPECT_COLOR_BIT,
+                                mipLevel=0,
+                                baseArrayLayer=0,
+                                layerCount=1,
+                            ),
+                            srcOffset=VkOffset3D(0, 0, 0),
+                            dstSubresource=VkImageSubresourceLayers(
+                                aspectMask=VK_IMAGE_ASPECT_COLOR_BIT,
+                                mipLevel=0,
+                                baseArrayLayer=0,
+                                layerCount=1,
+                            ),
+                            dstOffset=VkOffset3D(0, 0, 0),
+                            extent=VkExtent3D(width=width, height=height, depth=1),
+                        )],
+                    )
+                    prev_back = VkImageMemoryBarrier(
+                        sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                        srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT,
+                        dstAccessMask=VK_ACCESS_SHADER_READ_BIT,
+                        oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        newLayout=VK_IMAGE_LAYOUT_GENERAL,
+                        image=prev_image,
+                        subresourceRange=VkImageSubresourceRange(
+                            aspectMask=VK_IMAGE_ASPECT_COLOR_BIT,
+                            baseMipLevel=0,
+                            levelCount=1,
+                            baseArrayLayer=0,
+                            layerCount=1,
+                        ),
+                    )
+                    curr_back = VkImageMemoryBarrier(
+                        sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                        srcAccessMask=VK_ACCESS_TRANSFER_READ_BIT,
+                        dstAccessMask=VK_ACCESS_SHADER_READ_BIT,
+                        oldLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        newLayout=VK_IMAGE_LAYOUT_GENERAL,
+                        image=curr_image,
+                        subresourceRange=VkImageSubresourceRange(
+                            aspectMask=VK_IMAGE_ASPECT_COLOR_BIT,
+                            baseMipLevel=0,
+                            levelCount=1,
+                            baseArrayLayer=0,
+                            layerCount=1,
+                        ),
+                    )
+                    vkCmdPipelineBarrier(
+                        cmd,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        0,
+                        0,
+                        None,
+                        0,
+                        None,
+                        2,
+                        [prev_back, curr_back],
+                    )
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline)
+                vkCmdBindDescriptorSets(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    compute_layout,
+                    0,
+                    1,
+                    [compute_set],
+                    0,
+                    None,
+                )
+                pc_mode = ffi.new("int[]", [1])
+                vkCmdPushConstants(cmd, compute_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, pc_mode)
+                vkCmdDispatch(cmd, (width + 15) // 16, (height + 15) // 16, 1)
+                out_to_sample = VkImageMemoryBarrier(
+                    sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                    srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT,
+                    dstAccessMask=VK_ACCESS_SHADER_READ_BIT,
+                    oldLayout=VK_IMAGE_LAYOUT_GENERAL,
+                    newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    image=out_image,
+                    subresourceRange=VkImageSubresourceRange(
+                        aspectMask=VK_IMAGE_ASPECT_COLOR_BIT,
+                        baseMipLevel=0,
+                        levelCount=1,
+                        baseArrayLayer=0,
+                        layerCount=1,
+                    ),
+                )
+                vkCmdPipelineBarrier(
+                    cmd,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                    0,
+                    0,
+                    None,
+                    0,
+                    None,
+                    1,
+                    [out_to_sample],
+                )
+                prev_to_transfer = VkImageMemoryBarrier(
+                    sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                    srcAccessMask=VK_ACCESS_SHADER_READ_BIT,
+                    dstAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT,
+                    oldLayout=VK_IMAGE_LAYOUT_GENERAL,
+                    newLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    image=prev_image,
+                    subresourceRange=VkImageSubresourceRange(
+                        aspectMask=VK_IMAGE_ASPECT_COLOR_BIT,
+                        baseMipLevel=0,
+                        levelCount=1,
+                        baseArrayLayer=0,
+                        layerCount=1,
+                    ),
+                )
+                curr_to_src = VkImageMemoryBarrier(
+                    sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                    srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT,
+                    dstAccessMask=VK_ACCESS_TRANSFER_READ_BIT,
+                    oldLayout=VK_IMAGE_LAYOUT_GENERAL,
+                    newLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    image=curr_image,
+                    subresourceRange=VkImageSubresourceRange(
+                        aspectMask=VK_IMAGE_ASPECT_COLOR_BIT,
+                        baseMipLevel=0,
+                        levelCount=1,
+                        baseArrayLayer=0,
+                        layerCount=1,
+                    ),
+                )
+                vkCmdPipelineBarrier(
+                    cmd,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    0,
+                    0,
+                    None,
+                    0,
+                    None,
+                    2,
+                    [prev_to_transfer, curr_to_src],
+                )
+                vkCmdCopyImage(
+                    cmd,
+                    curr_image,
+                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    prev_image,
+                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    1,
+                    [VkImageCopy(
+                        srcSubresource=VkImageSubresourceLayers(
+                            aspectMask=VK_IMAGE_ASPECT_COLOR_BIT,
+                            mipLevel=0,
+                            baseArrayLayer=0,
+                            layerCount=1,
+                        ),
+                        srcOffset=VkOffset3D(0, 0, 0),
+                        dstSubresource=VkImageSubresourceLayers(
+                            aspectMask=VK_IMAGE_ASPECT_COLOR_BIT,
+                            mipLevel=0,
+                            baseArrayLayer=0,
+                            layerCount=1,
+                        ),
+                        dstOffset=VkOffset3D(0, 0, 0),
+                        extent=VkExtent3D(width=width, height=height, depth=1),
+                    )],
+                )
+                prev_back_to_general = VkImageMemoryBarrier(
+                    sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                    srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT,
+                    dstAccessMask=VK_ACCESS_SHADER_READ_BIT,
+                    oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    newLayout=VK_IMAGE_LAYOUT_GENERAL,
+                    image=prev_image,
+                    subresourceRange=VkImageSubresourceRange(
+                        aspectMask=VK_IMAGE_ASPECT_COLOR_BIT,
+                        baseMipLevel=0,
+                        levelCount=1,
+                        baseArrayLayer=0,
+                        layerCount=1,
+                    ),
+                )
+                curr_back_to_general = VkImageMemoryBarrier(
+                    sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                    srcAccessMask=VK_ACCESS_TRANSFER_READ_BIT,
+                    dstAccessMask=VK_ACCESS_SHADER_READ_BIT,
+                    oldLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    newLayout=VK_IMAGE_LAYOUT_GENERAL,
+                    image=curr_image,
+                    subresourceRange=VkImageSubresourceRange(
+                        aspectMask=VK_IMAGE_ASPECT_COLOR_BIT,
+                        baseMipLevel=0,
+                        levelCount=1,
+                        baseArrayLayer=0,
+                        layerCount=1,
+                    ),
+                )
+                vkCmdPipelineBarrier(
+                    cmd,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    0,
+                    0,
+                    None,
+                    0,
+                    None,
+                    2,
+                    [prev_back_to_general, curr_back_to_general],
+                )
         else:
             curr_to_transfer = VkImageMemoryBarrier(
                 sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
@@ -1561,6 +1971,11 @@ def main() -> int:
             f"avg_total_ms {avg_total:.2f}"
         )
 
+    if dmabuf_exporter is not None:
+        log = dmabuf_exporter.close()
+        if args.dmabuf_debug and log:
+            print(log)
+
     for mem in staging_mems:
         vkUnmapMemory(device, mem)
     for sem in render_done:
@@ -1573,9 +1988,11 @@ def main() -> int:
         vkDestroyFramebuffer(device, fb, None)
     vkDestroyPipeline(device, compute_pipeline, None)
     vkDestroyPipeline(device, nv12_pipeline, None)
+    vkDestroyPipeline(device, nv12_r8_pipeline, None)
     vkDestroyPipeline(device, pipeline, None)
     vkDestroyPipelineLayout(device, compute_layout, None)
     vkDestroyPipelineLayout(device, nv12_layout, None)
+    vkDestroyPipelineLayout(device, nv12_r8_layout, None)
     vkDestroyPipelineLayout(device, graphics_layout, None)
     vkDestroyDescriptorPool(device, descriptor_pool, None)
     vkDestroyDescriptorSetLayout(device, compute_set_layout, None)
@@ -1583,6 +2000,7 @@ def main() -> int:
     vkDestroyDescriptorSetLayout(device, graphics_set_layout, None)
     vkDestroyRenderPass(device, render_pass, None)
     vkDestroyShaderModule(device, diff_module, None)
+    vkDestroyShaderModule(device, nv12_r8_module, None)
     vkDestroyShaderModule(device, nv12_module, None)
     vkDestroyShaderModule(device, frag_module, None)
     vkDestroyShaderModule(device, vert_module, None)
@@ -1600,10 +2018,12 @@ def main() -> int:
         vkDestroyBuffer(device, buf, None)
     for mem in staging_mems:
         vkFreeMemory(device, mem, None)
-    if dmabuf_buffer is not None:
-        vkDestroyBuffer(device, dmabuf_buffer, None)
-    if dmabuf_memory is not None:
-        vkFreeMemory(device, dmabuf_memory, None)
+    for buf in dmabuf_buffer:
+        if buf is not None:
+            vkDestroyBuffer(device, buf, None)
+    for mem in dmabuf_memory:
+        if mem is not None:
+            vkFreeMemory(device, mem, None)
     for view in swap_views:
         vkDestroyImageView(device, view, None)
     destroy_swapchain(device, swapchain, None)

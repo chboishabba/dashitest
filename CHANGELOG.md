@@ -6,6 +6,7 @@
   - Added balanced-ternary digit planes, per-plane Z2 quotient (mag + gated sign), and contexted coding in `compression/video_bench.py`.
   - Added block reuse actions, reference stream, and masked-plane coding to approximate spatio-temporal quotient reuse.
   - Added optional motion-compensation pyramid search and train/test context split reporting.
+  - Added color benchmarking with RGB and reversible YCoCg-R transforms, plus combined total bpp reporting.
   - Documented the triadic pipeline and quotient composition in `compression/triadic_pipeline.md`.
 - Added severity-ranked bad-window tooling and docs:
   - `scripts/score_bad_windows.py` computes synthetic bad flags (|return| vs σ or drawdown slope) and ranks top-N windows by summed `p_bad` over a sliding window.

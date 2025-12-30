@@ -75,6 +75,24 @@ Notes:
 - Reuse is indexed by canonicalized block signatures (sign-normalized) over low planes.
 - This is a first-order approximation of spatio-temporal quotient reuse.
 
+## Bench 6: Color comparison (RGB vs YCoCg-R)
+RGB baseline:
+```
+python compression/video_bench.py "/path/video.mp4" --frames 30 --color --color-transform rgb \
+  --block-reuse --reuse-block 16 --reuse-dict 512 --reuse-planes 4
+```
+
+YCoCg-R:
+```
+python compression/video_bench.py "/path/video.mp4" --frames 30 --color --color-transform ycocg \
+  --block-reuse --reuse-block 16 --reuse-dict 512 --reuse-planes 4
+```
+
+Notes:
+- Color mode treats RGB channels independently unless YCoCg-R is selected.
+- YCoCg-R encodes Y/Co/Cg magnitudes with the triadic pipeline and reports Co/Cg sign bpp separately.
+- The output includes `rgb combined_total_bpp` or `ycocg combined_total_bpp` for total bpp comparisons.
+
 ## Gaps / TODO
 - Add dictionary verification (e.g., plane-2 match) to reduce false reuse hits.
 - Add motion-compensated reuse lookup and record side-information cost.

@@ -30,10 +30,24 @@ VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json \
   python vulkan/video_bench_vk.py path/to/video.mp4 --frames 240 --vaapi
 ```
 
-VAAPI dmabuf (single-frame, buffer import + GPU NV12/P010 -> RGBA):
+VAAPI dmabuf (multi-frame, buffer import + GPU NV12/P010 -> RGBA):
 ```
 python vulkan/video_bench_vk.py path/to/video.mp4 --vaapi-dmabuf --dmabuf-debug
 ```
+Flags:
+- `--dmabuf-timeout` seconds to wait for each frame export (default 5).
+- `--dmabuf-ring` dmabuf import ring size (default 2).
+- `--dmabuf-force-linear` forces a linear dmabuf (needs `/dev/dri/card*`).
+- `--dmabuf-drm-device` selects the DRM device for force-linear uploads.
+- `--dmabuf-debug` prints exporter logs.
+
+Symbol stream stub (zero-writer SSBO validation):
+```
+python vulkan/symbol_stream_stub.py path/to/video.mp4 --block 16 --planes 4 --channels 1
+```
+Layout:
+- Block symbols: 4x `uint32` per block (action/ref/flip/aux).
+- Trit planes: one `int32` per pixel per plane (temporary, will be packed later).
 
 Shader compile:
 ```
@@ -44,7 +58,7 @@ Notes:
 - The preview uses the shared shaders in `vulkan_compute/shaders/`.
 - This is a scaffolding step; compression kernels are not on the GPU yet.
 - `--vaapi-zero-copy` currently validates prerequisites only (see `vulkan/VAAPI_ZERO_COPY.md`).
-- `--vaapi-dmabuf` is a single-frame validation path (no playback yet).
+- `--vaapi-dmabuf` uses the dmabuf exporter and reimports per frame; diff mode uses a GPU luma pass.
 
 Zero-copy VAAPI notes:
 - See `vulkan/VAAPI_ZERO_COPY.md` and `vulkan/vaapi_probe.py`.

@@ -62,7 +62,9 @@ ffmpeg \
 
 ## Stub implementation
 
-`vulkan/vaapi_dmabuf_stub.py` implements the minimal end-to-end test:
+`vulkan/vaapi_dmabuf_stub.py` implements the minimal end-to-end test. The
+shared exporter (`vulkan/dmabuf_export.py`) now supports multi-frame export for
+the preview path.
 
 - Builds `vulkan/vaapi_dmabuf_export.c` (libavformat/libavcodec/libavutil)
 - Decodes one VAAPI frame and exports a dmabuf via `AV_PIX_FMT_DRM_PRIME`
@@ -94,10 +96,20 @@ python vulkan/vaapi_dmabuf_stub.py path/to/video.mp4 --force-linear --drm-device
 If image import fails due to modifiers, the stub falls back to importing dmabufs
 as Vulkan buffers and runs an NV12/P010 -> RGBA compute shader.
 
-Preview in the Vulkan bench (single-frame dmabuf path):
+Preview in the Vulkan bench (dmabuf path):
 ```
 python vulkan/video_bench_vk.py path/to/video.mp4 --vaapi-dmabuf --dmabuf-debug
 ```
+Use `--dmabuf-ring` to control how many dmabuf imports are kept in flight.
+Diff mode in the dmabuf path runs NV12/P010 -> luma (R8) first, then uses the
+existing diff compute shader.
+
+Symbol stream stub (SSBO contract validation):
+```
+python vulkan/symbol_stream_stub.py path/to/video.mp4 --block 16 --planes 4 --channels 1
+```
+This allocates block/action and trit-plane SSBOs, runs a zero-writer compute
+kernel, and reads back to validate the GPU->CPU symbol contract.
 
 Notes:
 - Currently supports NV12 (`NV12`) and P010 (`P010`) multi-plane formats, plus
@@ -122,5 +134,5 @@ Notes:
 
 ## Next steps
 
-- Extend dmabuf export to multiple frames for playback.
-- Add a GPU diff/triadic path on top of the buffer-import color conversion.
+- Reduce per-frame dmabuf import overhead (ring buffer/import reuse).
+- Add a triadic compute path on top of the buffer-import luma pass.
