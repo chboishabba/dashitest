@@ -1,17 +1,16 @@
 ## Project map (what each file does)
-- `data_downloader.py`: Fetch BTC data (daily/intraday/1s) from Binance/Yahoo/CoinGecko/Stooq; saves under `data/raw/stooq`.
-- `run_trader.py`: Core bar-level trading loop with simple impact/fee model; writes `logs/trading_log.csv` and `data/run_history.csv`.
-- `run_all.py`: Runs the trading loop across all cached markets (or synthetic), prints a scoreboard; `--live` streams the dashboard while running.
-- `run_all_two_pointO.py`: Orchestrator that can (a) run all markets with progress prints, (b) sweep tau_off with live PR/PnL Pareto plots, and (c) preview the CA tape on the same CSV.
-- `training_dashboard.py`: Live viewer for logs (PnL, price/actions, latent/HOLD%, optional PR/engagement overlays).
-- `training_dashboard_pg.py`: PyQtGraph live viewer (fast, multi-pane).
-- `runner.py`: Strategy + execution wiring for batch bar runs (used by scripts).
-- `scripts/run_bars_btc.py`: Build BTC bars/state, run the bar executor, write a trading log.
-- `scripts/sweep_tau_conf.py`: Sweep hysteresis thresholds (tau_on/off), produce PR curves for the dashboard sparkline.
-- `scripts/posture_returns.py`: Compute bar- and window-level returns by posture (ACT/HOLD/BAN) with cumulative sums.
-- `execution/`: Execution backends (`bar_exec` in use; `hft_exec` stub for future LOB replay).
-- `strategy/`: Strategy logic (`triadic_strategy.py`) driving intents from states/confidence.
-- `scripts/ca_epistemic_tape.py`: Trading-driven CA visualization (epistemic tape) that injects triadic market features into a 2D CA and plots snapshots, motif triggers, and multiscale change rates. Research/diagnostic only (does not drive trading).
+- `trading/data_downloader.py`: Fetch BTC data (daily/intraday/1s) from Binance/Yahoo/CoinGecko/Stooq; saves under `data/raw/stooq`.
+- `trading/run_trader.py`: Core bar-level trading loop with simple impact/fee model; writes `logs/trading_log.csv` and `data/run_history.csv`.
+- `trading/run_all.py`: Runs the trading loop across all cached markets (or synthetic), prints a scoreboard; `--live` streams the dashboard while running.
+- `trading/run_all_two_pointO.py`: Orchestrator that can (a) run all markets with progress prints, (b) sweep tau_off with live PR/PnL Pareto plots, and (c) preview the CA tape on the same CSV.
+- `trading/training_dashboard.py`: Live viewer for logs (PnL, price/actions, latent/HOLD%, optional PR/engagement overlays).
+- `trading/training_dashboard_pg.py`: PyQtGraph live viewer (fast, multi-pane).
+- `trading/runner.py`: Strategy + execution wiring for batch bar runs (used by scripts).
+- `trading/scripts/run_bars_btc.py`: Build BTC bars/state, run the bar executor, write a trading log.
+- `trading/scripts/sweep_tau_conf.py`: Sweep hysteresis thresholds (tau_on/off), produce PR curves for the dashboard sparkline.
+- `trading/scripts/posture_returns.py`: Compute bar- and window-level returns by posture (ACT/HOLD/BAN) with cumulative sums.
+- `trading/`: Trading core (execution backends, intent datatypes, regime gating, and strategies).
+- `trading/scripts/ca_epistemic_tape.py`: Trading-driven CA visualization (epistemic tape) that injects triadic market features into a 2D CA and plots snapshots, motif triggers, and multiscale change rates. Research/diagnostic only (does not drive trading).
 
 ## Full file index (every file/test)
 - `CHANGELOG.md`: Change history and release notes.
@@ -47,15 +46,10 @@
 - `confusion.png`: Generated plot asset (confusion surface).
 - `dashitest.old.keepme.py`: Legacy benchmark harness (kept for reference).
 - `dashitest.py`: SWAR XOR consumer benchmark driver.
-- `data_downloader.py`: Data fetcher for BTC market sources.
+- `trading/data_downloader.py`: Data fetcher for BTC market sources.
 - `dir_legit.png`: Generated plot asset (direction legitimacy).
 - `docs/bad_day.md`: Bad-day detection concept write-up.
 - `docs/compression_bench.md`: Compression benchmark notes.
-- `execution/__init__.py`: Execution package init.
-- `execution/bar_exec.py`: Bar-level execution backend.
-- `execution/base.py`: Base execution interface.
-- `execution/hft_exec.py`: HFT/LOB execution stub.
-- `execution/intent.py`: Intent datatypes and helpers.
 - `first_exit.png`: Generated plot asset (first-exit heatmap).
 - `five_trit_pack_bench.py`: Benchmark for 5-trit packing.
 - `fn_anatomy.png`: Generated plot asset (function anatomy).
@@ -82,44 +76,48 @@
 - `policy_curvature.png`: Generated plot asset (policy curvature).
 - `policy_distance.csv`: Output CSV for policy distance sweep.
 - `potts3_bench.py`: Potts model triadic benchmark.
-- `regime.py`: Regime model and helpers.
+- `trading/base.py`: Base execution interface.
+- `trading/bar_exec.py`: Bar-level execution backend.
+- `trading/hft_exec.py`: HFT/LOB execution stub.
+- `trading/intent.py`: Intent datatypes and helpers.
+- `trading/regime.py`: Regime model and helpers.
 - `regime_surface.png`: Generated plot asset (regime surface).
 - `regime_surface1.png`: Generated plot asset (regime surface variant).
-- `run_all.py`: Batch runner over cached markets.
-- `run_all_two_pointO.py`: Extended runner with sweeps and CA previews.
-- `run_trader.py`: Main bar-level trading simulator.
-- `runner.py`: Strategy + execution orchestrator.
-- `scripts/ca_epistemic_tape.py`: Epistemic tape CA generator and plots.
-- `scripts/compute_policy_distance.py`: Compute policy distance metrics.
-- `scripts/contextual_news.py`: Fetch/overlay news for windows.
-- `scripts/emit_news_windows.py`: Emit news windows for bad-day periods.
-- `scripts/news_slice.py`: Fetch news slice for a time window.
-- `scripts/plot_accept_persistence.py`: Plot accept persistence diagnostics.
-- `scripts/plot_acceptability.py`: Plot acceptability surface.
-- `scripts/plot_action_entropy.py`: Plot action entropy diagnostics.
-- `scripts/plot_confusion_surface.py`: Plot confusion surface.
-- `scripts/plot_direction_legitimacy.py`: Plot direction legitimacy.
-- `scripts/plot_engagement_surface.py`: Plot engagement surface.
-- `scripts/plot_first_exit_heatmap.py`: Plot first-exit heatmap.
-- `scripts/plot_fn_anatomy.py`: Plot function anatomy.
-- `scripts/plot_hysteresis_phase.py`: Plot hysteresis phase.
-- `scripts/plot_legitimacy_margin.py`: Plot legitimacy margin.
-- `scripts/plot_manifold_homology.py`: Plot manifold homology.
-- `scripts/plot_microstructure_overlay.py`: Plot microstructure overlay.
-- `scripts/plot_policy_curvature.py`: Plot policy curvature.
-- `scripts/plot_regime_surface.py`: Plot regime surface.
-- `scripts/plot_temporal_homology.py`: Plot temporal homology.
-- `scripts/plot_vector_field.py`: Plot vector field.
-- `scripts/rollup_bad_days.py`: Aggregate bad-day scores per day.
-- `scripts/run_bars_btc.py`: Build bars and run bar executor on BTC.
-- `scripts/score_bad_windows.py`: Score synthetic bad windows.
-- `scripts/sweep_confusion_surface.py`: Sweep confusion surface parameters.
-- `scripts/sweep_motif_hysteresis.py`: Sweep motif hysteresis parameters.
-- `scripts/sweep_regime_acceptability.py`: Sweep regime acceptability thresholds.
-- `scripts/sweep_tau_conf.py`: Sweep tau thresholds for PR curves.
+- `trading/run_all.py`: Batch runner over cached markets.
+- `trading/run_all_two_pointO.py`: Extended runner with sweeps and CA previews.
+- `trading/run_trader.py`: Main bar-level trading simulator.
+- `trading/runner.py`: Strategy + execution orchestrator.
+- `trading/scripts/ca_epistemic_tape.py`: Epistemic tape CA generator and plots.
+- `trading/scripts/compute_policy_distance.py`: Compute policy distance metrics.
+- `trading/scripts/contextual_news.py`: Fetch/overlay news for windows.
+- `trading/scripts/emit_news_windows.py`: Emit news windows for bad-day periods.
+- `trading/scripts/news_slice.py`: Fetch news slice for a time window.
+- `trading/scripts/plot_accept_persistence.py`: Plot accept persistence diagnostics.
+- `trading/scripts/plot_acceptability.py`: Plot acceptability surface.
+- `trading/scripts/plot_action_entropy.py`: Plot action entropy diagnostics.
+- `trading/scripts/plot_confusion_surface.py`: Plot confusion surface.
+- `trading/scripts/plot_direction_legitimacy.py`: Plot direction legitimacy.
+- `trading/scripts/plot_engagement_surface.py`: Plot engagement surface.
+- `trading/scripts/plot_first_exit_heatmap.py`: Plot first-exit heatmap.
+- `trading/scripts/plot_fn_anatomy.py`: Plot function anatomy.
+- `trading/scripts/plot_hysteresis_phase.py`: Plot hysteresis phase.
+- `trading/scripts/plot_legitimacy_margin.py`: Plot legitimacy margin.
+- `trading/scripts/plot_manifold_homology.py`: Plot manifold homology.
+- `trading/scripts/plot_microstructure_overlay.py`: Plot microstructure overlay.
+- `trading/scripts/plot_policy_curvature.py`: Plot policy curvature.
+- `trading/scripts/plot_regime_surface.py`: Plot regime surface.
+- `trading/scripts/plot_temporal_homology.py`: Plot temporal homology.
+- `trading/scripts/plot_vector_field.py`: Plot vector field.
+- `trading/scripts/rollup_bad_days.py`: Aggregate bad-day scores per day.
+- `trading/scripts/run_bars_btc.py`: Build bars and run bar executor on BTC.
+- `trading/scripts/score_bad_windows.py`: Score synthetic bad windows.
+- `trading/scripts/sweep_confusion_surface.py`: Sweep confusion surface parameters.
+- `trading/scripts/sweep_motif_hysteresis.py`: Sweep motif hysteresis parameters.
+- `trading/scripts/sweep_regime_acceptability.py`: Sweep regime acceptability thresholds.
+- `trading/scripts/sweep_tau_conf.py`: Sweep tau thresholds for PR curves.
 - `snapshot_bench.py`: Snapshot benchmark helper.
 - `sparse_iter_classifier_bench.py`: Benchmark for sparse iterative classifier loop.
-- `strategy/triadic_strategy.py`: Triadic strategy logic.
+- `trading/strategy/triadic_strategy.py`: Triadic strategy logic.
 - `surface.png`: Generated plot asset (surface).
 - `surface1.png`: Generated plot asset (surface variant).
 - `svo_traversal_bench.py`: SVO traversal benchmark.
@@ -128,16 +126,16 @@
 - `ternary_alu_micro_bench.py`: Micro benchmark for ternary ALU ops.
 - `ternary_life_ca.py`: Ternary Life CA simulation.
 - `ternary_life_visualiser.py`: Visualizer for ternary Life CA.
-- `ternary_trading_demo.py`: Demo of ternary trading logic.
-- `test_trader_real_data.py`: Manual trader test on real data.
+- `trading/ternary_trading_demo.py`: Demo of ternary trading logic.
+- `trading/test_trader_real_data.py`: Manual trader test on real data.
 - `tests/test_compression_bench.py`: Test for compression bench smoke.
 - `tests/test_rans.py`: Test for rANS/range coder roundtrip.
 - `tests/test_training_dashboard_pg.py`: Test for PyQtGraph dashboard smoke.
 - `tiled_ternary_dot_bench.py`: Tiled ternary dot product benchmark.
-- `training_dashboard.py`: Live training dashboard (matplotlib).
+- `trading/training_dashboard.py`: Live training dashboard (matplotlib).
 - `training_dashboard_Figure_1.png`: Generated dashboard figure asset.
 - `training_dashboard_Figure_2.png`: Generated dashboard figure asset.
-- `training_dashboard_pg.py`: PyQtGraph live dashboard.
+- `trading/training_dashboard_pg.py`: PyQtGraph live dashboard.
 - `triadic_nn_bench.py`: Triadic NN benchmark.
 - `triadic_nn_bench2.py`: Triadic NN benchmark (packed SWAR).
 - `vector_field.png`: Generated plot asset (vector field).
@@ -166,28 +164,28 @@ To track outcomes alongside epistemic metrics (e.g., per tau_off sweep point):
 - **Sweep reporting (per tau_off):** keep epistemic axes (acceptable%, precision, recall, act_bars, hold%) and add mean return, max DD, turnover/trades, fees+impact, net PnL. Useful plots: (1) Precision–Recall annotated with net PnL/max DD; (2) Net PnL vs Max DD (Pareto), colored by tau_off, sized by turnover.
 
 ## Structural stress / bad-day flag (implemented)
-- `run_trader.py` now computes a crude structural stress score (vol z-score vs median/MAD, jump z, triadic flip rate) and logs `p_bad` ∈ [0,1] plus `bad_flag` (p_bad>0.7) per bar. Progress prints include these.
+- `trading/run_trader.py` now computes a crude structural stress score (vol z-score vs median/MAD, jump z, triadic flip rate) and logs `p_bad` ∈ [0,1] plus `bad_flag` (p_bad>0.7) per bar. Progress prints include these.
 - `bad_flag` is sovereign: when `bad_flag=1`, the trader flattens and refuses new exposure (BAN posture). A `ban` column is logged per bar.
-- Logs now include `ts` (timestamp when available from source data) so you can align `bad_flag` spikes with news or calendar events. Use `scripts/rollup_bad_days.py` to aggregate per-day bad scores for quick headline overlays.
-- `scripts/news_slice.py` fetches headlines/events for a time window: `--provider newsapi` (needs `NEWSAPI_KEY`), `--provider gdelt` (no key), or `--provider rss --feed-url <url>` (no key; repeatable) to correlate with bad-day spikes.
-- `scripts/emit_news_windows.py` auto-detects bad windows from a trading log (p_bad/bad_flag) and fetches news/events per window (defaults to GDELT, no API key; supports `rss` and `newsapi` too). Files land under `logs/news_events/` with per-window CSVs plus a summary.
+- Logs now include `ts` (timestamp when available from source data) so you can align `bad_flag` spikes with news or calendar events. Use `trading/scripts/rollup_bad_days.py` to aggregate per-day bad scores for quick headline overlays.
+- `trading/scripts/news_slice.py` fetches headlines/events for a time window: `--provider newsapi` (needs `NEWSAPI_KEY`), `--provider gdelt` (no key), or `--provider rss --feed-url <url>` (no key; repeatable) to correlate with bad-day spikes.
+- `trading/scripts/emit_news_windows.py` auto-detects bad windows from a trading log (p_bad/bad_flag) and fetches news/events per window (defaults to GDELT, no API key; supports `rss` and `newsapi` too). Files land under `logs/news_events/` with per-window CSVs plus a summary.
 - News caveats: GDELT coverage effectively starts ~2015-06; days beyond the current date are skipped; 404 responses are treated as “no events” and logged once. Windows are capped by trigger count/day to avoid excessive requests.
 - News severity: windows are ranked by triggers × summed p_bad so the noisiest/stressful periods are fetched first; summaries include `severity_sum_p_bad` for quick sorting.
-- Severity + synthetic labels: `scripts/score_bad_windows.py` computes synthetic bad flags (large returns vs σ or drawdown slope) and ranks top-N windows by summed `p_bad` over a sliding window. Use it to validate p_bad/bad_flag without external news.
+- Severity + synthetic labels: `trading/scripts/score_bad_windows.py` computes synthetic bad flags (large returns vs σ or drawdown slope) and ranks top-N windows by summed `p_bad` over a sliding window. Use it to validate p_bad/bad_flag without external news.
 - Regime windows as hazard: treat bad onsets as window boundaries; analyze window lengths, PnL per window, and whether damage clusters near window starts. Tri-state p_bad semantics: {+1 coherent, 0 undecidable, −1 incoherent}; policy = ACT if p_bad>θ₊, BAN if p_bad<θ₋, HOLD otherwise. “Legal” BAN monetisation is structure-based (vol/fee avoidance/flat), not forced shorting.
-- `scripts/sweep_tau_conf.py` conditions forward returns on engagement and bad_flag: `ret_engaged`, `ret_flat`, `ret_bad`, `ret_good`, plus `edge_per_turnover`. Use `--live-plot` to see PR and PnL-vs-DD live with annotations.
-- Orchestrator usage example: `PYTHONPATH=. python run_all_two_pointO.py --markets --market-progress-every 500 --csv data/raw/stooq/btc_intraday_1s.csv --live-sweep --run-ca --ca-report-every 1000`.
+- `trading/scripts/sweep_tau_conf.py` conditions forward returns on engagement and bad_flag: `ret_engaged`, `ret_flat`, `ret_bad`, `ret_good`, plus `edge_per_turnover`. Use `--live-plot` to see PR and PnL-vs-DD live with annotations.
+- Orchestrator usage example: `PYTHONPATH=. python trading/run_all_two_pointO.py --markets --market-progress-every 500 --csv data/raw/stooq/btc_intraday_1s.csv --live-sweep --run-ca --ca-report-every 1000`.
 - Intent: separate “world is a bad game” detection from directional signals; this is an audit/pre-gate signal, not a change in acceptance logic.
 - Run summaries (`run_all_two_pointO.py --markets`) now print average `p_bad` and `bad_rate` per market so the clustering around ~100k PnL can be read alongside structural stress.
 - Per-run summary in `data/run_history.csv` now includes `ret_all`, `ret_good`, and `ret_bad` (equity return conditioned on bad=0/1) to validate the classifier economically.
 - Full concept write-up (what “bad day” means, how to compute/test it): `docs/bad_day.md`.
 ## Trading stack: what is implemented today
-- **Triadic control loop (implemented):** `run_trader.py` computes a triadic latent state (`compute_triadic_state`) and drives exposure in {-1,0,+1}. It uses: HOLD decay, velocity-based exits, persistence ramp, risk targeting (`SIGMA_TARGET`, `DEFAULT_RISK_FRAC`), impact (`IMPACT_COEFF`), and fees (`cost`). This is the same simulator used by `run_all.py`.
-- **Epistemic gating & posture separation (implemented):** Strategy vs execution is split (`strategy/triadic_strategy.py` + `execution/bar_exec.py`). Prediction (state) is distinct from permission/posture; logs include `action`, `hold`, `acceptable`, `actionability` for downstream analysis.
-- **27-state kernel / persistence logic (implemented):** The triadic state and hysteresis live in the strategy; HOLD is epistemic, not flatten. Persistence and velocity checks are in `run_trader.py` and honored across markets.
-- **Market discovery & replay (implemented):** `run_all.py` discovers all `data/raw/stooq/*.csv`, runs the same bar-level sim per market, writes per-market logs (`logs/trading_log_<market>.csv`), and prints a scoreboard. `--live` streams the dashboard while each market runs.
+- **Triadic control loop (implemented):** `trading/run_trader.py` computes a triadic latent state (`compute_triadic_state`) and drives exposure in {-1,0,+1}. It uses: HOLD decay, velocity-based exits, persistence ramp, risk targeting (`SIGMA_TARGET`, `DEFAULT_RISK_FRAC`), impact (`IMPACT_COEFF`), and fees (`cost`). This is the same simulator used by `trading/run_all.py`.
+- **Epistemic gating & posture separation (implemented):** Strategy vs execution is split (`trading/strategy/triadic_strategy.py` + `trading/bar_exec.py`). Prediction (state) is distinct from permission/posture; logs include `action`, `hold`, `acceptable`, `actionability` for downstream analysis.
+- **27-state kernel / persistence logic (implemented):** The triadic state and hysteresis live in the strategy; HOLD is epistemic, not flatten. Persistence and velocity checks are in `trading/run_trader.py` and honored across markets.
+- **Market discovery & replay (implemented):** `trading/run_all.py` discovers all `data/raw/stooq/*.csv`, runs the same bar-level sim per market, writes per-market logs (`logs/trading_log_<market>.csv`), and prints a scoreboard. `--live` streams the dashboard while each market runs.
 - **Projection quality (observed):** High-resolution BTC (1s) and daily BTC are profitable; coarse intraday bars (`btc_intraday`) are lossy and can hide forced flows. Use richer projections when possible (e.g., `btc_intraday_1s.csv`, `btc_yf.csv`).
-- **Data sources (implemented):** `data_downloader.py` pulls BTC from Binance (1m extended window, 1s resampled trades), Yahoo (daily/intraday), CoinGecko, and Stooq. `run_trader.find_btc_csv` prefers 1s, then 1m, then daily.
+- **Data sources (implemented):** `trading/data_downloader.py` pulls BTC from Binance (1m extended window, 1s resampled trades), Yahoo (daily/intraday), CoinGecko, and Stooq. `trading.run_trader.find_btc_csv` prefers 1s, then 1m, then daily.
 
 ## Future work: CA “kernel of kernels” (not implemented yet)
 - Concept: each asset is a cell hosting a triadic epistemic kernel (permission, state, fatigue) and exchanging triadic messages with neighbors. Neighborhood can be sector-based or learned (e.g., kNN on correlation embeddings).
@@ -195,12 +193,12 @@ To track outcomes alongside epistemic metrics (e.g., per tau_off sweep point):
 - Update sketch: gate first (M₄ corridor, M₇ fatigue, M₉ shutdown pressures), then state update with a phase-gradient term to create motion. Market data (returns/vol/spread binned to triads) enters as anchors or boundary forcing.
 - Status: design only—no code yet. If we build it, we’ll pick a concrete lattice (e.g., kNN on correlation) and add a prototype CA runner alongside the existing bar simulator.
 
-## How `run_all.py` behaved before the latest changes
-- Single-threaded batch runner: iterated cached market CSVs under `data/raw/stooq`, executed the same bar-level simulator as `run_trader.py` (includes fees via `cost`, slippage via `IMPACT_COEFF`, HOLD decay, risk targeting), wrote a single `logs/trading_log.csv`, printed per-run summary, then a simple scoreboard.
-- No live dashboard streaming; to visualize you had to run `training_dashboard.py` separately pointing at the log.
+## How `trading/run_all.py` behaved before the latest changes
+- Single-threaded batch runner: iterated cached market CSVs under `data/raw/stooq`, executed the same bar-level simulator as `trading/run_trader.py` (includes fees via `cost`, slippage via `IMPACT_COEFF`, HOLD decay, risk targeting), wrote a single `logs/trading_log.csv`, printed per-run summary, then a simple scoreboard.
+- No live dashboard streaming; to visualize you had to run `trading/training_dashboard.py` separately pointing at the log.
 - Example run (legacy behavior):
   ```
-  ❯ python run_all.py
+  ❯ python trading/run_all.py
 
   === Running market: aapl.us ===
   Run complete: source=aapl.us, steps=10403, trades=1693, pnl=99142.2711
@@ -378,9 +376,9 @@ Packed SWAR:    34.50 ms/call (  273.57 Mop/s)
 Speedup SWAR vs unpacked: x 0.46, vs radix: x 1.47
 Potts/3-state 1D lattice update (center+left+right mod3):
 N=4096, iters=256: baseline     0.72 ms/iter   SWAR     0.15 ms/iter   speedup x 4.84
-/home/c/Documents/code/dashitest/training_dashboard.py:113: FutureWarning: The default of observed=False is deprecated and will be changed to True in a future version of pandas. Pass observed=False to retain current behavior or observed=True to adopt the future default and silence this warning.
+/home/c/Documents/code/dashitest/trading/training_dashboard.py:113: FutureWarning: The default of observed=False is deprecated and will be changed to True in a future version of pandas. Pass observed=False to retain current behavior or observed=True to adopt the future default and silence this warning.
   grouped = y.groupby(cat).mean()
-/home/c/Documents/code/dashitest/training_dashboard.py:113: FutureWarning: The default of observed=False is deprecated and will be changed to True in a future version of pandas. Pass observed=False to retain current behavior or observed=True to adopt the future default and silence this warning.
+/home/c/Documents/code/dashitest/trading/training_dashboard.py:113: FutureWarning: The default of observed=False is deprecated and will be changed to True in a future version of pandas. Pass observed=False to retain current behavior or observed=True to adopt the future default and silence this warning.
   grouped = y.groupby(cat).mean()
 Using BTC data: data/raw/stooq/btc_intraday.csv
 ^CUsing BTC data: data/raw/stooq/btc_intraday.csv

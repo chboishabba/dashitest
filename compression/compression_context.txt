@@ -2415,31 +2415,31 @@ This part is **real, wired, and working**.
 
 ### Core trading components (implemented)
 
-* **`run_trader.py`**
+* **`trading/run_trader.py`**
 
   * Bar-level simulator
   * Triadic latent state → exposure in `{-1, 0, +1}`
   * HOLD decay, persistence ramp, velocity exits
   * Risk targeting (`SIGMA_TARGET`, `DEFAULT_RISK_FRAC`)
   * Fees + impact model
-* **`strategy/triadic_strategy.py`**
+* **`trading/strategy/trading/strategy/triadic_strategy.py`**
 
   * Triadic state computation
   * Epistemic gating logic (permission vs prediction)
-* **`execution/bar_exec.py`**
+* **`trading/bar_exec.py`**
 
   * Clean separation of *posture* (ACT/HOLD/BAN) from execution
-* **`run_all.py`**
+* **`trading/run_all.py`**
 
   * Discovers markets
   * Runs identical simulator per market
   * Optional live dashboard
   * Prints per-market scoreboard
-* **`data_downloader.py`**
+* **`trading/data_downloader.py`**
 
   * BTC sources: Binance (1s, 1m), Yahoo, CoinGecko, Stooq
   * BTC preference order: **1s → 1m → daily**
-* **`training_dashboard.py`**
+* **`trading/training_dashboard.py`**
 
   * Visualization of logs (actionability, acceptable, HOLD, etc.)
 
@@ -2516,9 +2516,9 @@ They live as exploratory scripts:
 ### What they are *not*
 
 * They do **not** feed the trading bot
-* They do **not** share code with `run_trader.py`
+* They do **not** share code with `trading/run_trader.py`
 * They are **not** a multi-asset CA over real market data
-* They are **not** part of `run_all.py`
+* They are **not** part of `trading/run_all.py`
 
 They are **exploratory research artifacts**, not pipeline components.
 
@@ -4834,7 +4834,7 @@ That difference matters: mod-3 residual is *one* ternary symbol per pixel; balan
 
 ---
 
-## 3) `run_trader.py` (triadic *decision* stream, not a compression stream)
+## 3) `trading/run_trader.py` (triadic *decision* stream, not a compression stream)
 
 This file produces a triadic control state `s_t ∈ {-1,0,+1}` via:
 
@@ -4848,7 +4848,7 @@ So: **this is triadic semantics / regime logic**, not entropy coding—yet.
 
 ---
 
-## 4) `triadic_strategy.py` (same triadic semantics, refactored into Intent)
+## 4) `trading/strategy/triadic_strategy.py` (same triadic semantics, refactored into Intent)
 
 This wraps the same idea into an “intent generator”:
 
@@ -4860,7 +4860,7 @@ Again: semantic triadic stream; not compressed, but it’s the *right place* to 
 
 ---
 
-## 5) `training_dashboard_pg.py` (visualizes triadic posture + bad regimes)
+## 5) `trading/training_dashboard_pg.py` (visualizes triadic posture + bad regimes)
 
 This dashboard explicitly reconstructs a triadic posture signal:
 
@@ -4873,7 +4873,7 @@ So it’s your “triadic field observer”, but not doing compression.
 
 ---
 
-## 6) `run_all_two_pointO.py` (orchestrator; ties together trader + CA + sweeps + news)
+## 6) `trading/run_all_two_pointO.py` (orchestrator; ties together trader + CA + sweeps + news)
 
 This script is your “one-stop runner” to execute:
 
@@ -4897,7 +4897,7 @@ You currently have **two separate triadic worlds**:
 
 ### World B: triadic control / regime semantics
 
-* `run_trader.py`, `triadic_strategy.py`, `training_dashboard_pg.py`, `run_all_two_pointO.py`
+* `trading/run_trader.py`, `trading/strategy/triadic_strategy.py`, `trading/training_dashboard_pg.py`, `trading/run_all_two_pointO.py`
 
 They share the idea “{-1,0,+1} with HOLD/BAN/ACT semantics”, but **they do not yet share a *common representation layer*** (a “TriadicTape” type, contexts, coders, predictors).
 
@@ -4939,7 +4939,7 @@ If you make one small “interface” that both domains can emit:
   then:
 * CA (`compression_bench.py`) can use it
 * video (`video_bench.py`) can use it
-* trading (`run_trader.py`) can optionally log triadic symbol streams for compression/analysis too
+* trading (`trading/run_trader.py`) can optionally log triadic symbol streams for compression/analysis too
 
 That’s how the compression story becomes a *system* rather than two parallel experiments.
 
