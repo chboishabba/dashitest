@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import warnings
 
-from training_dashboard_pg import prepare_progressive_view
+from trading.training_dashboard_pg import prepare_progressive_view
 
 
 def test_progressive_days_accumulates_prior_days():

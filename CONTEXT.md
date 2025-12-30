@@ -13,7 +13,7 @@
 
 - **State source:** `run_trader.compute_triadic_state(prices)` (rolling std of returns w=200, EWMA of normalized return, dead-zone) → triadic state array. Used by scripts.
 
-- **Confidence proxy (scripts/run_bars_btc.py):** persistence-based:
+- **Confidence proxy (trading/scripts/run_bars_btc.py):** persistence-based:
   - `run_scale` from consecutive same-direction run-length (tanh), zeroed on flips/zeros.
   - Vol penalty: rolling vol (50-bar std) above 80th percentile zeroes confidence.
   - Passed to strategy via `conf_fn`; script default `tau_on=0.5, tau_off=0.3`.
@@ -21,24 +21,24 @@
 - **Regime predicate:** `regime.py` with `RegimeSpec` (defaults `min_run_length=3`, `max_flip_rate=None`, `max_vol=None`, `window=50`). `check_regime(states, vols, spec)` returns `acceptable` bool; flip-rate/vol optional. Runner computes vols (50-bar rolling std of returns) and logs `acceptable`.
 
 - **Scripts:**
-  - `scripts/run_bars_btc.py`: loads `data/raw/stooq/btc_intraday.csv`, computes state via `compute_triadic_state`, confidence via persistence/vol, runs `run_bars` with hysteresis, writes `logs/trading_log.csv`. Fish-safe: `PYTHONPATH=. python scripts/run_bars_btc.py`.
-  - `scripts/sweep_tau_conf.py`: sweeps hysteresis width only (fixed `tau_on`, varying `tau_off` default `{0.30,0.35,0.40,0.45,0.25,0.20,0.15}`), logs `acceptable%`, precision `P(acceptable|ACT)`, recall `P(ACT|acceptable)`, act_bars (engaged bars), HOLD%. Optional `--out` writes PR curve for dashboard sparkline. Stops early if precision < precision_floor (default 0.8).
-  - `scripts/sweep_motif_hysteresis.py`: motif CA hysteresis sweep (softmax confidence for constructive state → tau_on/tau_off, optional k_on/k_off). Reports acceptable%, precision/recall, act_bars, HOLD%; optional `--out` CSV.
-  - `scripts/plot_engagement_surface.py`: plots heatmaps of engagement surfaces (`tau_off` × actionability bin → engagement) from `*_surface.csv` produced by sweep scripts; supports side-by-side trader vs motif comparison.
-  - `scripts/plot_acceptability.py`: heatmap of acceptable density over (time × actionability) from a single trading log.
-  - `scripts/sweep_regime_acceptability.py`: sweep RegimeSpec parameters (min_run_length, optional vol cap percentile) to map acceptable%; outputs CSV.
-  - `scripts/plot_regime_surface.py`: heatmap of acceptable% over RegimeSpec sweeps (from the CSV above).
+  - `trading/scripts/run_bars_btc.py`: loads `data/raw/stooq/btc_intraday.csv`, computes state via `compute_triadic_state`, confidence via persistence/vol, runs `run_bars` with hysteresis, writes `logs/trading_log.csv`. Fish-safe: `PYTHONPATH=. python trading/scripts/run_bars_btc.py`.
+  - `trading/scripts/sweep_tau_conf.py`: sweeps hysteresis width only (fixed `tau_on`, varying `tau_off` default `{0.30,0.35,0.40,0.45,0.25,0.20,0.15}`), logs `acceptable%`, precision `P(acceptable|ACT)`, recall `P(ACT|acceptable)`, act_bars (engaged bars), HOLD%. Optional `--out` writes PR curve for dashboard sparkline. Stops early if precision < precision_floor (default 0.8).
+  - `trading/scripts/sweep_motif_hysteresis.py`: motif CA hysteresis sweep (softmax confidence for constructive state → tau_on/tau_off, optional k_on/k_off). Reports acceptable%, precision/recall, act_bars, HOLD%; optional `--out` CSV.
+  - `trading/scripts/plot_engagement_surface.py`: plots heatmaps of engagement surfaces (`tau_off` × actionability bin → engagement) from `*_surface.csv` produced by sweep scripts; supports side-by-side trader vs motif comparison.
+  - `trading/scripts/plot_acceptability.py`: heatmap of acceptable density over (time × actionability) from a single trading log.
+  - `trading/scripts/sweep_regime_acceptability.py`: sweep RegimeSpec parameters (min_run_length, optional vol cap percentile) to map acceptable%; outputs CSV.
+  - `trading/scripts/plot_regime_surface.py`: heatmap of acceptable% over RegimeSpec sweeps (from the CSV above).
 
 - **Recent results (defaults):** BTC intraday bars with persistence confidence & loose RegimeSpec:
   - trades ≈ 138, HOLD ≈ 0.686, acceptable% ≈ 0.831
   - P(acceptable | ACT) = 1.0, P(ACT | acceptable) ≈ 0.0216
   - pnl drift ≈ −0.0026 (bar-level costs dominate; gate now non-degenerate)
 
-- **Stubs / future:** `execution/hft_exec.py` stub for LOB replay (BTC/ETH routed by runner). No state learning/ML yet. MoE/soft gating deferred.
+- **Stubs / future:** `trading/hft_exec.py` stub for LOB replay (BTC/ETH routed by runner). No state learning/ML yet. MoE/soft gating deferred.
 
 - **User prefs / safety:** Keep fish-safe commands; HOLD must stay epistemic (not flatten). Regime/acceptable is PnL-free; use precision/recall of acceptable vs ACT for diagnostics. Hysteresis maintained.
 
-- **Dashboard:** `training_dashboard.py` shows equity/latent/price; optional `--pr logs/pr_curve.csv` adds a tiny tau_off → (precision, recall) sparkline (from sweep script).
+- **Dashboard:** `trading/training_dashboard.py` shows equity/latent/price; optional `--pr logs/pr_curve.csv` adds a tiny tau_off → (precision, recall) sparkline (from sweep script).
 
 ## Latest diagnostics (Dec 21)
 
@@ -62,31 +62,31 @@ Please clean this up later:
 
   ### Core trading components (implemented)
 
-  * **`run_trader.py`**
+  * **`trading/run_trader.py`**
 
     * Bar-level simulator
     * Triadic latent state → exposure in `{-1, 0, +1}`
     * HOLD decay, persistence ramp, velocity exits
     * Risk targeting (`SIGMA_TARGET`, `DEFAULT_RISK_FRAC`)
     * Fees + impact model
-  * **`strategy/triadic_strategy.py`**
+  * **`trading/strategy/triadic_strategy.py`**
 
     * Triadic state computation
     * Epistemic gating logic (permission vs prediction)
-  * **`execution/bar_exec.py`**
+  * **`trading/bar_exec.py`**
 
     * Clean separation of *posture* (ACT/HOLD/BAN) from execution
-  * **`run_all.py`**
+  * **`trading/run_all.py`**
 
     * Discovers markets
     * Runs identical simulator per market
     * Optional live dashboard
     * Prints per-market scoreboard
-  * **`data_downloader.py`**
+  * **`trading/data_downloader.py`**
 
     * BTC sources: Binance (1s, 1m), Yahoo, CoinGecko, Stooq
     * BTC preference order: **1s → 1m → daily**
-  * **`training_dashboard.py`**
+  * **`trading/training_dashboard.py`**
 
     * Visualization of logs (actionability, acceptable, HOLD, etc.)
 
@@ -163,9 +163,9 @@ Please clean this up later:
   ### What they are *not*
 
   * They do **not** feed the trading bot
-  * They do **not** share code with `run_trader.py`
+  * They do **not** share code with `trading/run_trader.py`
   * They are **not** a multi-asset CA over real market data
-  * They are **not** part of `run_all.py`
+  * They are **not** part of `trading/run_all.py`
 
   They are **exploratory research artifacts**, not pipeline components.
 
@@ -454,7 +454,7 @@ Please clean this up later:
 
 • Summary matches the repo:
 
-  - Trading stack (implemented/active): run_trader.py bar sim with triadic latent + fees/impact/HOLD decay/risk targeting; strategy/triadic_strategy.py gating; execution/bar_exec.py; run_all.py multi-market runner + live option; data_downloader.py (BTC 1s→1m→daily); training_dashboard.py.
+  - Trading stack (implemented/active): trading/run_trader.py bar sim with triadic latent + fees/impact/HOLD decay/risk targeting; trading/strategy/triadic_strategy.py gating; trading/bar_exec.py; trading/run_all.py multi-market runner + live option; trading/data_downloader.py (BTC 1s→1m→daily); trading/training_dashboard.py.
   - CA prototypes (standalone, not integrated): gpt_attach_1/2/3.py (moving triadic CA with competing anchors, gate/flow/fatigue, M4/M7/M9 triggers, multiscale change-rate plots, parameter sweeps), motif_ca_gpt-gen-lol.py (older motif CA). They’re analysis harnesses only—no shared module or trading hook.
   - README reflects this: implemented trading controller vs future CA “kernel-of-kernels” design (phase/chirality, gate-first updates, neighbor coupling) marked as design-only.
 
