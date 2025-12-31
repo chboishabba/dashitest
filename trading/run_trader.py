@@ -814,6 +814,7 @@ def run_trading_loop(
                 "price_move_pct": (
                     (price_exec / close_entry_price - 1.0) if close_entry_price else np.nan
                 ),
+                "thesis_depth_exit": thesis_depth,
             }
             pd.DataFrame([trade_row]).to_csv(
                 trade_log_path, mode="a", header=not trade_log_path.exists(), index=False

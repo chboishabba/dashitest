@@ -47,20 +47,32 @@ Results (bpc):
 
 Takeaway: adding canonicalization and residuals on coarse/sign did not beat the simple temporal residual (0.032 bpc) with the current placeholder rANS; lzma still wins density but is very slow. A real ANS coder and better orbit/predictive modeling are needed to see a triadic win.
 
-## Bench 4: Triadic planes + context + quotient (current)
+## Bench 4: Triadic planes + context + quotient + JAX MC (current)
 Command:
 ```
-python compression/video_bench.py "/home/c/2025-12-10 12-25-05.mp4" --frames 500
+python compression/video_bench.py '/home/c/2025-12-10 12-25-05.mp4' \
+  --jax-pipeline --jax-mc --mc-block 8 --mc-search 4 --frames 500
 ```
-Observed (bpc, order of magnitude):
-- Balanced-ternary planes, contexted: ~0.04 bpc
-- Per-plane mag+sign quotient, contexted: ~0.04 bpc
-- Test-only rates stay low but rise on short clips (insufficient frames).
+Observed (bpc):
+- `raw`: entropy 3.967; lzma 0.020; gzip/zlib 1.370; rANS 3.967
+- `residual`: entropy 0.108; lzma 0.026; gzip/zlib 0.037; rANS 0.112
+- `coarse`: entropy 3.789; lzma 0.019; gzip/zlib 1.295; rANS 3.795
+- `sign`: entropy 0.405; lzma 0.002; gzip/zlib 0.240; rANS 0.416
+- `coarse_resid`: entropy 0.107; lzma 0.025; gzip/zlib 0.036; rANS 0.112
+- `sign_resid`: entropy 0.009; lzma 0.003; gzip/zlib 0.010; rANS 0.020
+- Multistream (coarse+sign via rANS): 4.212 bpc
+- Multistream (coarse_resid+sign_resid via rANS): 0.132 bpc
+- Base bt planes: rANS 0.216; ctx_rANS 0.039; ctx_rANS test-only 0.055
+- Base bt mag+sign: rANS 0.216; mag ctx + sign 0.048; mag ctx + sign ctx 0.040; test-only 0.074
+- MC bt planes: rANS 0.208; ctx_rANS 0.038; ctx_rANS test-only 0.052
+- MC bt mag+sign: rANS 0.208; mag ctx + sign 0.047; mag ctx + sign ctx 0.039; test-only 0.071
+- MC side info: mv_bpp 0.108 (block=8, search=4, mv_unique=81)
 
 Notes:
 - Entropy collapse is driven by triadic digit planes + local spatio-temporal contexts.
 - Train/test split requires enough frames (30+); very short clips overfit contexts.
 - Motion compensation did not materially reduce residual support on this clip.
+- Source run logged in `trading/TRADER_CONTEXT.md:40017`.
 
 ## Bench 5: Block reuse action stream (quotient over spatio-temporal repeats)
 Command:
@@ -97,3 +109,5 @@ Notes:
 - Add dictionary verification (e.g., plane-2 match) to reduce false reuse hits.
 - Add motion-compensated reuse lookup and record side-information cost.
 - Benchmark on real kernel/CA/motif logs and compare against zstd/xz.
+- Decide whether to enable JAX x64 (or cast explicitly) to avoid dtype truncation warnings.
+- Include MC side-info bpp in any combined-total reporting (residual + mv stream).

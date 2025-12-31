@@ -1,6 +1,6 @@
 # Buy-and-hold Degeneracy and Minimal Thesis Memory
 
-Related context: `TRADER_CONTEXT.md:99346`, `TRADER_CONTEXT.md:99637`.
+Related context: `TRADER_CONTEXT.md:93128`, `TRADER_CONTEXT.md:93680`, `TRADER_CONTEXT.md:99346`, `TRADER_CONTEXT.md:100096`, `TRADER_CONTEXT.md:100108`, `TRADER_CONTEXT.md:100133`, `TRADER_CONTEXT.md:100197`.
 
 Below is a clean, formal answer to both parts. It is explicit and aligned with the current ternary controller.
 
@@ -327,6 +327,99 @@ Any more:
 * Your controller is correct to reject that assumption
 * To earn compounding, you must remember that you were right
 * The smallest way to do that is a bounded thesis counter
+
+---
+
+## Empirical confirmation (15s sanity run)
+
+This run confirms the proof and diagnosis in practice. See `README.md` for the run command and per-source summaries.
+
+Invariant A - Duration collapse:
+
+* Almost all trades have `dur=1`
+* A few have `dur>1`, but only when the engine stalls briefly
+* Exit reason is always `flat`
+
+This implies a one-step greedy controller that re-evaluates each bar from scratch.
+See `TRADER_CONTEXT.md:100096` and `TRADER_CONTEXT.md:100108` for the memoryless-controller framing.
+
+Invariant B - Noise-scale PnL:
+
+* Per-trade PnL is tiny and alternating
+* Aggregate PnL is near zero over short windows
+* BTC/YF produces large losses when volatility spikes
+
+This matches a memoryless controller that monetizes variance, not trend.
+
+Invariant C - Daily data leads to no trades:
+
+* Yahoo daily series produce 0 trades and flat capital
+* The edge signal collapses under coarse bars and the controller refuses exposure
+
+Together these confirm the buy-and-hold dominance result in monotone regimes. See
+`TRADER_CONTEXT.md:100133` for the theorem statement and `README.md` for the run.
+
+---
+
+## Plot readout (thesis-memory run)
+
+This plot is the first empirical signal that the controller has left the 1-bar regime. The
+key evidence is temporal coherence, not absolute values.
+
+Panel: Thesis memory (depth / signal / hold)
+
+* Depth is nonzero for long contiguous stretches.
+* Depth is flat or slowly varying instead of flickering.
+* Depth does not reset to zero every bar.
+
+Interpretation: the controller now maintains temporal commitment, enabling compounding. See
+`TRADER_CONTEXT.md:93128` for persistence framing.
+
+Panel: Posture row (BAN / HOLD / ACT)
+
+* Long stretches of HOLD with sparse ACT bursts.
+* BAN events are rare.
+
+Interpretation: decisions persist and only change at regime boundaries.
+See `TRADER_CONTEXT.md:73737` for posture semantics.
+
+Panel: Price + actions + bad_flag
+
+* Actions cluster near regime boundaries.
+* Actions align after stress spikes, not before.
+
+Interpretation: causal alignment replaces noise chasing.
+
+Panel: PnL vs HOLD%
+
+* HOLD% is high and stable.
+* PnL drifts with hold time rather than flip frequency.
+
+Interpretation: returns are duration-driven rather than noise-driven.
+
+Panel: p_bad + bad_flag
+
+* p_bad fluctuates.
+* bad_flag fires on sharper events.
+* Thesis depth survives mild p_bad bumps.
+
+Interpretation: hard risk veto, soft uncertainty decay, and hold behaviour are
+working in the intended hierarchy.
+
+Panel: MDL / Stress / GoalProb
+
+* MDL decays smoothly.
+* Stress trends downward.
+* Goal probability does not spike artificially.
+
+Interpretation: the system gains persistence without collapsing into buy-and-hold.
+
+Panel: Plane rates
+
+* Lower amplitude and frequency.
+* More symmetric activity.
+
+Interpretation: the policy requires less description length after adding memory.
 
 ---
 
