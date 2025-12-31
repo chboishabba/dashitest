@@ -137,6 +137,28 @@ Run from this directory with `PYTHONPATH=.` to avoid import issues.
 - `run_trader.py` uses a bounded thesis memory counter (`--thesis-depth-max`) to delay soft-veto exits.
 - `training_dashboard_pg.py` can render rolling histograms with `--hist --hist-window N --hist-bins M`.
 
+## Sanity test outcomes
+
+Command (edge-gated, capped runtime):
+
+```bash
+python run_trader.py --all --log-level trades --progress-every 1000 --inter-run-sleep 0.25 \
+  --edge-gate --edge-decay 0.9 --edge-alpha 0.002 --max-trades 1000 --max-seconds 15
+```
+
+Run summaries (per CSV):
+- `stooq:aapl.us`: steps=8328, trades=620, pnl=100000.2412, elapsed=15.01s, stop=max_seconds
+- `stooq:btc.us`: steps=352, trades=2, pnl=100005.7958, elapsed=0.62s
+- `stooq:btc_intraday`: steps=9121, trades=23, pnl=99246.0733, elapsed=15.03s, stop=max_seconds
+- `stooq:btc_intraday_1s`: steps=9378, trades=62, pnl=99920.5529, elapsed=15.01s, stop=max_seconds
+- `stooq:btc_yf`: steps=4121, trades=19, pnl=-126907.0078, elapsed=7.60s
+- `stooq:msft.us`: steps=8178, trades=30, pnl=99998.5409, elapsed=15.01s, stop=max_seconds
+- `stooq:spy.us`: steps=5242, trades=8, pnl=100065.1214, elapsed=9.61s
+- `yahoo:AAPL_1d`: steps=249, trades=0, pnl=100000.0000, elapsed=0.54s
+- `yahoo:BTC_USD_1d`: steps=364, trades=2, pnl=90288.2947, elapsed=0.63s
+- `yahoo:MSFT_1d`: steps=249, trades=0, pnl=100000.0000, elapsed=0.54s
+- `yahoo:SPY_1d`: steps=249, trades=0, pnl=100000.0000, elapsed=0.51s
+
 ## Trading logs (fields)
 
 `run_trader.py` now logs both per-step and per-trade fields for efficacy tracking.
