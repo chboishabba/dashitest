@@ -5,7 +5,10 @@ No learning here; purely deterministic for now.
 """
 
 import math
-from trading.intent import Intent
+try:
+    from trading.intent import Intent
+except ModuleNotFoundError:
+    from intent import Intent
 
 
 class TriadicStrategy:

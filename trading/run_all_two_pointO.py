@@ -29,13 +29,22 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # local imports
-from trading.run_trader import run_trading_loop, load_prices, compute_triadic_state
-from trading.scripts.run_bars_btc import confidence_from_persistence
-from trading import run_all  # for discover_markets
-from trading.scripts import sweep_tau_conf
-from trading.scripts import ca_epistemic_tape
-from trading.scripts.emit_news_windows import contiguous_windows
-from trading.scripts.news_slice import gdelt_fetch
+try:
+    from trading.run_trader import run_trading_loop, load_prices, compute_triadic_state
+    from trading.scripts.run_bars_btc import confidence_from_persistence
+    from trading import run_all  # for discover_markets
+    from trading.scripts import sweep_tau_conf
+    from trading.scripts import ca_epistemic_tape
+    from trading.scripts.emit_news_windows import contiguous_windows
+    from trading.scripts.news_slice import gdelt_fetch
+except ModuleNotFoundError:
+    from run_trader import run_trading_loop, load_prices, compute_triadic_state
+    from scripts.run_bars_btc import confidence_from_persistence
+    import run_all  # for discover_markets
+    from scripts import sweep_tau_conf
+    from scripts import ca_epistemic_tape
+    from scripts.emit_news_windows import contiguous_windows
+    from scripts.news_slice import gdelt_fetch
 
 
 # --- Trading summaries -----------------------------------------------------

@@ -9,8 +9,12 @@ import pandas as pd
 from pathlib import Path
 import matplotlib.pyplot as plt
 from runner import run_bars
-from trading.run_trader import load_prices, compute_triadic_state
-from trading.scripts.run_bars_btc import confidence_from_persistence
+try:
+    from trading.run_trader import load_prices, compute_triadic_state
+    from trading.scripts.run_bars_btc import confidence_from_persistence
+except ModuleNotFoundError:
+    from run_trader import load_prices, compute_triadic_state
+    from scripts.run_bars_btc import confidence_from_persistence
 
 
 def compute_metrics(df: pd.DataFrame):

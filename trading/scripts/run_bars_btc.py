@@ -2,7 +2,10 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from runner import run_bars
-from trading.run_trader import load_prices, compute_triadic_state
+try:
+    from trading.run_trader import load_prices, compute_triadic_state
+except ModuleNotFoundError:
+    from run_trader import load_prices, compute_triadic_state
 import math
 
 

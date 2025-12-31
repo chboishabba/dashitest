@@ -22,7 +22,10 @@ from typing import List, Tuple
 import pandas as pd
 
 # reuse provider fetchers
-from trading.scripts.news_slice import gdelt_fetch, newsapi_fetch, rss_fetch  # type: ignore
+try:
+    from trading.scripts.news_slice import gdelt_fetch, newsapi_fetch, rss_fetch  # type: ignore
+except ModuleNotFoundError:
+    from scripts.news_slice import gdelt_fetch, newsapi_fetch, rss_fetch  # type: ignore
 
 
 def contiguous_windows(ts: pd.Series, max_gap: pd.Timedelta) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:

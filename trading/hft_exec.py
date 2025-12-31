@@ -17,7 +17,10 @@ Integration plan:
   - Keep strategy/state logic unchanged; this is an execution backend.
 """
 
-from trading.base import BaseExecution
+try:
+    from trading.base import BaseExecution
+except ModuleNotFoundError:
+    from base import BaseExecution
 
 
 class LOBReplayExecution(BaseExecution):

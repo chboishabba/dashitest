@@ -7,7 +7,10 @@ Skips if no valid Stooq CSVs are present.
 import pathlib
 import pandas as pd
 
-from trading import run_trader
+try:
+    from trading import run_trader
+except ModuleNotFoundError:
+    import run_trader
 
 
 def main():

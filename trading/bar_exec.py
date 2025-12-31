@@ -1,4 +1,7 @@
-from trading.base import BaseExecution
+try:
+    from trading.base import BaseExecution
+except ModuleNotFoundError:
+    from base import BaseExecution
 
 
 class BarExecution(BaseExecution):

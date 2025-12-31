@@ -13,8 +13,12 @@ import time
 import numpy as np
 import pandas as pd
 
-from trading import run_trader  # provides the trading loop
-from trading import training_dashboard as dash  # for live plotting
+try:
+    from trading import run_trader  # provides the trading loop
+    from trading import training_dashboard as dash  # for live plotting
+except ModuleNotFoundError:
+    import run_trader  # provides the trading loop
+    import training_dashboard as dash  # for live plotting
 
 
 def discover_markets():

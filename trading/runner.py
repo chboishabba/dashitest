@@ -18,14 +18,21 @@ TODO:
   - Implement LOBReplayExecution using prepared Binance BTC/ETH data.
 """
 
-from trading.execution.bar_exec import BarExecution
-from trading.execution.hft_exec import LOBReplayExecution
-from trading.execution.intent import Intent
-from trading.strategy.triadic_strategy import TriadicStrategy
+try:
+    from trading.bar_exec import BarExecution
+    from trading.hft_exec import LOBReplayExecution
+    from trading.intent import Intent
+    from trading.strategy.triadic_strategy import TriadicStrategy
+    from trading.regime import RegimeSpec, check_regime
+except ModuleNotFoundError:
+    from bar_exec import BarExecution
+    from hft_exec import LOBReplayExecution
+    from intent import Intent
+    from strategy.triadic_strategy import TriadicStrategy
+    from regime import RegimeSpec, check_regime
 import pandas as pd
 import pathlib
 import numpy as np
-from trading.regime import RegimeSpec, check_regime
 
 
 def get_executor(symbol: str, mode: str = "auto", lob_symbols=None):
@@ -82,6 +89,7 @@ def run_bars(
         ts = int(row["ts"])
         state = int(row["state"])
         price = float(row["close"])
+        volume = float(row["volume"]) if "volume" in row else np.nan
         # mark-to-market on previous exposure
         if prev_price is not None:
             ret = (price / prev_price) - 1.0
@@ -108,6 +116,7 @@ def run_bars(
                 "slippage": result["slippage"],
                 # dashboard-friendly fields
                 "price": price,
+                "volume": volume,
                 "action": intent.direction,
                 "hold": int(intent.direction == 0),
                 "z_vel": 0.0,  # placeholder for dashboard compatibility

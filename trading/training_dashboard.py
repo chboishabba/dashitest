@@ -131,7 +131,10 @@ def draw(log: pd.DataFrame, pr_curve: pd.DataFrame = None):
     pr_curve = prepare_pr_curve(pr_curve)
     centers, rates_acc, rates_unacc = engagement_vs_actionability(log)
     has_engagement = centers is not None and (rates_acc is not None or rates_unacc is not None)
+    has_mdl = any(c in log for c in ("mdl_rate", "stress", "goal_prob"))
     rows = 3
+    if has_mdl:
+        rows += 1
     if pr_curve is not None:
         rows += 1
     if has_engagement:
@@ -165,8 +168,22 @@ def draw(log: pd.DataFrame, pr_curve: pd.DataFrame = None):
     plt.legend()
     plt.grid(True, alpha=0.3)
 
+    next_row = 4
+    if has_mdl:
+        plt.subplot(rows, 1, next_row)
+        if "mdl_rate" in log:
+            plt.plot(t, log["mdl_rate"], label="mdl_rate")
+        if "stress" in log:
+            plt.plot(t, log["stress"], label="stress")
+        if "goal_prob" in log:
+            plt.plot(t, log["goal_prob"], label="goal_prob")
+        plt.ylim(0, 1.05)
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        next_row += 1
+
     if pr_curve is not None:
-        plt.subplot(rows, 1, 4)
+        plt.subplot(rows, 1, next_row)
         tau = pr_curve["tau_off"]
         plt.plot(tau, pr_curve["precision"], marker="o", label="precision")
         plt.plot(tau, pr_curve["recall"], marker="o", label="recall")
@@ -175,9 +192,10 @@ def draw(log: pd.DataFrame, pr_curve: pd.DataFrame = None):
         plt.ylabel("probability")
         plt.legend()
         plt.grid(True, alpha=0.3)
+        next_row += 1
 
     if has_engagement:
-        plt.subplot(rows, 1, rows)
+        plt.subplot(rows, 1, next_row)
         if rates_acc is not None:
             plt.plot(centers, rates_acc, marker="o", label="P(ACT | actionability, acceptable)")
         if rates_unacc is not None:
