@@ -277,6 +277,11 @@ def main():
         action="store_true",
         help="Split simplex plots by thesis_s only (requires thesis_s).",
     )
+    ap.add_argument(
+        "--simplex-by-belief",
+        action="store_true",
+        help="Split simplex plots by belief_state (requires belief_state).",
+    )
     ap.add_argument("--no-show", action="store_true", help="Skip interactive display")
     args = ap.parse_args()
 
@@ -307,7 +312,29 @@ def main():
             plt.show()
 
     if args.simplex:
-        if args.simplex_by_thesis_s:
+        if args.simplex_by_belief:
+            if "belief_state" not in df.columns:
+                raise SystemExit("Missing belief_state for --simplex-by-belief.")
+            groups = {
+                "unk": df["belief_state"] == "unk",
+                "flat": df["belief_state"] == "flat",
+                "l1": df["belief_state"] == "l1",
+                "l2": df["belief_state"] == "l2",
+                "s1": df["belief_state"] == "s1",
+                "s2": df["belief_state"] == "s2",
+                "conflict": df["belief_state"] == "conflict",
+            }
+            for key, mask in groups.items():
+                if not mask.any():
+                    continue
+                fig = plot_simplex(df.loc[mask], args, title=f"Decision simplex ({key})")
+                if args.save_prefix:
+                    out = f"{args.save_prefix}_simplex_{key}.png"
+                    fig.savefig(out, dpi=200)
+                    print(f"Saved {out}")
+                if not args.no_show:
+                    plt.show()
+        elif args.simplex_by_thesis_s:
             if "thesis_s" not in df.columns:
                 raise SystemExit("Missing thesis_s for --simplex-by-thesis-s.")
             groups = {

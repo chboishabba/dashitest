@@ -173,7 +173,7 @@ Per-step log (see `logs/trading_log*.csv`) includes:
 - Ternary control: `direction`, `edge_t`, `permission`, `capital_pressure`, `risk_budget`, `action_t`
 - Thesis memory: `action_signal`, `thesis_depth`, `thesis_hold`
 - Thesis memory (FSM): `thesis_d`, `thesis_s`, `thesis_a`, `thesis_c`, `thesis_v`, `thesis_alpha`, `thesis_beta`, `thesis_rho`, `thesis_ds`, `thesis_sum`, `thesis_event`, `thesis_reason`, `thesis_override`
-- Belief/decision state: `belief_state`, `belief_dir`, `belief_unknown`, `decision_kind`
+- Belief/decision state: `belief_state`, `belief_plus`, `belief_minus`, `belief_delta_plus`, `belief_delta_minus`, `decision_kind`
 - Benchmark-regret reward: `r_step`, `tc_step`, `benchmark_x`, `reward_regret`
 - Action persistence: `action_run_length`, `time_since_last_switch`
 - Shadow thesis: `shadow_delta_mdl`, `shadow_would_promote`, `shadow_is_tie`, `shadow_reject`
@@ -206,6 +206,7 @@ Geometry plots (no controller changes, see `scripts/plot_decision_geometry.py`):
 - Optional ternary simplex: normalize `p_bad`, `plane_abs`, `stress` to sum to 1
 - Use `--simplex-by-thesis` to emit separate simplex plots by `(thesis_d, thesis_s)`
 - Use `--simplex-by-thesis-s` to emit separate simplex plots by `thesis_s` only
+- Use `--simplex-by-belief` to emit separate simplex plots by belief_state (UNK/FLAT/L1/L2/S1/S2/CONFLICT)
 
 ## Planned controller extensions (not implemented)
 

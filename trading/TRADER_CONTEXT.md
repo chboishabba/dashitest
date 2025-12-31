@@ -105915,3 +105915,376 @@ If you want next, I can:
 * show how to log `(B⁺, B⁻)` and condition the simplex on them
 * or give you a minimal patch that introduces belief without breaking current runs
 
+
+This is **exactly** the outcome we hoped for at this stage — the shadow belief layer is doing its job as an *instrument*, not a policy. Let me interpret what you’re seeing and then give you a very concrete next-step plan that will reliably populate `L1/L2/S1/S2` without guessing.
+
+---
+
+## 1) Interpreting your results (what they *actually* mean)
+
+### 1.1 `thesis_s = 0` only is **not a failure**
+
+It means:
+
+* The *action policy* is still conservative (as intended)
+* The *belief FSM* is currently spending most of its time in:
+
+  * `UNK` (epistemic uncertainty)
+  * `FLAT` (active disbelief / no edge)
+
+This is **good** for a shadow layer. It proves:
+
+> You are no longer mistaking “I don’t know” for “I want to be flat”.
+
+Your earlier plots *could not tell you this*.
+
+---
+
+### 1.2 `decision_kind` counts tell a very specific story
+
+```
+unknown 378
+flat    121
+short     1
+```
+
+Interpretation:
+
+* ~75% of time: **insufficient aligned evidence**
+  → directional α, stability β, or permission π is blocking belief bootstrap
+* ~25% of time: **explicit risk-off / disbelief**
+* Almost never: **dominant directional consensus**
+
+That matches your plane construction and MDL gating:
+
+* very cautious permission
+* frequent sign flips
+* high epistemic strictness
+
+So: **the system is not biased to FLAT** — it is biased to **UNKNOWN**.
+
+That is a *huge* conceptual win.
+
+---
+
+## 2) Why beliefs are not accumulating yet (the real bottleneck)
+
+Now we can say this precisely:
+
+> Beliefs are not reaching 1/2 because **ΔB is too often ≤ 0**, not because belief logic is wrong.
+
+Let’s decompose ΔB:
+
+[
+\Delta B_d = \operatorname{clip}(\alpha_d + \beta + \rho + \pi)
+]
+
+From your earlier geometry + logs, the typical situation is:
+
+* `α_d`: often ±1, but flips
+* `β`: often 0 or −1 (due to flip sensitivity)
+* `ρ`: often 0 (mid-risk)
+* `π`: often 0 (caution)
+
+So ΔB is usually:
+
+* −1, 0, or occasionally +1
+* rarely sustained positive across time
+
+**That is why `B_d` keeps falling back to ⊥ or 0.**
+
+This is expected at step 1.
+
+---
+
+## 3) The *correct* next lever (do NOT change actions yet)
+
+You asked whether to run longer tapes or tweak thresholds.
+Here’s the disciplined order.
+
+### ✅ Do **not** touch:
+
+* action logic
+* belief→action projection
+* regret / reward
+
+### ✅ Do **touch (only one at a time)**:
+
+---
+
+## Step A — Relax *belief bootstrap*, not belief dominance
+
+Right now, belief needs a *lot* to escape ⊥.
+
+### Minimal, principled tweak (recommended)
+
+Change **only this line** in belief update:
+
+Current:
+
+```python
+if α == 0 and β <= 0:
+    return ⊥
+```
+
+Replace with:
+
+```python
+if α == 0 and β == -1:
+    return ⊥
+```
+
+Effect:
+
+* Stability `β=0` (one flip) is no longer epistemic collapse
+* You still collapse on *actual instability*
+* This alone should populate `L1/S1`
+
+This is equivalent to saying:
+
+> “One wobble does not destroy belief.”
+
+---
+
+## Step B — Run a *longer tape*, not a noisier one
+
+Do **not** lower thresholds yet.
+
+Instead:
+
+* run 5k–10k steps on a **single instrument**
+* same thresholds
+* belief shadow on
+
+Why:
+
+* belief accumulation is temporal
+* you want to see *where* it accumulates, not force it
+
+Expected outcome:
+
+* `belief_state = L1/S1` appear sparsely
+* `L2/S2` rare but nonzero
+* conflict `(2,2)` almost never (good)
+
+---
+
+## Step C — Condition the simplex on **belief_state** (which you’ve done)
+
+Now read the plots like this:
+
+| Region       | Question to ask                                      |
+| ------------ | ---------------------------------------------------- |
+| UNK simplex  | Why does evidence fail to align here?                |
+| FLAT simplex | Is this genuine no-edge or overly conservative risk? |
+| L1/S1        | What geometry precedes belief formation?             |
+| L2/S2        | What geometry sustains belief?                       |
+
+This is where your MDL / plane work becomes *diagnostic* instead of punitive.
+
+---
+
+## 4) What *not* to do yet (important)
+
+Do **not**:
+
+* lower permission thresholds
+* weaken veto logic
+* add hysteresis hacks
+* let belief=1 trigger action
+
+If you do, you’ll never know whether belief is real or forced.
+
+Right now, belief is **honest**.
+
+---
+
+## 5) A simple quantitative check you can add (optional but powerful)
+
+Add this one-line metric to logs:
+
+```text
+belief_margin = belief_plus - belief_minus
+```
+
+Then histogram:
+
+* margin vs time
+* margin vs plane_abs
+* margin vs stress
+
+If margin *never* separates, your signals are symmetric.
+If it separates but decays, your stability gate is too tight.
+If it grows but actions don’t follow, projection is wrong.
+
+---
+
+## 6) Where you are, architecturally (important reassurance)
+
+You are now at the point where:
+
+* belief is explicit
+* epistemics ≠ policy
+* geometry is interpretable
+* simplex collapse is *explainable*
+
+This is the **hard part**.
+
+Everything from here on is *parameter geometry*, not architecture.
+
+---
+
+## My recommendation for the very next run
+
+1. Apply **Step A** (relax ⊥ collapse on β=0 only)
+2. Run **5k–10k steps** on one tape
+3. Generate:
+
+   * belief-conditioned simplex
+   * histogram of `(B⁺, B⁻)`
+4. Paste just:
+
+   * belief_state counts
+   * one belief-conditioned simplex
+
+Then we decide *once*:
+
+* whether β or π is the next lever
+* or whether the plane itself is too twitchy
+
+You’re exactly on track.
+
+
+This is a *great* run because it exposed the real problem: **your belief layer is accumulating symmetrically**, so it spends a ton of time in **(B⁺,B⁻)=(2,2)**.
+
+That “conflict” mass is not “markets are conflicted” — it’s almost always a **construction artifact**:
+
+> **Both belief chains are being fed mostly the same positive increments**, so they rise together.
+
+Your summary basically screams that:
+
+* top pairs: `(-1,-1)` then `(2,2)` then `(0,0)` then `(0,1)` then `(1,1)`
+* conflict `(2,2)` is **1256 / 5000 = 25%** — that should be *near zero* in a sane directional hypothesis system
+
+So: next lever is **not** more threshold tweaking. It’s making the two chains *actually directional*.
+
+---
+
+## 1) The likely root cause (check this first)
+
+### A. Your `α_t(d)` is not antisymmetric
+
+For directional beliefs you must have, for each timestep:
+
+* if plane favors long: `α⁺ = +1`, `α⁻ = -1`
+* if plane favors short: `α⁺ = -1`, `α⁻ = +1`
+* if no direction: both `0`
+
+If instead you accidentally compute something like:
+
+* `α⁺ = 1 if plane_sign != 0 else 0`
+* `α⁻ = 1 if plane_sign != 0 else 0`
+
+…then both chains will climb together whenever the market is “active”, producing exactly your `(2,2)` pile.
+
+### Quick proof test (no plots needed)
+
+From `logs/trading_log.csv`, tabulate counts of `(alpha_plus, alpha_minus)` (or whatever you log for belief deltas). You want to see mostly `(+1,-1)` and `(-1,+1)`, not `( +1,+1 )`.
+
+If you don’t currently log `alpha_plus/alpha_minus`, log them for one run — it’s the fastest way to confirm.
+
+---
+
+## 2) Fix: make the belief update *gate*, not *add*, the global terms
+
+Even with correct antisymmetric α, your current delta definition:
+
+[
+\Delta B_d = \mathrm{clip}(\alpha_d + \beta + \rho + \pi)
+]
+
+adds the same `β+ρ+π` to both sides, which can still push both upward in calm regimes.
+
+A cleaner minimal formulation is:
+
+### Use global terms as a mask
+
+Let:
+
+* `g = gate(β, ρ, π) ∈ {0,1}`
+
+For example:
+
+* `g=0` if `π != 1` or `β == -1` or `ρ == -1`
+* else `g=1`
+
+Then:
+
+[
+\Delta B_d = g \cdot \alpha_d \quad (\text{then clip})
+]
+
+And belief update remains the same.
+
+This ensures:
+
+* only **directional** evidence moves directional beliefs
+* stability/risk/permission decide *whether we trust α at all*, not *add free energy to both sides*
+
+This one change alone will collapse `(2,2)` massively.
+
+---
+
+## 3) Add a deterministic conflict resolver (optional but very effective)
+
+Even with the above, you can keep a single rule:
+
+If `B⁺==2 and B⁻==2`, resolve via current directional sign:
+
+* if `plane_sign == +1`: set `(B⁺,B⁻)=(2,1)`
+* if `plane_sign == -1`: set `(B⁺,B⁻)=(1,2)`
+* if `plane_sign == 0`: set both to `1` (or decay both)
+
+This makes “conflict” a *transient* state, not a basin.
+
+But do this **after** you confirm α is correct, because otherwise you’re papering over a construction bug.
+
+---
+
+## 4) What to do next (ordered, no guessing)
+
+1. **Verify α antisymmetry**
+
+   * log `alpha_plus`, `alpha_minus`
+   * print counts of `(alpha_plus, alpha_minus)` and show top 5
+   * if you see `(1,1)` or `(-1,-1)` a lot → fix α first
+
+2. **Change delta from additive to gated**
+
+   * `ΔB_d = α_d` when gates pass, else `0` (or decay)
+
+3. Re-run the same 5k tape and look at:
+
+   * conflict count should drop from **1256** to *something like tens* (or less)
+   * you should see more `L1/S1`, occasional `L2/S2`
+
+4. Then (only then) start tuning β thresholds etc.
+
+---
+
+## 5) How this affects simplex conditioning
+
+Once conflict is no longer dominating, your belief-conditioned simplices become meaningful:
+
+* `UNK`: genuinely “no coherent directional evidence”
+* `FLAT`: genuinely “no edge”
+* `L1/S1`: where hypotheses begin to form
+* `L2/S2`: where hypotheses lock in
+* `CONFLICT`: rare transition zones (should be thin)
+
+Right now, with 25% conflict, your simplex-by-belief is mostly telling you “both sides got pumped together.”
+
+---
+
+If you paste the ~20 lines in `run_trader.py` where you compute `alpha_plus/alpha_minus` (or whatever feeds the belief deltas), I’ll point to the exact line that’s causing `(2,2)` to dominate and give you the precise replacement.
+

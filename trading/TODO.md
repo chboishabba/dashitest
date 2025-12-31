@@ -19,4 +19,7 @@
 - [x] Split UNKNOWN vs FLAT in belief logging (distinct belief_state).
 - [x] Add simplex split by thesis_s only.
 - [x] Log decision_kind (UNKNOWN vs FLAT vs LONG vs SHORT) without changing actions.
+- [x] Add belief FSM shadow logging (belief_plus/belief_minus + deltas + belief_state).
+- [x] Add simplex split by belief_state (UNK/FLAT/L1/L2/S1/S2/CONFLICT).
+- [x] Relax belief collapse rule to trigger only on beta == -1.
 - [ ] Enable plane-aware strategy selection (MDL selector over strategies).

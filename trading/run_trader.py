@@ -216,6 +216,41 @@ def compute_regret_reward(prev_action: int, log_ret: float, benchmark_x: float, 
     return (prev_action - benchmark_x) * log_ret - tc_step
 
 
+BELIEF_UNKNOWN = -1
+
+
+def clip_belief(val: int) -> int:
+    return max(0, min(2, val))
+
+
+def update_belief(belief: int, delta: int, alpha: int, beta: int, rho: int, perm: int) -> int:
+    if perm == -1:
+        return 0
+    if alpha == 0 and beta == -1:
+        return BELIEF_UNKNOWN
+    if belief == BELIEF_UNKNOWN:
+        return max(0, delta)
+    return clip_belief(belief + delta)
+
+
+def belief_state_label(b_plus: int, b_minus: int) -> str:
+    if b_plus == BELIEF_UNKNOWN and b_minus == BELIEF_UNKNOWN:
+        return "unk"
+    if b_plus == 0 and b_minus == 0:
+        return "flat"
+    if b_plus == 2 and b_minus == 2:
+        return "conflict"
+    if b_plus == 2 and b_plus > b_minus:
+        return "l2"
+    if b_minus == 2 and b_minus > b_plus:
+        return "s2"
+    if b_plus == 1 and b_minus <= 1:
+        return "l1"
+    if b_minus == 1 and b_plus <= 1:
+        return "s1"
+    return "unk"
+
+
 @dataclass
 class ThesisState:
     d: int
@@ -603,6 +638,8 @@ def run_trading_loop(
     thesis_a = 0
     thesis_c = 0
     thesis_v = 0
+    belief_plus = BELIEF_UNKNOWN
+    belief_minus = BELIEF_UNKNOWN
     trade_id = 0
     trade_entry_step = None
     trade_entry_price = 0.0
@@ -653,6 +690,7 @@ def run_trading_loop(
             desired = 1
         else:
             desired = -1
+        direction = desired
         thesis = thesis_d if thesis_memory else int(np.sign(pos))
         # Plane classification for this step (used for logging/gating)
         abs_ret = abs(ret)
@@ -670,18 +708,6 @@ def run_trading_loop(
         plane_flip_flags.append(flip)
         plane_sign_flips_w = int(sum(plane_flip_flags))
         plane_would_veto = int(plane_sign_flips_w > 1)
-
-        if desired == 0:
-            if plane_index < 0:
-                belief_state = "unknown"
-            else:
-                belief_state = "flat"
-            belief_dir = 0
-        else:
-            belief_state = "long" if desired > 0 else "short"
-            belief_dir = desired
-        belief_unknown = int(belief_state == "unknown")
-        direction = belief_dir
 
         active_trit = 1.0 if plane_index >= 0 else 0.0
         active_trit_count += active_trit
@@ -721,6 +747,32 @@ def run_trading_loop(
         p_bad_t = float(p_bad[t]) if t < len(p_bad) else 0.0
         stress_veto = bool(bad_flag[t]) if t < len(bad_flag) else False
         permission = ternary_permission(p_bad_t, caution=PBAD_CAUTION, ban=PBAD_BAN)
+        belief_alpha_plus = 0
+        belief_alpha_minus = 0
+        if plane_sign != 0:
+            belief_alpha_plus = 1 if plane_sign == 1 else -1
+            belief_alpha_minus = 1 if plane_sign == -1 else -1
+        if plane_would_veto == 1 or plane_sign_flips_w > 1:
+            belief_beta = -1
+        elif plane_sign_flips_w <= 1:
+            belief_beta = 1
+        else:
+            belief_beta = 0
+        if p_bad_t >= thesis_pbad_hi or stress >= thesis_stress_hi:
+            belief_rho = -1
+        elif p_bad_t <= thesis_pbad_lo and stress <= thesis_stress_lo:
+            belief_rho = 1
+        else:
+            belief_rho = 0
+        belief_delta_plus = clip_ternary_sum(belief_alpha_plus + belief_beta + belief_rho + permission)
+        belief_delta_minus = clip_ternary_sum(belief_alpha_minus + belief_beta + belief_rho + permission)
+        belief_plus = update_belief(
+            belief_plus, belief_delta_plus, belief_alpha_plus, belief_beta, belief_rho, permission
+        )
+        belief_minus = update_belief(
+            belief_minus, belief_delta_minus, belief_alpha_minus, belief_beta, belief_rho, permission
+        )
+        belief_state = belief_state_label(belief_plus, belief_minus)
         if trade_count > 0 or pos != 0:
             edge_t = ternary_sign(edge_ema)
         else:
@@ -743,6 +795,7 @@ def run_trading_loop(
         thesis_rho = 0
         thesis_ds = 0
         thesis_sum = 0
+        exit_trigger = False
         if thesis_memory:
             state = ThesisState(d=thesis_d, s=thesis_s, a=thesis_a, c=thesis_c, v=thesis_v)
             inputs = ThesisInputs(
@@ -1092,8 +1145,10 @@ def run_trading_loop(
             "can_trade": int(permission == 1),
             "direction": direction,
             "belief_state": belief_state,
-            "belief_dir": belief_dir,
-            "belief_unknown": belief_unknown,
+            "belief_plus": belief_plus,
+            "belief_minus": belief_minus,
+            "belief_delta_plus": belief_delta_plus,
+            "belief_delta_minus": belief_delta_minus,
             "decision_kind": decision_kind,
             "edge_t": edge_t,
             "permission": permission,
