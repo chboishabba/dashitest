@@ -27,3 +27,8 @@
 - [ ] Verify `(alpha_plus, alpha_minus)` counts from logs after a 5k tape run.
 - [ ] Decide: decay vs hold when plane_sign == 0 (belief-plane behavior in neutral geometry).
 - [ ] Enable plane-aware strategy selection (MDL selector over strategies), after belief-plane behavior is locked.
+- [ ] Refactor by responsibility boundaries (keep hot loop thin):
+- [ ] Extract pure helpers (norm_*, clip_ternary_sum, triadic, stress).
+- [ ] Extract thesis FSM into policy module.
+- [ ] Isolate logging into io/logs.py (emit_step_row, emit_trade_row).
+- [ ] Extract execution math (sizing, fills, fees, PnL).

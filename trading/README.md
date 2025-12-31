@@ -229,3 +229,34 @@ These are design targets only; log the inputs first and validate geometry before
 and source label in the filename. The simplex (triangle) plot is enabled by default;
 use `--no-geometry-simplex` to skip it, `--no-geometry-overlay` to skip overlays,
 or `--no-geometry-plots` to disable all geometry plots.
+
+## Refactor plan (responsibility boundaries first)
+
+When refactoring, split by responsibility boundaries (not file size) and keep the hot loop thin.
+Reference notes in `TRADER_CONTEXT.md:106299`.
+
+Proposed minimal module split:
+
+```
+trading/
+├── io/
+│   ├── prices.py        # CSV discovery + load_prices
+│   └── logs.py          # CSV append, trade logs
+├── signals/
+│   ├── triadic.py       # compute_triadic_state
+│   ├── stress.py        # compute_structural_stress
+│   ├── planes.py        # plane detection, flips, rates
+│   └── shadow_mdl.py    # shadow MDL window logic
+├── policy/
+│   ├── ternary.py       # ternary_controller, permission, sign
+│   ├── thesis.py        # thesis FSM + constraints
+│   └── belief.py        # belief update + labels
+├── execution/
+│   ├── sizing.py        # cap, risk parity, edge gate
+│   ├── fills.py         # fill logic, slippage, fees
+│   └── accounting.py    # PnL, equity, drawdown
+├── engine/
+│   └── loop.py          # run_trading_loop (thin)
+├── cli.py               # argparse + main()
+└── run_trader.py        # imports + entrypoint only
+```
