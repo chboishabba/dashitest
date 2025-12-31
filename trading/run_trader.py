@@ -35,6 +35,9 @@ GOAL_EPS = 0.05            # tail fraction for expected shortfall
 MDL_NOISE_MULT = 2.0       # sigma multiplier for active-trit threshold
 MDL_SWITCH_PENALTY = 1.0   # side cost for state switches
 MDL_TRADE_PENALTY = 1.0    # side cost for executed trades
+SHADOW_REFIT_WINDOW = 64   # refit window size for shadow MDL split diagnostic
+SHADOW_SPLIT_PENALTY_MULT = 1.0  # split penalty multiplier (log n)
+SHADOW_MDL_EPS_MULT = 1e-12  # scale-aware epsilon multiplier for promote/tie/reject
 PLANE_BASE = 3.0           # base for surprise planes
 PLANE_COUNT = 4            # number of surprise planes to track (0..PLANE_COUNT-1)
 PLANE_SIGMA_SLOW_ALPHA = 0.002  # slow sigma EMA for plane normalization
@@ -68,6 +71,7 @@ def compute_triadic_state(prices, dz_min=5e-5, window=200):
     state = np.zeros(n, dtype=int)
     z_prev = 0.0
     recent_rets = []
+    shadow_mdl_window = []
     for t in range(1, n):
         ret = prices[t] / prices[t - 1] - 1.0
         recent_rets.append(ret)
@@ -349,6 +353,17 @@ def run_trading_loop(
     edge_decay: float = 0.9,
     thesis_depth_max: int = THESIS_DEPTH_MAX,
 ):
+    def shadow_mdl_for_window(ret_window):
+        n = len(ret_window)
+        if n <= 1:
+            return np.nan
+        mu = float(np.mean(ret_window))
+        var = float(np.var(ret_window))
+        var = max(var, 1e-12)
+        residual = ret_window - mu
+        nll = 0.5 * n * np.log(var) + 0.5 * float(np.sum((residual ** 2) / var))
+        param_cost = np.log(max(n, 1.0))
+        return nll + param_cost
     """
     Core trading loop extracted so multiple markets can be evaluated.
     """
@@ -387,8 +402,11 @@ def run_trading_loop(
     sigma_slow = 0.0
     edge_ema = 0.0
     side_cost = 0.0
+    action_run_length = 0
+    time_since_last_switch = 0
     thesis_age = 0      # how long we've held a non-zero thesis
     thesis_depth = 0    # bounded ordinal memory counter
+    thesis_depth_peak = 0  # max depth reached during current trade
     state_age = 0       # how long the field state has persisted
     align_age = 0       # how long state and thesis have been aligned
     prev_state = 0
@@ -413,6 +431,7 @@ def run_trading_loop(
     pnl_delta_window = []
     window = 200
     t0_ts = time_index[0] if time_index is not None and len(time_index) else None
+    returns = np.diff(price) / price[:-1]
     for t in range(1, total_steps + 1):
         if max_seconds is not None and (time.time() - start_ts) >= max_seconds:
             stop_reason = "max_seconds"
@@ -521,6 +540,13 @@ def run_trading_loop(
             cap *= 0.5
         cap = max(0.0, min(cap, CAP_HARD_MAX))
 
+        if action_t == prev_action:
+            action_run_length += 1
+            time_since_last_switch += 1
+        else:
+            action_run_length = 1
+            time_since_last_switch = 0
+
         # Update persistence clocks
         state_age = state_age + 1 if direction == prev_state else 0 if direction == 0 else 1
         if pos != 0:
@@ -591,6 +617,7 @@ def run_trading_loop(
                 trade_entry_notional = abs(fill * price_exec)
                 trade_realized_pnl = 0.0
                 avg_entry_price = price_exec
+                thesis_depth_peak = thesis_depth
             elif pos == 0:
                 closed_qty = abs(pos_prev)
                 if pos_prev > 0:
@@ -613,6 +640,7 @@ def run_trading_loop(
                 trade_entry_notional = 0.0
                 trade_realized_pnl = 0.0
                 avg_entry_price = 0.0
+                thesis_depth_peak = 0
             elif np.sign(pos_prev) == np.sign(pos):
                 if np.sign(fill) == np.sign(pos_prev):
                     total_qty = abs(pos_prev) + abs(fill)
@@ -650,8 +678,12 @@ def run_trading_loop(
                 trade_entry_notional = abs(pos * price_exec)
                 trade_realized_pnl = 0.0
                 avg_entry_price = price_exec
+                thesis_depth_peak = thesis_depth
 
         realized_pnl_total += realized_pnl_step
+
+        if trade_entry_step is not None:
+            thesis_depth_peak = max(thesis_depth_peak, thesis_depth)
 
         # Proxy MDL and stress (plane-aware surprise)
         active_trit = 1.0 if plane_index >= 0 else 0.0
@@ -663,11 +695,34 @@ def run_trading_loop(
             plane_counts[k] += hit
             plane_hits.append(hit)
             plane_rates.append(plane_counts[k] / max(t, 1))
-        if desired != prev_action:
+        if action_t != prev_action:
             side_cost += mdl_switch_penalty
         if fill != 0:
             side_cost += mdl_trade_penalty
         mdl_rate = (side_cost + active_trit_count) / max(t, 1)
+        shadow_delta_mdl = np.nan
+        shadow_would_promote = 0
+        shadow_is_tie = 0
+        shadow_reject = 0
+        w = SHADOW_REFIT_WINDOW
+        if t - w >= 1 and t + w - 1 <= total_steps:
+            start = t - w - 1
+            mid = t - 1
+            end = t + w - 1
+            left = returns[start:mid]
+            right = returns[mid:end]
+            both = returns[start:end]
+            mdl_current = shadow_mdl_for_window(both)
+            if not np.isnan(mdl_current):
+                mdl_left = shadow_mdl_for_window(left)
+                mdl_right = shadow_mdl_for_window(right)
+                split_penalty = SHADOW_SPLIT_PENALTY_MULT * np.log(max(len(both), 1.0))
+                mdl_split = mdl_left + mdl_right + split_penalty
+                shadow_delta_mdl = mdl_split - mdl_current
+                eps = SHADOW_MDL_EPS_MULT * max(1.0, abs(mdl_current))
+                shadow_would_promote = int(shadow_delta_mdl < -eps)
+                shadow_is_tie = int(abs(shadow_delta_mdl) <= eps)
+                shadow_reject = int(shadow_delta_mdl > eps)
         stress = active_trit_count / max(t, 1)
 
         # Goal probability + shortfall via normal approximation
@@ -761,9 +816,15 @@ def run_trading_loop(
             "hold": int(action_t == 0),
             "entropy": 0.0,
             "regime": 0,
+            "shadow_delta_mdl": shadow_delta_mdl,
+            "shadow_would_promote": shadow_would_promote,
+            "shadow_is_tie": shadow_is_tie,
+            "shadow_reject": shadow_reject,
             "action": np.sign(fill) if fill != 0 else 0,
             "action_signal": action_signal,
             "action_t": action_t,
+            "action_run_length": action_run_length,
+            "time_since_last_switch": time_since_last_switch,
             "source": source,
             "tape_id": tape_id if tape_id is not None else "",
             "pos": pos,
@@ -815,6 +876,8 @@ def run_trading_loop(
                     (price_exec / close_entry_price - 1.0) if close_entry_price else np.nan
                 ),
                 "thesis_depth_exit": thesis_depth,
+                "thesis_depth_prev": thesis_depth_prev,
+                "thesis_depth_peak": thesis_depth_peak,
             }
             pd.DataFrame([trade_row]).to_csv(
                 trade_log_path, mode="a", header=not trade_log_path.exists(), index=False

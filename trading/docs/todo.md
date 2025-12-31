@@ -18,4 +18,29 @@ TODO
 - [ ] Log thesis depth at exit and verify most exits occur near depth=0.
 - [ ] Sweep thesis depth max M in {3,5,8,13} with all other params fixed.
 - [x] Add a focused sanity run note or test case covering soft-veto hold behavior (recorded in `README.md`).
+- [x] Log thesis depth at exit and verify most exits occur near depth=0.
+- [x] Add thesis depth prev/peak to trade logs for exit diagnostics.
+- [ ] Define a thesis-promotion rule (e.g., `Delta MDL_split < 0` with elevated `p_bad`).
+- [ ] Build a synthetic regime-break test to validate depth promotion and non-zero exit depths.
+- [x] Add a shadow-thesis tracker for depth-1 diagnostics (no execution effect).
+- [x] Implement shadow-thesis logging fields (`shadow_delta_mdl`, `shadow_would_promote`).
+- [x] Re-run the 15s sanity suite and summarize `shadow_delta_mdl` distribution.
+- [x] Add epsilon-gated promote/tie/reject stats for shadow MDL summaries.
+- [x] Upgrade shadow MDL to a refit-based split (left/right window) with a split penalty.
+- [x] Define refit window size `W` and split penalty calibration (start with log(n) or small constant).
+- [x] Log `shadow_is_tie` and `shadow_reject` in per-step logs.
+- [x] Re-run the 15s sanity suite after refit-based shadow MDL; summarize promote/tie/reject counts.
+- [x] Apply switching penalty on action-state changes (not desired state) and log action run length stats.
+- [ ] Aggregate promote/tie/reject vs `p_bad`, `capital_pressure`, and `edge_t`, including PnL contribution by run length.
+- [ ] Add plane-rate diagnostics (logging-only): `plane_abs`, `plane_sign`, `plane_sign_flips_W`.
+- [ ] Aggregate promotions vs `plane_abs`, `stress`, and joint buckets; add PnL by plane bucket and action run length.
+- [x] Build decision heatmaps from logs: `plane_abs × stress → {promotion_rate, action_rate, mean_pnl}`.
+- [x] Lock heatmap binning: quantile bins (q05..q95) + under/overflow + min bin count threshold.
+- [x] Add fallback to linear bins when quantile edges collapse.
+- [x] Add time-series overlay plot: price + `plane_rate` + `plane_abs` with promote/action markers.
+- [x] Add optional ternary simplex plot using normalized `p_bad`, `plane_abs`, `stress`.
+- [x] In plotting, use `delta_plane` as signed plane-rate proxy if no signed `plane_rate` column exists.
+- [ ] Count "would-veto" events for a prospective plane-stability rule (sign flips > 1 within `W`).
+- [ ] Decide on plane-stability gate after diagnostics; implement only if supported.
+- [ ] Defer `SHADOW_REFIT_WINDOW` / `SHADOW_SPLIT_PENALTY_MULT` sweeps until plane diagnostics are summarized.
 - [ ] Update dashboards to display ternary state columns (permission, edge_t, capital_pressure, action_t).

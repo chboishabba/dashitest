@@ -147,17 +147,17 @@ python run_trader.py --all --log-level trades --progress-every 1000 --inter-run-
 ```
 
 Run summaries (per CSV):
-- `stooq:aapl.us`: steps=7938, trades=620, pnl=100000.2412, elapsed=15.11s, stop=max_seconds
-- `stooq:btc.us`: steps=352, trades=2, pnl=100005.7958, elapsed=0.70s
-- `stooq:btc_intraday`: steps=8680, trades=21, pnl=99704.2656, elapsed=15.07s, stop=max_seconds
-- `stooq:btc_intraday_1s`: steps=8713, trades=60, pnl=99920.4082, elapsed=15.13s, stop=max_seconds
-- `stooq:btc_yf`: steps=4121, trades=19, pnl=-126907.0078, elapsed=7.77s
-- `stooq:msft.us`: steps=7705, trades=30, pnl=99998.5409, elapsed=15.13s, stop=max_seconds
-- `stooq:spy.us`: steps=5242, trades=8, pnl=100065.1214, elapsed=10.15s
-- `yahoo:AAPL_1d`: steps=249, trades=0, pnl=100000.0000, elapsed=0.47s
-- `yahoo:BTC_USD_1d`: steps=364, trades=2, pnl=90288.2947, elapsed=0.72s
-- `yahoo:MSFT_1d`: steps=249, trades=0, pnl=100000.0000, elapsed=0.54s
-- `yahoo:SPY_1d`: steps=249, trades=0, pnl=100000.0000, elapsed=0.51s
+- `stooq:aapl.us`: steps=6288, trades=616, pnl=99999.5517, elapsed=15.01s, stop=max_seconds
+- `stooq:btc.us`: steps=352, trades=2, pnl=100005.7958, elapsed=0.80s
+- `stooq:btc_intraday`: steps=6879, trades=16, pnl=99866.8691, elapsed=15.02s, stop=max_seconds
+- `stooq:btc_intraday_1s`: steps=6933, trades=54, pnl=99920.4154, elapsed=15.01s, stop=max_seconds
+- `stooq:btc_yf`: steps=4121, trades=19, pnl=-126907.0078, elapsed=9.62s
+- `stooq:msft.us`: steps=6410, trades=28, pnl=99999.4214, elapsed=15.01s, stop=max_seconds
+- `stooq:spy.us`: steps=5242, trades=8, pnl=100065.1214, elapsed=12.40s
+- `yahoo:AAPL_1d`: steps=249, trades=0, pnl=100000.0000, elapsed=0.55s
+- `yahoo:BTC_USD_1d`: steps=364, trades=2, pnl=90288.2947, elapsed=0.85s
+- `yahoo:MSFT_1d`: steps=249, trades=0, pnl=100000.0000, elapsed=0.57s
+- `yahoo:SPY_1d`: steps=249, trades=0, pnl=100000.0000, elapsed=0.56s
 
 ## Trading logs (fields)
 
@@ -169,8 +169,32 @@ Per-step log (see `logs/trading_log*.csv`) includes:
 - PnL detail: `realized_pnl_step`, `realized_pnl_total`, `unrealized_pnl`, `trade_pnl`, `trade_pnl_pct`, `trade_duration`
 - Ternary control: `direction`, `edge_t`, `permission`, `capital_pressure`, `risk_budget`, `action_t`
 - Thesis memory: `action_signal`, `thesis_depth`, `thesis_hold`
+- Action persistence: `action_run_length`, `time_since_last_switch`
+- Shadow thesis: `shadow_delta_mdl`, `shadow_would_promote`, `shadow_is_tie`, `shadow_reject`
 
 Per-trade log (see `logs/trading_log_trades_*.csv`) includes:
 - `trade_id`, `entry_step`, `exit_step`, `entry_price`, `exit_price`, `trade_duration`
 - `trade_pnl`, `trade_pnl_pct`, `price_move`, `price_move_pct`, `close_reason`
 - `thesis_depth_exit` (thesis depth at close, when logged)
+- `thesis_depth_prev` (thesis depth one step before close, when logged)
+- `thesis_depth_peak` (max thesis depth observed during the trade, when logged)
+
+## Planned diagnostics (logging-only)
+
+Next pass is observational only (no behavior changes). Add per-step fields:
+- `plane_abs = abs(plane_rate)`
+- `plane_sign = sign(plane_rate)`
+- `plane_sign_flips_W` (rolling sign flips within window `W`)
+
+Then aggregate:
+- Promotion rate vs `plane_abs`, `stress`, and `plane_abs × stress`
+- PnL vs action run length per plane bucket
+- "Would-veto" counts for a prospective plane-stability gate
+
+Geometry plots (no controller changes, see `scripts/plot_decision_geometry.py`):
+- Decision heatmaps: `plane_abs × stress → {promotion_rate, action_rate, mean_pnl}`
+- Time-series overlay: price + `plane_rate` + `plane_abs` with promote/action markers
+- Optional ternary simplex: normalize `p_bad`, `plane_abs`, `stress` to sum to 1
+- Use fixed quantile bins (q05..q95) with under/overflow bins and suppress bins with < 30 samples
+- If no signed `plane_rate` is logged, use `delta_plane` as the signed proxy and `plane_abs = abs(delta_plane)`
+- If quantile edges collapse (identical values), fall back to linear bins over finite min/max
