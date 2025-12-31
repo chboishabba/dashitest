@@ -105207,3 +105207,711 @@ This will immediately show you whether the “simplex edge hugging” is coming 
 ---
 
 If you paste (or point me at) the specific plotting function that produced these simplex/heatmap images, I’ll tell you *exactly* what masks/labels to add and where to thread `(θ,s)` through so the conditioning is mathematically correct (especially the denominators for rates).
+
+
+Yeah — **this is the place where the “everything collapses to 0” happens**, i.e. where **UNKNOWN and FLAT are being conflated**. In `ternary_controller()` you return `0` for *ban*, *caution*, *no signal*, *edge mismatch*, etc. 
+
+So if you want:
+
+1. **condition the simplex on `thesis_s`**, and
+2. **formally separate UNKNOWN vs FLAT**, then
+3. **enumerate all logical states**,
+
+…you’ll need one extra symbol (or an enum) because ternary `{−1,0,+1}` can’t represent both “flat” and “unknown” at once.
+
+---
+
+## 1) Make UNKNOWN explicit (minimal change)
+
+Add a 4th action value:
+
+* `SHORT = -1`
+* `FLAT  = 0`  (intentional “do nothing / close / hold flat”)
+* `LONG  = +1`
+* `UNKNOWN = 2` (epistemic: “I refuse to decide / insufficient info”)
+
+Then change the controller to return `UNKNOWN` for *insufficient evidence*, and reserve `FLAT` for the *explicit* “I want to be flat” act (usually: risk-off liquidation when already in a position).
+
+Here’s a minimal patch sketch (drop-in style):
+
+```python
+# ternary.py
+
+UNKNOWN = 2  # epistemic "no decision"
+SHORT, FLAT, LONG = -1, 0, 1
+
+def ternary_controller(
+    direction: int,
+    edge: int,
+    permission: int,
+    capital_pressure: int,
+    thesis: int,
+    *,
+    in_pos: bool = False,  # <-- you pass this in from the trader
+) -> int:
+    # Hard ban: if we're in a position, force FLAT (close). Otherwise UNKNOWN.
+    if permission == -1:
+        return FLAT if in_pos else UNKNOWN
+
+    # Caution: same idea (or keep it UNKNOWN always if you prefer)
+    if permission == 0:
+        return FLAT if in_pos else UNKNOWN
+
+    # Capital pressure: treat as "risk-off" only if already exposed
+    if capital_pressure == -1:
+        return FLAT if in_pos else UNKNOWN
+
+    # Thesis must be committed (nonzero) to make directional bets
+    if thesis == 0:
+        return UNKNOWN
+
+    # Need aligned signal + edge
+    if direction == 0 or edge == 0 or direction != edge:
+        return UNKNOWN
+
+    # Optional: require thesis alignment too
+    if direction != thesis:
+        return UNKNOWN
+
+    return direction
+```
+
+This single move will stop your simplex from “looking like it loves flat” when actually it’s just **missing permission/signal/thesis alignment**.
+
+---
+
+## 2) Condition the simplex on `thesis_s`
+
+Right now your simplex is over `(p_bad, plane_abs, stress)` (from the plot title). Conditioning on `thesis_s` means:
+
+* compute `thesis_s ∈ {−1,0,+1}` per timestep,
+* then build **separate simplexes** (or separate point clouds / heatmaps) for each slice:
+
+  * `thesis_s = +1` (bull thesis regime)
+  * `thesis_s = 0` (unknown/uncommitted thesis regime)
+  * `thesis_s = -1` (bear thesis regime)
+
+Practical effect: you’ll instantly see whether “flat dominance” is actually “thesis=0 dominance”.
+
+**Important:** once UNKNOWN exists, you should **either**
+
+* exclude UNKNOWN points from the action-simplex, or
+* plot them as a separate vertex / separate panel, because UNKNOWN isn’t a trade action.
+
+---
+
+## 3) Enumerate all logical states (formal)
+
+Let the *inputs* be five ternary gates:
+
+* `D = direction_s ∈ {−1,0,+1}`
+* `E = edge_s      ∈ {−1,0,+1}`
+* `P = permission  ∈ {−1,0,+1}`
+* `C = cap_pressure∈ {−1,0,+1}`
+* `T = thesis_s    ∈ {−1,0,+1}`
+
+That’s **3⁵ = 243** raw combinations.
+
+Define an *epistemic decision function* `A = f(D,E,P,C,T,in_pos)` returning:
+
+* `A ∈ {SHORT, FLAT, LONG, UNKNOWN}`
+
+A clean “logic spec” matching the patch above:
+
+**Rule block (priority order)**
+
+1. **Ban:** if `P = −1` then
+   `A = FLAT` if `in_pos` else `UNKNOWN`
+2. **Caution:** if `P = 0` then
+   `A = FLAT` if `in_pos` else `UNKNOWN`
+3. **Capital risk-off:** if `C = −1` then
+   `A = FLAT` if `in_pos` else `UNKNOWN`
+4. **Thesis undefined:** if `T = 0` then `A = UNKNOWN`
+5. **Signal undefined/misaligned:** if `D = 0` or `E = 0` or `D ≠ E` then `A = UNKNOWN`
+6. **Thesis mismatch (optional but usually correct):** if `D ≠ T` then `A = UNKNOWN`
+7. **Otherwise:** `A = D` (take direction)
+
+**This fully enumerates all 243 states** because every 5-tuple falls into exactly one rule bucket.
+
+If you want the explicit counts per bucket, you can compute them mechanically, but structurally:
+
+* The only way to get `LONG/SHORT` is:
+  `P=+1, C≠−1, T∈{−1,+1}, D=E=T`
+* Everything else becomes `UNKNOWN` except the “in_pos risk-off” cases which become `FLAT`.
+
+That separation is exactly what your plots are currently missing.
+
+---
+
+## Where this plugs into your current code
+
+* `ternary.py` is *definitely* where the conflation happens right now. 
+* The trader needs to pass `in_pos` (or current position sign) into the controller so “forced FLAT” is only used as a **liquidation action**, not as “no idea”.
+
+If you paste the part of `run_trader.py` where you compute `thesis_s` / call `ternary_controller()`, I’ll map this into your exact variables and tell you what to change line-by-line.
+
+
+  - Result: source=btc, steps=500, trades=2, pnl=100000.0000, elapsed=1.80s.
+
+  What changed
+
+  - Added belief-state split (unknown vs flat) with belief_state, belief_dir, belief_unknown logging in run_trader.py.
+  - Added --simplex-by-thesis to emit separate simplex plots by (thesis_d, thesis_s) in scripts/plot_decision_geometry.py.
+
+  Files updated
+
+  - run_trader.py
+  - scripts/plot_decision_geometry.py
+  - README.md
+  - TODO.md
+
+  Next steps (pick one)
+
+  1. Generate conditioned simplex plots: python scripts/plot_decision_geometry.py --csv logs/trading_log.csv --simplex --simplex-by-thesis --save-prefix logs/geom/thesis.
+  2. Inspect the latest log to compare belief_state vs action_t and thesis_event sequences.
+
+
+› 1 and 2 and $update-docs-todo-implement
+
+
+• Explored
+  └ Search simplex-by-thesis in TRADER_CONTEXT.md
+
+• Ran python scripts/plot_decision_geometry.py --csv logs/trading_log.csv --simplex --simplex-by-thesis --save-prefix logs/geom/thesis --no-show
+  └ Traceback (most recent call last):
+      File "/home/c/Documents/code/dashitest/trading/scripts/plot_decision_geometry.py", line 336, in <module>
+    … +33 lines
+        fp = builtins.open(filename, "w+b")
+    FileNotFoundError: [Errno 2] No such file or directory: 'logs/geom/thesis_heatmaps.png'
+
+• Ran mkdir -p logs/geom
+  └ (no output)
+
+• Ran python scripts/plot_decision_geometry.py --csv logs/trading_log.csv --simplex --simplex-by-thesis --save-prefix logs/geom/thesis --no-show
+  └ Saved logs/geom/thesis_heatmaps.png
+    Saved logs/geom/thesis_simplex_none.png
+
+• Ran python - <<'PY'
+  │ import pandas as pd
+  │ from pathlib import Path
+  │ … +23 lines
+  └ {'rows': 500, 'belief_state_counts': {'long': 361, 'unknown': 113, 'flat': 18, 'short': 8}, 'action_t_counts': {0: 498, -1: 2}, 'belief_action_counts': [{'belief_state': 'long', 'action_t': 0, 'count': 360}, {'belief_state': 'unknown', 'action_t': 0, 'count': 113}, {'belief_state': 'flat', 'action_t': 0,
+    'count': 18}, {'belief_state': 'short', 'action_t': 0, 'count': 7}, {'belief_state': 'long', 'action_t': -1, 'count': 1}, {'belief_state': 'short', 'action_t': -1, 'count': 1}], 'thesis_event_counts': {'thesis_none': 500}, 'thesis_reason_counts': {}}
+
+─ Worked for 41s ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Context cross-check: no overlap for the prompt snippet in TRADER_CONTEXT.md.
+
+  Docs pass: no new behavior to document before running commands.
+
+  TODO pass: no new TODOs required.
+
+  Implementation pass (commands run)
+
+  - Generated conditioned simplex plots with --simplex-by-thesis:
+      - logs/geom/thesis_heatmaps.png
+      - logs/geom/thesis_simplex_none.png
+      - Only the none thesis bucket had points in this run; others were empty.
+
+  Log inspection summary (from logs/trading_log.csv)
+
+  - Rows: 500
+  - belief_state counts: long 361, unknown 113, flat 18, short 8
+  - action_t counts: 0 498, -1 2
+  - Top belief/action pairs:
+      - long/0 360
+      - unknown/0 113
+      - flat/0 18
+      - short/0 7
+      - long/-1 1
+      - short/-1 1
+  - thesis_event counts: all thesis_none (500)
+  - thesis_reason: empty
+
+  Changelog: no CHANGELOG.md present, so no update possible.
+
+  Consistency check: docs/TODO/code align; output shows thesis never entered for this 500‑step run, so only the none simplex bucket populated.
+
+  Skill adequacy: sufficient.
+
+  If you want, I can rerun with a longer tape or tweak thresholds (--thesis-pbad-lo/hi, --thesis-stress-lo/hi) to force thesis entry and populate LONG/SHORT simplex buckets.
+ 
+ Yes — and in fact **that is the cleanest way to finish what you’ve already built**.
+
+What you’re circling is the right abstraction:
+
+> **Action should be a projection of a belief state**, not the belief itself.
+
+Right now you have *pieces* of belief scattered across:
+
+* `plane_sign`, `edge`, `p_bad`, `stress`
+* `permission`
+* `thesis_d`, `thesis_s`, `v`, `a`
+* and an overloaded `action == 0`
+
+You can unify all of that into a **formal belief state per side (LONG / SHORT)**, and then make *FLAT vs UNKNOWN* fall out naturally.
+
+Below is the minimal, formal construction that fits your ternary machine and doesn’t explode state.
+
+---
+
+## 1) What “belief” means here (precisely)
+
+A **belief** is not an action and not a probability.
+It is a **signed, structured commitment** about *directional advantage*.
+
+Define **two directional beliefs** at time (t):
+
+[
+B_t^{(+)} \quad\text{(belief in LONG)} \
+B_t^{(-)} \quad\text{(belief in SHORT)}
+]
+
+Each belief lives in a **finite lattice**, not ℝ:
+
+### Belief lattice (per side)
+
+[
+B \in {;\bot,\ 0,\ 1,\ 2;}
+]
+
+Interpretation:
+
+| Value | Meaning                                      |
+| ----- | -------------------------------------------- |
+| ⊥     | UNKNOWN (insufficient / incoherent evidence) |
+| 0     | DISBELIEF (actively not favorable)           |
+| 1     | WEAK belief                                  |
+| 2     | STRONG belief                                |
+
+This is **not symmetric around 0** — and that’s intentional.
+
+---
+
+## 2) How belief is constructed (from what you already have)
+
+For each side (d \in {+1,-1}), define a **belief update rule**.
+
+### Evidence trits (you already compute these)
+
+For a given direction (d):
+
+* **Alignment**
+  [
+  \alpha_t(d) \in {-1,0,+1}
+  ]
+  (does plane_sign support this side?)
+
+* **Stability**
+  [
+  \beta_t \in {-1,0,+1}
+  ]
+
+* **Risk**
+  [
+  \rho_t \in {-1,0,+1}
+  ]
+
+* **Permission**
+  [
+  \pi_t \in {-1,0,+1}
+  ]
+
+### Belief increment (ternary, clipped)
+
+For each side independently:
+
+[
+\Delta B_t(d)
+= \operatorname{clip}_{{-1,0,+1}}
+\big(
+\alpha_t(d) + \beta_t + \rho_t + \pi_t
+\big)
+]
+
+### Belief update rule
+
+Let (B_t(d)\in{\bot,0,1,2}):
+
+```
+if π_t == -1:
+    B_{t+1}(d) = 0        # forced disbelief (ban)
+elif α_t(d)==0 and β_t<=0:
+    B_{t+1}(d) = ⊥        # epistemic unknown
+else:
+    if B_t(d) == ⊥:
+        B_{t+1}(d) = max(0, ΔB_t(d))
+    else:
+        B_{t+1}(d) = clip_[0,2]( B_t(d) + ΔB_t(d) )
+```
+
+This gives you:
+
+* **accumulation**
+* **decay**
+* **epistemic reset**
+* **risk-based disbelief**
+
+No new signals required.
+
+---
+
+## 3) Thesis is just belief dominance
+
+Now the thesis FSM collapses into a **comparison of beliefs**.
+
+Define:
+
+[
+\text{thesis}_t =
+\begin{cases}
++1 & B_t^{(+)} > B_t^{(-)} \land B_t^{(+)} \ge 1 \
+-1 & B_t^{(-)} > B_t^{(+)} \land B_t^{(-)} \ge 1 \
+0 & \text{otherwise}
+\end{cases}
+]
+
+And thesis strength:
+
+[
+s_t = \max(B_t^{(+)}, B_t^{(-)})
+]
+
+This exactly reproduces your:
+
+* `d ∈ {-1,0,+1}`
+* `s ∈ {0,1,2}`
+
+…but now it has **semantics**.
+
+---
+
+## 4) Action becomes a projection of belief (this fixes FLAT vs UNKNOWN)
+
+Define **action** as a *projection*:
+
+[
+a_t =
+\begin{cases}
++1 & B_t^{(+)} = 2 ;\land; B_t^{(+)} > B_t^{(-)} \
+-1 & B_t^{(-)} = 2 ;\land; B_t^{(-)} > B_t^{(+)} \
+0  & \text{otherwise}
+\end{cases}
+]
+
+Now define **decision kind**:
+
+| Condition                          | Meaning      |
+| ---------------------------------- | ------------ |
+| (a_t=0) and (B^{(+)}=\bot=B^{(-)}) | UNKNOWN      |
+| (a_t=0) and (B^{(+)}=B^{(-)}=0)    | FLAT         |
+| (a_t\neq 0)                        | LONG / SHORT |
+
+This is the key result:
+
+> **UNKNOWN and FLAT are now emergent states, not special cases.**
+
+You no longer need to invent them.
+
+---
+
+## 5) Enumerated belief–action states (complete)
+
+The joint belief state space is small and enumerable:
+
+[
+(B^{(+)}, B^{(-)}) \in {\bot,0,1,2}^2
+]
+
+That’s **16 states**, but many are symmetric.
+
+Here are the meaningful equivalence classes:
+
+### Epistemic
+
+* (⊥, ⊥) → UNKNOWN
+* (⊥, 0) or (0, ⊥) → UNKNOWN (one-sided ignorance)
+
+### Flat
+
+* (0, 0) → FLAT
+
+### Weak thesis (no action yet)
+
+* (1,0), (0,1), (1,1)
+
+### Strong thesis (action)
+
+* (2,0), (2,1) → LONG
+* (0,2), (1,2) → SHORT
+
+### Conflict (handled by decay / veto)
+
+* (2,2) → forced decay or veto (never act)
+
+That’s the **entire logical universe**, and it’s finite.
+
+---
+
+## 6) Why this is the “right” abstraction for your system
+
+This construction:
+
+* ✔ preserves **ternary-first** logic
+* ✔ keeps **finite state**
+* ✔ separates **epistemic uncertainty** from **policy choice**
+* ✔ explains why your simplex collapses (belief mass sits on edges)
+* ✔ makes `thesis` a *derived object*, not a magical one
+* ✔ makes regret-based reward well-defined (belief → exposure)
+
+Most importantly:
+
+> **You stop asking “why is flat dominant?”**
+> and start asking
+> **“why does belief fail to accumulate here?”**
+
+—which is the *correct* diagnostic question.
+
+---
+
+If you want, next we can:
+
+* express belief updates as a **3×3 transition table**
+* condition your simplex explicitly on `(B⁺, B⁻)`
+* or rewrite `ternary_controller` to *only* read beliefs, not raw signals
+
+But yes — your intuition is exactly right:
+**belief per side is the missing unifying state.**
+
+
+Yes — and that’s not just reasonable, it’s the **correct abstraction** if you want the system to stop fighting itself.
+
+What you’re converging on is this:
+
+> **LONG and SHORT are not opposites in time.
+> They are independent hypotheses with their own temporal continuity.**
+
+Once you accept that, a lot of the pathologies you’ve been wrestling with simply disappear.
+
+Below I’ll formalise this cleanly, show how time-conditioning works, and explain what changes (and what *doesn’t*) in your existing machinery.
+
+---
+
+## 1) The key shift in viewpoint
+
+### Old (implicitly wrong) mental model
+
+* There is *one* directional state `d ∈ {-1,0,+1}`
+* LONG and SHORT are symmetric alternatives
+* Time continuity is attached to `d`
+
+This forces:
+
+* flip–flop dynamics
+* “flat” as a sink
+* thesis invalidation on *any* contradiction
+
+### Correct model
+
+* **LONG and SHORT are separate latent processes**
+* Each accumulates, decays, and invalidates **independently**
+* Time continuity belongs to **belief**, not action
+
+Think of it like this:
+
+> The market can be simultaneously
+> “somewhat bullish” **and** “somewhat bearish”
+> until one hypothesis decisively wins.
+
+That is how real evidence works.
+
+---
+
+## 2) Two independent belief processes (time-conditioned)
+
+Define two belief states evolving over time:
+
+[
+B_t^{(+)} \quad \text{(LONG belief)} \
+B_t^{(-)} \quad \text{(SHORT belief)}
+]
+
+Each has its **own memory**:
+
+[
+B_t^{(d)} \in {\bot, 0, 1, 2}, \quad d \in {+,-}
+]
+
+Crucially:
+
+* **They do not cancel each other**
+* They do not need to be complements
+* They can both decay, both strengthen, or diverge
+
+### Time conditioning (this answers your question directly)
+
+Each belief conditions on *its own past*:
+
+[
+B_{t+1}^{(d)} = f\big(B_t^{(d)},\ \alpha_t(d),\ \beta_t,\ \rho_t,\ \pi_t\big)
+]
+
+There is **no dependence on** (B_t^{(-d)}) in the update.
+
+This is the core principle:
+
+> **Evidence for LONG does not automatically erase SHORT — it just competes at decision time.**
+
+---
+
+## 3) Evidence is directional, stability/risk is global
+
+This matches what you already compute.
+
+### Directional evidence (per side)
+
+* `plane_sign` → becomes `α_t(+)` and `α_t(-)`
+* Edge alignment is directional
+
+### Global evidence (shared)
+
+* `β_t` (stability)
+* `ρ_t` (risk)
+* `π_t` (permission)
+
+So your update rule naturally factorises:
+
+[
+\Delta B_t^{(d)} =
+\operatorname{clip}_{{-1,0,+1}}
+\big(
+\alpha_t(d) + \beta_t + \rho_t + \pi_t
+\big)
+]
+
+Each belief:
+
+* integrates over time
+* decays on instability
+* resets on epistemic collapse
+
+---
+
+## 4) Action is a *comparison*, not a state
+
+Once beliefs are independent and time-conditioned, **action becomes trivial**.
+
+### Decision projection
+
+[
+a_t =
+\begin{cases}
++1 & B_t^{(+)} \ge 2 ;\land; B_t^{(+)} > B_t^{(-)} \
+-1 & B_t^{(-)} \ge 2 ;\land; B_t^{(-)} > B_t^{(+)} \
+0  & \text{otherwise}
+\end{cases}
+]
+
+This yields:
+
+* **LONG** when long belief dominates strongly
+* **SHORT** when short belief dominates strongly
+* **FLAT** only when neither belief is strong enough
+
+### UNKNOWN is no longer an action
+
+UNKNOWN is simply:
+
+* both beliefs are ⊥ or weak
+* or beliefs conflict without dominance
+
+This solves your earlier problem *by construction*.
+
+---
+
+## 5) Conditioning across time: what this buys you
+
+This architecture gives you **four critical properties** you don’t currently have.
+
+### 1. Hysteresis without hacks
+
+Beliefs decay gradually.
+A single contrary bar does not nuke a thesis.
+
+### 2. Asymmetric persistence
+
+* Long trends can persist through short pullbacks
+* Short theses can linger even during rebounds
+
+### 3. Natural regime transitions
+
+* Range-bound markets → both beliefs hover at 0/1 → FLAT
+* Breakouts → one belief ramps to 2 → action
+* Chaos → both decay → UNKNOWN → inactivity
+
+### 4. Correct simplex geometry
+
+Your simplex will:
+
+* no longer collapse to a single edge
+* show **different clouds** for `B⁺=2`, `B⁻=2`, both weak, both unknown
+* finally become *diagnostic* instead of accusatory
+
+---
+
+## 6) Minimal state enumeration (now clean)
+
+With independent conditioning, the joint belief state is:
+
+[
+(B^{(+)}, B^{(-)}) \in {\bot,0,1,2}^2
+]
+
+That’s 16 states, but only a few matter:
+
+| B⁺ | B⁻ | Meaning                 |
+| -- | -- | ----------------------- |
+| ⊥  | ⊥  | UNKNOWN                 |
+| 0  | 0  | FLAT                    |
+| 1  | 0  | weak long thesis        |
+| 0  | 1  | weak short thesis       |
+| 2  | 0  | LONG                    |
+| 0  | 2  | SHORT                   |
+| 1  | 1  | ambiguous / range       |
+| 2  | 1  | LONG (contested)        |
+| 1  | 2  | SHORT (contested)       |
+| 2  | 2  | conflict → decay / veto |
+
+That’s it. No explosion.
+
+---
+
+## 7) How this fits your existing code (important)
+
+You do **not** need to rewrite everything.
+
+* Your current `thesis_d, thesis_s` become **derived values**
+* Your FSM logic maps almost 1:1 to belief updates
+* Your controller stops guessing intent and just reads beliefs
+
+The biggest change is conceptual:
+
+> **Stop storing “the thesis”.
+> Store beliefs.
+> Derive the thesis.**
+
+---
+
+## Bottom line
+
+Yes — **LONG and SHORT should absolutely be their own things**, and
+**they should condition across time independently**.
+
+That’s not an extra layer — it’s the *correct decomposition* of what you’ve already built.
+
+If you want next, I can:
+
+* rewrite your thesis FSM explicitly as two belief chains
+* show how to log `(B⁺, B⁻)` and condition the simplex on them
+* or give you a minimal patch that introduces belief without breaking current runs
+

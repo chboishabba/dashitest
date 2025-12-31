@@ -15,6 +15,8 @@
 - [ ] Add realized-volatility regime feature (continuous + ternary regime flag) and log it.
 - [x] Implement minimal thesis-memory state machine (direction/strength/age/cooldown/invalidation) with logging.
 - [x] Add benchmark-regret reward option vs constant exposure (optional vol-adjusted penalty).
-- [ ] Condition decision simplex on thesis state (split by thesis_d/thesis_s).
-- [ ] Split UNKNOWN vs FLAT in belief logging (distinct belief_state).
+- [x] Condition decision simplex on thesis state (split by thesis_d/thesis_s).
+- [x] Split UNKNOWN vs FLAT in belief logging (distinct belief_state).
+- [x] Add simplex split by thesis_s only.
+- [x] Log decision_kind (UNKNOWN vs FLAT vs LONG vs SHORT) without changing actions.
 - [ ] Enable plane-aware strategy selection (MDL selector over strategies).

@@ -802,6 +802,20 @@ def run_trading_loop(
                     action_t = 0
                 else:
                     action_t = action_signal
+        if hard_veto or permission == -1 or stress_veto:
+            decision_kind = "flat"
+        elif exit_trigger:
+            decision_kind = "flat"
+        elif permission == 0:
+            decision_kind = "unknown"
+        elif direction == 0 or edge_t == 0 or direction != edge_t:
+            decision_kind = "unknown"
+        elif action_t > 0:
+            decision_kind = "long"
+        elif action_t < 0:
+            decision_kind = "short"
+        else:
+            decision_kind = "unknown"
         base_cap = PARTICIPATION_CAP * volume[t]
         vel_term = 1.0 + 10.0 * max(abs(ret), z_vel)
         cap = base_cap * vel_term
@@ -1080,6 +1094,7 @@ def run_trading_loop(
             "belief_state": belief_state,
             "belief_dir": belief_dir,
             "belief_unknown": belief_unknown,
+            "decision_kind": decision_kind,
             "edge_t": edge_t,
             "permission": permission,
             "capital_pressure": capital_pressure,

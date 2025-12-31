@@ -206,7 +206,7 @@ def plot_overlay(df: pd.DataFrame, plane_rate: str, args) -> plt.Figure:
     return fig
 
 
-def plot_simplex(df: pd.DataFrame, args) -> plt.Figure:
+def plot_simplex(df: pd.DataFrame, args, title: str | None = None) -> plt.Figure:
     cols = ["p_bad", "plane_abs", args.stress_col]
     for col in cols:
         if col not in df.columns:
@@ -246,7 +246,7 @@ def plot_simplex(df: pd.DataFrame, args) -> plt.Figure:
     ax.plot(tri_x, tri_y, color="black", linewidth=1.0)
     ax.set_xticks([])
     ax.set_yticks([])
-    ax.set_title("Decision simplex (p_bad, plane_abs, stress)")
+    ax.set_title(title or "Decision simplex (p_bad, plane_abs, stress)")
     return fig
 
 
@@ -267,6 +267,16 @@ def main():
     ap.add_argument("--flip-window", type=int, default=None, help="Window for sign-flip veto overlay")
     ap.add_argument("--simplex", action="store_true", help="Render ternary simplex")
     ap.add_argument("--simplex-sample", type=int, default=5000, help="Max points for simplex plot")
+    ap.add_argument(
+        "--simplex-by-thesis",
+        action="store_true",
+        help="Split simplex plots by thesis_d/thesis_s (requires thesis_* columns).",
+    )
+    ap.add_argument(
+        "--simplex-by-thesis-s",
+        action="store_true",
+        help="Split simplex plots by thesis_s only (requires thesis_s).",
+    )
     ap.add_argument("--no-show", action="store_true", help="Skip interactive display")
     args = ap.parse_args()
 
@@ -297,13 +307,52 @@ def main():
             plt.show()
 
     if args.simplex:
-        fig = plot_simplex(df, args)
-        if args.save_prefix:
-            out = f"{args.save_prefix}_simplex.png"
-            fig.savefig(out, dpi=200)
-            print(f"Saved {out}")
-        if not args.no_show:
-            plt.show()
+        if args.simplex_by_thesis_s:
+            if "thesis_s" not in df.columns:
+                raise SystemExit("Missing thesis_s for --simplex-by-thesis-s.")
+            groups = {
+                "s0": (df["thesis_s"] == 0),
+                "s1": (df["thesis_s"] == 1),
+                "s2": (df["thesis_s"] == 2),
+            }
+            for key, mask in groups.items():
+                if not mask.any():
+                    continue
+                fig = plot_simplex(df.loc[mask], args, title=f"Decision simplex (thesis_s={key})")
+                if args.save_prefix:
+                    out = f"{args.save_prefix}_simplex_{key}.png"
+                    fig.savefig(out, dpi=200)
+                    print(f"Saved {out}")
+                if not args.no_show:
+                    plt.show()
+        elif args.simplex_by_thesis:
+            if "thesis_d" not in df.columns or "thesis_s" not in df.columns:
+                raise SystemExit("Missing thesis_d/thesis_s for --simplex-by-thesis.")
+            groups = {
+                "none": (df["thesis_d"] == 0),
+                "long_1": (df["thesis_d"] == 1) & (df["thesis_s"] == 1),
+                "long_2": (df["thesis_d"] == 1) & (df["thesis_s"] == 2),
+                "short_1": (df["thesis_d"] == -1) & (df["thesis_s"] == 1),
+                "short_2": (df["thesis_d"] == -1) & (df["thesis_s"] == 2),
+            }
+            for key, mask in groups.items():
+                if not mask.any():
+                    continue
+                fig = plot_simplex(df.loc[mask], args, title=f"Decision simplex ({key})")
+                if args.save_prefix:
+                    out = f"{args.save_prefix}_simplex_{key}.png"
+                    fig.savefig(out, dpi=200)
+                    print(f"Saved {out}")
+                if not args.no_show:
+                    plt.show()
+        else:
+            fig = plot_simplex(df, args)
+            if args.save_prefix:
+                out = f"{args.save_prefix}_simplex.png"
+                fig.savefig(out, dpi=200)
+                print(f"Saved {out}")
+            if not args.no_show:
+                plt.show()
 
 
 if __name__ == "__main__":
