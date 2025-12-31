@@ -16,6 +16,8 @@ import math
 import pandas as pd
 import numpy as np
 
+from ternary import ternary_controller, ternary_permission, ternary_sign
+
 LOG = pathlib.Path("logs/trading_log.csv")
 LOG.parent.mkdir(parents=True, exist_ok=True)
 RUN_HISTORY = pathlib.Path("data/run_history.csv")
@@ -36,12 +38,19 @@ MDL_TRADE_PENALTY = 1.0    # side cost for executed trades
 PLANE_BASE = 3.0           # base for surprise planes
 PLANE_COUNT = 4            # number of surprise planes to track (0..PLANE_COUNT-1)
 PLANE_SIGMA_SLOW_ALPHA = 0.002  # slow sigma EMA for plane normalization
+EDGE_EMA_ALPHA = 0.002     # slow EMA for exposure-normalized edge
+THESIS_DEPTH_MAX = 6       # max depth for thesis memory counter
 
 # Controls
 HOLD_DECAY = 0.6           # exposure decay factor when action -> HOLD
 VEL_EXIT = 3.0             # exit if latent velocity exceeds this while in position
 PERSIST_RAMP = 0.05        # ramp factor for size in new regime
 VETO_SIGMA = 5.0           # if realized sigma > VETO_SIGMA * sigma_target -> shrink size
+PBAD_CAUTION = 0.4         # caution threshold for ternary permission
+PBAD_BAN = 0.7             # ban threshold for ternary permission
+K_LATENT_TAU = 0.25        # capital pressure dead-zone
+RISK_HEADROOM_LOW = 0.2    # ternary risk budget low threshold
+RISK_HEADROOM_HIGH = 0.5   # ternary risk budget high threshold
 
 # --- State helper ----------------------------------------------------------
 
@@ -172,6 +181,10 @@ def norm_ppf(p: float) -> float:
     ) / (
         (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1.0)
     )
+
+
+def fmt_ts() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def find_btc_csv():
@@ -313,11 +326,14 @@ def run_trading_loop(
     source: str,
     time_index=None,
     max_steps=None,
+    max_trades=None,
+    max_seconds=None,
     sleep_s=0.0,
     risk_frac: float = DEFAULT_RISK_FRAC,
     contract_mult: float = CONTRACT_MULT,
     sigma_target: float = SIGMA_TARGET,
     log_path: pathlib.Path = LOG,
+    trade_log_path: pathlib.Path | None = None,
     progress_every: int = 0,
     est_tax_rate: float = EST_TAX_RATE,
     goal_cash_x: float = GOAL_CASH_X,
@@ -326,6 +342,12 @@ def run_trading_loop(
     mdl_switch_penalty: float = MDL_SWITCH_PENALTY,
     mdl_trade_penalty: float = MDL_TRADE_PENALTY,
     log_level: str = "info",
+    log_append: bool = False,
+    tape_id: str | None = None,
+    edge_ema_alpha: float = EDGE_EMA_ALPHA,
+    edge_gate: bool = False,
+    edge_decay: float = 0.9,
+    thesis_depth_max: int = THESIS_DEPTH_MAX,
 ):
     """
     Core trading loop extracted so multiple markets can be evaluated.
@@ -339,7 +361,13 @@ def run_trading_loop(
     log_path = pathlib.Path(log_path) if log_path is not None else None
     if log_path:
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_path.unlink(missing_ok=True)
+        if not log_append:
+            log_path.unlink(missing_ok=True)
+    if trade_log_path:
+        trade_log_path = pathlib.Path(trade_log_path)
+        trade_log_path.parent.mkdir(parents=True, exist_ok=True)
+        if not log_append:
+            trade_log_path.unlink(missing_ok=True)
     # Precompute triadic states and structural stress (for bad_day signal)
     pre_states = compute_triadic_state(price)
     p_bad, bad_flag = compute_structural_stress(price, pre_states)
@@ -357,14 +385,28 @@ def run_trading_loop(
     plane_counts = [0.0 for _ in range(PLANE_COUNT)]
     plane_k_prev = 0
     sigma_slow = 0.0
+    edge_ema = 0.0
     side_cost = 0.0
     thesis_age = 0      # how long we've held a non-zero thesis
+    thesis_depth = 0    # bounded ordinal memory counter
     state_age = 0       # how long the field state has persisted
     align_age = 0       # how long state and thesis have been aligned
+    prev_state = 0
+    capital_pressure = 0
+    trade_id = 0
+    trade_entry_step = None
+    trade_entry_price = 0.0
+    trade_entry_notional = 0.0
+    trade_realized_pnl = 0.0
+    avg_entry_price = 0.0
+    realized_pnl_total = 0.0
     dz_min = 5e-5  # minimum dead-zone
     cost = 0.0005
     rows = []
     recent_rets = []
+    trade_count = 0
+    start_ts = time.time()
+    stop_reason = ""
     total_steps = len(price) - 1
     if max_steps is not None:
         total_steps = min(total_steps, max_steps)
@@ -372,7 +414,13 @@ def run_trading_loop(
     window = 200
     t0_ts = time_index[0] if time_index is not None and len(time_index) else None
     for t in range(1, total_steps + 1):
+        if max_seconds is not None and (time.time() - start_ts) >= max_seconds:
+            stop_reason = "max_seconds"
+            break
+        if max_trades is not None and trade_count >= max_trades:
+            break
         ret = price[t] / price[t - 1] - 1.0
+        price_change = price[t] - price[t - 1]
         recent_rets.append(ret)
         if len(recent_rets) > 200:
             recent_rets.pop(0)
@@ -394,8 +442,57 @@ def run_trading_loop(
             desired = 1
         else:
             desired = -1
-        banned = bool(t < len(bad_flag) and bad_flag[t])
-        order = desired - pos
+        direction = desired
+        thesis = int(np.sign(pos))
+        # Plane classification for this step (used for logging/gating)
+        abs_ret = abs(ret)
+        noise_floor = max(sigma_slow, 1e-9)
+        noise_threshold = mdl_noise_mult * noise_floor
+        if abs_ret > noise_threshold:
+            plane_k = int(np.floor(np.log(abs_ret / noise_threshold) / np.log(PLANE_BASE)))
+            plane_index = max(0, min(plane_k, PLANE_COUNT - 1))
+        else:
+            plane_index = -1
+            plane_k = 0
+        delta_plane = plane_k - plane_k_prev
+
+        p_bad_t = float(p_bad[t]) if t < len(p_bad) else 0.0
+        stress_veto = bool(bad_flag[t]) if t < len(bad_flag) else False
+        permission = ternary_permission(p_bad_t, caution=PBAD_CAUTION, ban=PBAD_BAN)
+        if trade_count > 0 or pos != 0:
+            edge_t = ternary_sign(edge_ema)
+        else:
+            edge_t = ternary_sign(z, tau=dz)
+        action_signal = ternary_controller(
+            direction=direction,
+            edge=edge_t,
+            permission=permission,
+            capital_pressure=capital_pressure,
+            thesis=thesis,
+        )
+        thesis_hold = False
+        thesis_depth_prev = thesis_depth
+        hard_veto = permission == -1 or stress_veto
+        if hard_veto:
+            action_t = 0
+            thesis_depth = 0
+        else:
+            if action_signal != 0 and action_signal != prev_action:
+                thesis_depth = 1
+            elif action_signal != 0 and action_signal == prev_action and permission == 1:
+                thesis_depth = min(thesis_depth_prev + 1, thesis_depth_max)
+            elif action_signal == 0 and thesis_depth_prev > 0:
+                thesis_depth = thesis_depth_prev - 1
+            else:
+                thesis_depth = thesis_depth_prev
+
+            if action_signal == 0 and thesis_depth_prev > 1:
+                action_t = prev_action
+                thesis_hold = True
+            elif action_signal == 0:
+                action_t = 0
+            else:
+                action_t = action_signal
         base_cap = PARTICIPATION_CAP * volume[t]
         vel_term = 1.0 + 10.0 * max(abs(ret), z_vel)
         cap = base_cap * vel_term
@@ -410,25 +507,33 @@ def run_trading_loop(
             risk_cap = (equity * risk_frac) / (price[t] * contract_mult + 1e-9)
             cap = min(cap, risk_cap)
         cap = max(0.0, min(cap, CAP_HARD_MAX))
+        if edge_gate and edge_t == -1 and plane_index <= 0:
+            cap *= edge_decay
+        risk_headroom = cap / max(CAP_HARD_MAX, 1e-9)
+        if risk_headroom > RISK_HEADROOM_HIGH:
+            risk_budget = 1
+            cap *= 1.0
+        elif risk_headroom < RISK_HEADROOM_LOW:
+            risk_budget = -1
+            cap *= 0.2
+        else:
+            risk_budget = 0
+            cap *= 0.5
+        cap = max(0.0, min(cap, CAP_HARD_MAX))
 
         # Update persistence clocks
-        state_age = state_age + 1 if desired == prev_action else 0 if desired == 0 else 1
+        state_age = state_age + 1 if direction == prev_state else 0 if direction == 0 else 1
         if pos != 0:
             thesis_age += 1
         else:
             thesis_age = 0
-        if pos != 0 and desired != 0 and np.sign(pos) == np.sign(desired):
+        if pos != 0 and direction != 0 and np.sign(pos) == np.sign(direction):
             align_age += 1
         else:
             align_age = 0
 
-        # Triadic control: BAN is sovereign, then HOLD decay, then normal ramp
-        if banned:
-            # hard flatten; BAN overrides any directional intent
-            cap = max(cap, abs(pos))
-            fill = np.clip(-pos, -cap, cap)
-            desired = 0
-        elif desired == 0:
+        # Triadic control: ternary action drives fills
+        if action_t == 0:
             # decay exposure toward zero
             cap = cap * (1.0 - HOLD_DECAY) + 1e-9  # keep a tiny ability to act
             fill = np.clip(-pos, -cap, cap)
@@ -437,15 +542,19 @@ def run_trading_loop(
             if z_vel > VEL_EXIT and pos != 0:
                 fill = np.clip(-pos, -cap, cap)
             else:
-                # ramp toward target with persistence factor; faster if align_age large
-                target = desired * cap
-                ramp = PERSIST_RAMP * (1.0 + align_age * 0.01)
-                step = ramp * (target - pos)
+                if thesis_hold:
+                    step = 0.0
+                else:
+                    # ramp toward target with persistence factor; faster if align_age large
+                    target = action_t * cap
+                    ramp = PERSIST_RAMP * (1.0 + align_age * 0.01)
+                    step = ramp * (target - pos)
                 fill = np.clip(step, -cap, cap)
 
         slippage = IMPACT_COEFF * abs(fill / max(cap, 1e-9))
         price_exec = price[t] * (1 + slippage * np.sign(fill))
         cash -= fill * price_exec
+        pos_prev = pos
         pos += fill
         fee = cost * abs(fill)
         fees_accrued += fee
@@ -453,6 +562,8 @@ def run_trading_loop(
         pnl = cash + pos * price[t] - fee
         capital_at_risk = abs(fill * price_exec)
         delta_pnl = pnl - prev_pnl
+        edge_raw = delta_pnl / (abs(pos_prev) + 1e-9)
+        edge_ema = (1.0 - edge_ema_alpha) * edge_ema + edge_ema_alpha * edge_raw
         cash_eff = delta_pnl / (capital_at_risk + 1e-9) if capital_at_risk > 0 else np.nan
         exec_eff = 1.0 - (slippage_cost + fee) / (capital_at_risk + 1e-9) if capital_at_risk > 0 else np.nan
         cash_vel = (cash - START_CASH) / max(t, 1)
@@ -460,17 +571,89 @@ def run_trading_loop(
         tax_est = est_tax_rate * max(realized_pnl, 0.0)
         c_spend = cash - tax_est - fees_accrued
 
+        realized_pnl_step = 0.0
+        trade_pnl = 0.0
+        trade_pnl_pct = 0.0
+        trade_duration = 0
+        trade_closed = False
+        trade_close_reason = ""
+        close_trade_id = None
+        close_entry_step = None
+        close_entry_price = None
+        close_entry_notional = 0.0
+        entry_price = trade_entry_price if trade_entry_step is not None else np.nan
+        price_move_entry = price[t] - entry_price if trade_entry_step is not None else np.nan
+        if fill != 0:
+            if pos_prev == 0:
+                trade_id += 1
+                trade_entry_step = t
+                trade_entry_price = price_exec
+                trade_entry_notional = abs(fill * price_exec)
+                trade_realized_pnl = 0.0
+                avg_entry_price = price_exec
+            elif pos == 0:
+                closed_qty = abs(pos_prev)
+                if pos_prev > 0:
+                    realized_pnl_step = (price_exec - avg_entry_price) * closed_qty
+                else:
+                    realized_pnl_step = (avg_entry_price - price_exec) * closed_qty
+                trade_realized_pnl += realized_pnl_step
+                trade_pnl = trade_realized_pnl
+                trade_duration = t - (trade_entry_step or t)
+                if trade_entry_notional > 0:
+                    trade_pnl_pct = trade_pnl / trade_entry_notional
+                trade_closed = True
+                trade_close_reason = "flat"
+                close_trade_id = trade_id
+                close_entry_step = trade_entry_step
+                close_entry_price = trade_entry_price
+                close_entry_notional = trade_entry_notional
+                trade_entry_step = None
+                trade_entry_price = 0.0
+                trade_entry_notional = 0.0
+                trade_realized_pnl = 0.0
+                avg_entry_price = 0.0
+            elif np.sign(pos_prev) == np.sign(pos):
+                if np.sign(fill) == np.sign(pos_prev):
+                    total_qty = abs(pos_prev) + abs(fill)
+                    if total_qty > 0:
+                        avg_entry_price = (
+                            avg_entry_price * abs(pos_prev) + price_exec * abs(fill)
+                        ) / total_qty
+                else:
+                    closed_qty = min(abs(fill), abs(pos_prev))
+                    if pos_prev > 0:
+                        realized_pnl_step = (price_exec - avg_entry_price) * closed_qty
+                    else:
+                        realized_pnl_step = (avg_entry_price - price_exec) * closed_qty
+                    trade_realized_pnl += realized_pnl_step
+            else:
+                closed_qty = abs(pos_prev)
+                if pos_prev > 0:
+                    realized_pnl_step = (price_exec - avg_entry_price) * closed_qty
+                else:
+                    realized_pnl_step = (avg_entry_price - price_exec) * closed_qty
+                trade_realized_pnl += realized_pnl_step
+                trade_pnl = trade_realized_pnl
+                trade_duration = t - (trade_entry_step or t)
+                if trade_entry_notional > 0:
+                    trade_pnl_pct = trade_pnl / trade_entry_notional
+                trade_closed = True
+                trade_close_reason = "flip"
+                close_trade_id = trade_id
+                close_entry_step = trade_entry_step
+                close_entry_price = trade_entry_price
+                close_entry_notional = trade_entry_notional
+                trade_id += 1
+                trade_entry_step = t
+                trade_entry_price = price_exec
+                trade_entry_notional = abs(pos * price_exec)
+                trade_realized_pnl = 0.0
+                avg_entry_price = price_exec
+
+        realized_pnl_total += realized_pnl_step
+
         # Proxy MDL and stress (plane-aware surprise)
-        abs_ret = abs(ret)
-        noise_floor = max(sigma_slow, 1e-9)
-        noise_threshold = mdl_noise_mult * noise_floor
-        if abs_ret > noise_threshold:
-            plane_k = int(np.floor(np.log(abs_ret / noise_threshold) / np.log(PLANE_BASE)))
-            plane_index = max(0, min(plane_k, PLANE_COUNT - 1))
-        else:
-            plane_index = -1
-            plane_k = 0
-        delta_plane = plane_k - plane_k_prev
         active_trit = 1.0 if plane_index >= 0 else 0.0
         active_trit_count += active_trit
         plane_hits = []
@@ -521,17 +704,28 @@ def run_trading_loop(
             1.0,
         )
         regret = (START_CASH - fees_accrued) - mean_ct
-        can_trade = int(not banned)
+        sigma_ref = (
+            (sigma_target or 0.0) * price[t] * max(abs(pos), 1.0)
+            if sigma_target
+            else max(price[t] * abs(pos), 1.0)
+        )
+        k_latent = (c_spend - c_spend_prev) / (sigma_ref + 1e-9)
+        capital_pressure = ternary_sign(k_latent, tau=K_LATENT_TAU)
         row = {
             "t": t,
             "ts": time_index[t] if time_index is not None and t < len(time_index) else np.nan,
             "price": price[t],
+            "price_exec": price_exec,
+            "price_change": price_change,
+            "price_ret": ret,
             "volume": volume[t] if t < len(volume) else np.nan,
             "pnl": pnl,
             "cash": cash,
             "cash_eff": cash_eff,
             "exec_eff": exec_eff,
             "cash_vel": cash_vel,
+            "edge_raw": edge_raw,
+            "edge_ema": edge_ema,
             "c_spend": c_spend,
             "goal_prob": goal_prob,
             "goal_align": goal_align,
@@ -553,23 +747,47 @@ def run_trading_loop(
             "plane_rate1": plane_rates[1] if PLANE_COUNT > 1 else 0.0,
             "plane_rate2": plane_rates[2] if PLANE_COUNT > 2 else 0.0,
             "plane_rate3": plane_rates[3] if PLANE_COUNT > 3 else 0.0,
-            "p_bad": p_bad[t] if t < len(p_bad) else np.nan,
+            "p_bad": p_bad_t,
             "bad_flag": int(bad_flag[t]) if t < len(bad_flag) else 0,
-            "ban": int(banned),
-            "can_trade": can_trade,
+            "ban": int(permission == -1),
+            "can_trade": int(permission == 1),
+            "direction": direction,
+            "edge_t": edge_t,
+            "permission": permission,
+            "capital_pressure": capital_pressure,
+            "risk_budget": risk_budget,
             "z_norm": abs(z),
             "z_vel": z_vel,
-            "hold": int(desired == 0),
+            "hold": int(action_t == 0),
             "entropy": 0.0,
             "regime": 0,
             "action": np.sign(fill) if fill != 0 else 0,
+            "action_signal": action_signal,
+            "action_t": action_t,
             "source": source,
+            "tape_id": tape_id if tape_id is not None else "",
             "pos": pos,
             "fill": fill,
+            "fill_units": fill,
+            "fill_value": fill * price_exec,
             "cap": cap,
             "equity": equity,
+            "avg_entry_price": avg_entry_price if avg_entry_price else np.nan,
+            "entry_price": entry_price,
+            "entry_step": trade_entry_step if trade_entry_step is not None else np.nan,
+            "trade_id": trade_id if trade_entry_step is not None else np.nan,
+            "trade_open": int(trade_entry_step is not None),
+            "trade_duration": trade_duration,
+            "trade_pnl": trade_pnl,
+            "trade_pnl_pct": trade_pnl_pct,
+            "realized_pnl_step": realized_pnl_step,
+            "realized_pnl_total": realized_pnl_total,
+            "unrealized_pnl": (price[t] - avg_entry_price) * pos if pos != 0 else 0.0,
+            "price_move_entry": price_move_entry,
             "prev_action": prev_action,
             "thesis_age": thesis_age,
+            "thesis_depth": thesis_depth,
+            "thesis_hold": int(thesis_hold),
             "state_age": state_age,
             "align_age": align_age,
         }
@@ -578,34 +796,70 @@ def run_trading_loop(
             pd.DataFrame([row]).to_csv(
                 log_path, mode="a", header=not log_path.exists(), index=False
             )
+        if trade_closed and trade_log_path:
+            trade_row = {
+                "t": t,
+                "ts": time_index[t] if time_index is not None and t < len(time_index) else np.nan,
+                "trade_id": close_trade_id,
+                "source": source,
+                "close_reason": trade_close_reason,
+                "entry_step": close_entry_step if close_entry_step is not None else np.nan,
+                "exit_step": t,
+                "entry_price": close_entry_price,
+                "exit_price": price_exec,
+                "trade_duration": trade_duration,
+                "trade_pnl": trade_pnl,
+                "trade_pnl_pct": trade_pnl_pct,
+                "price_move": price_exec - (close_entry_price or 0.0),
+                "price_move_pct": (
+                    (price_exec / close_entry_price - 1.0) if close_entry_price else np.nan
+                ),
+            }
+            pd.DataFrame([trade_row]).to_csv(
+                trade_log_path, mode="a", header=not trade_log_path.exists(), index=False
+            )
         if log_level in {"trades", "verbose"} and fill != 0:
             trade_throttle = progress_every if progress_every else 1
             if t % trade_throttle != 0 and t != total_steps:
                 pass
             else:
+                unrealized = (price[t] - avg_entry_price) * pos if pos != 0 else 0.0
                 print(
-                    f"[trade] t={t:6d} px={price[t]:.2f} fill={fill:.4f} pos={pos:.4f} "
-                    f"cap={cap:.4f} act={int(row['action'])} banned={int(banned)} "
+                    f"[{fmt_ts()}] [trade] t={t:6d} px={price[t]:.2f} fill={fill:.4f} pos={pos:.4f} "
+                    f"cap={cap:.4f} act={int(row['action'])} banned={int(permission == -1)} "
                     f"cash_eff={row['cash_eff']:.5f} exec_eff={row['exec_eff']:.5f} "
                     f"c_spend={row['c_spend']:.2f} goal_p={row['goal_prob']:.3f} "
                     f"mdl={row['mdl_rate']:.4f} stress={row['stress']:.4f} "
                     f"plane={row['plane_index']} can_trade={row['can_trade']} "
-                    f"regret={row['regret']:.2f}"
+                    f"regret={row['regret']:.2f} u_pnl={unrealized:.2f} "
+                    f"r_pnl={realized_pnl_step:.2f} entry={avg_entry_price:.2f}"
                 )
-        if log_level != "quiet" and progress_every and (t % progress_every == 0 or t == total_steps):
+        if log_level in {"trades", "verbose"} and trade_closed:
             print(
-                f"[{source}] t={t:6d}/{total_steps:6d} pnl={row['pnl']:.4f} pos={row['pos']:.4f} "
+                f"[{fmt_ts()}] [trade] close id={close_trade_id} reason={trade_close_reason} "
+                f"pnl={trade_pnl:.4f} pct={trade_pnl_pct:.4f} dur={trade_duration} "
+                f"entry={close_entry_price:.4f} exit={price_exec:.4f}"
+            )
+        if log_level in {"info", "verbose"} and progress_every and (t % progress_every == 0 or t == total_steps):
+            print(
+                f"[{fmt_ts()}] [{source}] t={t:6d}/{total_steps:6d} pnl={row['pnl']:.4f} pos={row['pos']:.4f} "
                 f"fill={row['fill']:.4f} act={int(row['action'])} p_bad={row['p_bad']:.3f} "
                 f"bad={row['bad_flag']} cash_eff={row['cash_eff']:.5f} exec_eff={row['exec_eff']:.5f} "
                 f"mdl_rate={row['mdl_rate']:.4f} stress={row['stress']:.4f} goal_prob={row['goal_prob']:.3f}"
             )
         z_prev = z
-        prev_action = desired
+        prev_action = action_t
+        prev_state = direction
         prev_cash = cash
         prev_pnl = pnl
         prev_goal_prob = goal_prob
         c_spend_prev = c_spend
         plane_k_prev = plane_k
+        if fill != 0:
+            trade_count += 1
+            if max_trades is not None and trade_count >= max_trades:
+                stop_reason = "max_trades"
+                break
         time.sleep(sleep_s)  # slow enough to watch in dashboard
 
     # print summary stats
@@ -618,7 +872,12 @@ def run_trading_loop(
         running_max = equity_curve.cummax()
         drawdown = (equity_curve - running_max).min()
         max_drawdown = float(drawdown)
-    print(f"Run complete: source={source}, steps={len(rows)}, trades={trades}, pnl={total_pnl:.4f}")
+    elapsed_s = time.time() - start_ts
+    reason = f", stop={stop_reason}" if stop_reason else ""
+    print(
+        f"[{fmt_ts()}] Run complete: source={source}, steps={len(rows)}, trades={trades}, "
+        f"pnl={total_pnl:.4f}, elapsed={elapsed_s:.2f}s{reason}"
+    )
 
     # Conditional returns to validate the bad-day classifier
     ret_all = ret_good = ret_bad = float("nan")
@@ -637,6 +896,8 @@ def run_trading_loop(
         "steps": len(rows),
         "trades": trades,
         "pnl": total_pnl,
+        "elapsed_s": elapsed_s,
+        "stop_reason": stop_reason,
         "hold_pct": hold_pct,
         "max_drawdown": max_drawdown,
         "p_bad_mean": float(np.mean(p_bad[: len(rows)])) if len(rows) else float("nan"),
@@ -653,6 +914,8 @@ def run_trading_loop(
 
 def main(
     max_steps=None,
+    max_trades=None,
+    max_seconds=None,
     sleep_s=0.0,
     risk_frac: float = DEFAULT_RISK_FRAC,
     contract_mult: float = CONTRACT_MULT,
@@ -663,6 +926,11 @@ def main(
     raw_root: str = "data/raw",
     log_prefix: str = "logs/trading_log",
     inter_run_sleep: float = 0.5,
+    log_combined: bool = False,
+    edge_gate: bool = False,
+    edge_decay: float = 0.9,
+    edge_alpha: float = EDGE_EMA_ALPHA,
+    thesis_depth_max: int = THESIS_DEPTH_MAX,
 ):
     source = "stooq"
     try:
@@ -671,6 +939,11 @@ def main(
             csv_paths = list_price_csvs(raw_root_path)
             if not csv_paths:
                 raise FileNotFoundError(f"No CSVs found under {raw_root_path}.")
+            combined_path = None
+            if log_combined:
+                combined_path = pathlib.Path(f"{log_prefix}_all.csv")
+                combined_path.parent.mkdir(parents=True, exist_ok=True)
+                combined_path.unlink(missing_ok=True)
             for idx, csv_path in enumerate(csv_paths, 1):
                 try:
                     price, volume, ts = load_prices(csv_path, return_time=True)
@@ -678,7 +951,12 @@ def main(
                     print(f"[skip] {csv_path} ({exc})")
                     continue
                 source = f"{csv_path.parent.name}:{csv_path.stem}"
-                log_path = pathlib.Path(f"{log_prefix}_{csv_path.stem}.csv")
+                if log_combined and combined_path is not None:
+                    log_path = combined_path
+                    trade_log_path = pathlib.Path(f"{log_prefix}_trades_all.csv")
+                else:
+                    log_path = pathlib.Path(f"{log_prefix}_{csv_path.stem}.csv")
+                    trade_log_path = pathlib.Path(f"{log_prefix}_trades_{csv_path.stem}.csv")
                 print(f"[run {idx}/{len(csv_paths)}] {csv_path} -> {log_path}")
                 run_trading_loop(
                     price=price,
@@ -686,13 +964,22 @@ def main(
                     source=source,
                     time_index=ts,
                     max_steps=max_steps,
+                    max_trades=max_trades,
+                    max_seconds=max_seconds,
                     sleep_s=sleep_s,
                     risk_frac=risk_frac,
                     contract_mult=contract_mult,
                     sigma_target=sigma_target,
                     log_path=log_path,
+                    trade_log_path=trade_log_path,
                     progress_every=progress_every,
                     log_level=log_level,
+                    log_append=bool(log_combined),
+                    tape_id=source if log_combined else None,
+                    edge_gate=edge_gate,
+                    edge_decay=edge_decay,
+                    edge_ema_alpha=edge_alpha,
+                    thesis_depth_max=thesis_depth_max,
                 )
                 if inter_run_sleep > 0:
                     time.sleep(inter_run_sleep)
@@ -722,13 +1009,20 @@ def main(
         source=source,
         time_index=ts,
         max_steps=max_steps,
+        max_trades=max_trades,
+        max_seconds=max_seconds,
         sleep_s=sleep_s,
         risk_frac=risk_frac,
         contract_mult=contract_mult,
         sigma_target=sigma_target,
         log_path=LOG,
+        trade_log_path=pathlib.Path("logs/trade_log.csv"),
         progress_every=progress_every,
         log_level=log_level,
+        edge_gate=edge_gate,
+        edge_decay=edge_decay,
+        edge_ema_alpha=edge_alpha,
+        thesis_depth_max=thesis_depth_max,
     )
 
 
@@ -737,6 +1031,8 @@ if __name__ == "__main__":
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--max-steps", type=int, default=None, help="Limit steps (debug).")
+    ap.add_argument("--max-trades", type=int, default=None, help="Stop after N trades.")
+    ap.add_argument("--max-seconds", type=float, default=None, help="Stop after N seconds per asset.")
     ap.add_argument("--sleep", type=float, default=0.0, help="Sleep per step.")
     ap.add_argument("--risk-frac", type=float, default=DEFAULT_RISK_FRAC, help="Risk fraction.")
     ap.add_argument("--sigma-target", type=float, default=SIGMA_TARGET, help="Target vol.")
@@ -751,15 +1047,26 @@ if __name__ == "__main__":
     )
     ap.add_argument("--inter-run-sleep", type=float, default=0.5, help="Pause between runs when --all set.")
     ap.add_argument(
+        "--log-combined",
+        action="store_true",
+        help="Write all tapes into a single log file when --all set.",
+    )
+    ap.add_argument(
         "--log-level",
         type=str,
         default="info",
         choices=["quiet", "info", "trades", "verbose"],
         help="Output verbosity.",
     )
+    ap.add_argument("--edge-gate", action="store_true", help="Enable edge-based cap decay gate.")
+    ap.add_argument("--edge-decay", type=float, default=0.9, help="Cap multiplier when edge gate triggers.")
+    ap.add_argument("--edge-alpha", type=float, default=EDGE_EMA_ALPHA, help="EMA alpha for edge metric.")
+    ap.add_argument("--thesis-depth-max", type=int, default=THESIS_DEPTH_MAX, help="Max thesis memory depth.")
     args = ap.parse_args()
     main(
         max_steps=args.max_steps,
+        max_trades=args.max_trades,
+        max_seconds=args.max_seconds,
         sleep_s=args.sleep,
         risk_frac=args.risk_frac,
         sigma_target=args.sigma_target,
@@ -769,4 +1076,9 @@ if __name__ == "__main__":
         raw_root=args.raw_root,
         log_prefix=args.log_prefix,
         inter_run_sleep=args.inter_run_sleep,
+        log_combined=args.log_combined,
+        edge_gate=args.edge_gate,
+        edge_decay=args.edge_decay,
+        edge_alpha=args.edge_alpha,
+        thesis_depth_max=args.thesis_depth_max,
     )

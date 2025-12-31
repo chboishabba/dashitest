@@ -122,6 +122,7 @@ Run from this directory with `PYTHONPATH=.` to avoid import issues.
 - `data/raw/stooq/`: Stooq CSVs, BTC intraday, and any downloaded market data.
 - `data/run_history.csv`: Append-only run summaries from `run_trader`.
 - `logs/trading_log.csv`: Primary log for dashboards and analysis scripts.
+- `logs/trading_log_trades_*.csv`: Per-trade logs (one row per closed trade).
 - `logs/news_events/`: News slices fetched by `emit_news_windows` and `run_all_two_pointO`.
 
 ## Notes
@@ -130,4 +131,23 @@ Run from this directory with `PYTHONPATH=.` to avoid import issues.
 - `data_downloader.py`, `contextual_news.py`, `news_slice.py`, and `emit_news_windows.py` make network calls.
 - `training_dashboard_pg.py` requires `pyqtgraph` + Qt bindings; `data_downloader.py` optionally uses `yfinance`.
 - `run_trader.py` supports verbosity controls via `--log-level {quiet,info,trades,verbose}` and `--progress-every N`.
+- `run_trader.py` supports multi-tape logging with `--all` and `--log-combined` (writes `logs/trading_log_all.csv`).
+- `run_trader.py` supports `--max-steps`, `--max-trades`, and `--max-seconds` for bounded runs.
+- `run_trader.py` logs edge metrics (`edge_raw`, `edge_ema`); optional cap gate with `--edge-gate --edge-decay --edge-alpha`.
+- `run_trader.py` uses a bounded thesis memory counter (`--thesis-depth-max`) to delay soft-veto exits.
 - `training_dashboard_pg.py` can render rolling histograms with `--hist --hist-window N --hist-bins M`.
+
+## Trading logs (fields)
+
+`run_trader.py` now logs both per-step and per-trade fields for efficacy tracking.
+
+Per-step log (see `logs/trading_log*.csv`) includes:
+- Execution and movement: `price_exec`, `price_change`, `price_ret`, `fill_units`, `fill_value`
+- Position state: `avg_entry_price`, `entry_price`, `entry_step`, `trade_id`, `trade_open`, `price_move_entry`
+- PnL detail: `realized_pnl_step`, `realized_pnl_total`, `unrealized_pnl`, `trade_pnl`, `trade_pnl_pct`, `trade_duration`
+- Ternary control: `direction`, `edge_t`, `permission`, `capital_pressure`, `risk_budget`, `action_t`
+- Thesis memory: `action_signal`, `thesis_depth`, `thesis_hold`
+
+Per-trade log (see `logs/trading_log_trades_*.csv`) includes:
+- `trade_id`, `entry_step`, `exit_step`, `entry_price`, `exit_price`, `trade_duration`
+- `trade_pnl`, `trade_pnl_pct`, `price_move`, `price_move_pct`, `close_reason`

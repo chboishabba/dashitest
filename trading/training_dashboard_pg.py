@@ -42,6 +42,9 @@ def synthetic_log(n=1000):
     bad_flag = (p_bad > 0.7).astype(int)
     action = np.random.choice([-1, 0, 1], size=n, p=[0.1, 0.7, 0.2])
     hold = (action == 0).astype(int)
+    thesis_depth = np.random.randint(0, 4, size=n)
+    action_signal = np.random.choice([-1, 0, 1], size=n)
+    thesis_hold = (np.random.rand(n) > 0.85).astype(int)
     volume = np.random.randint(1e5, 2e5, size=n)
     return pd.DataFrame(
         {
@@ -52,6 +55,9 @@ def synthetic_log(n=1000):
             "bad_flag": bad_flag,
             "action": action,
             "hold": hold,
+            "thesis_depth": thesis_depth,
+            "action_signal": action_signal,
+            "thesis_hold": thesis_hold,
             "volume": volume,
             "ts": ts,
         }
@@ -234,18 +240,28 @@ class Dashboard(QtWidgets.QMainWindow):
         self.stress_curve = self.p_goal.plot(pen=pg.mkPen("r", width=1))
         self.goal_prob_curve = self.p_goal.plot(pen=pg.mkPen("g", width=1))
 
+        # Thesis memory pane
+        self.p_thesis = self.win.addPlot(row=6, col=0, title="Thesis memory (depth/signal/hold)")
+        self.thesis_depth_curve = self.p_thesis.plot(pen=pg.mkPen("w", width=1))
+        self.thesis_signal_curve = self.p_thesis.plot(pen=pg.mkPen((0, 200, 255), width=1))
+        self.thesis_hold_curve = self.p_thesis.plot(pen=pg.mkPen((200, 200, 0), width=1))
+
         # Plane rates pane
         plane_title = "Plane rates (0..3)"
         if self.plane_scale == "log10":
             plane_title = "Plane rates log10 (0..3)"
-        self.p_planes = self.win.addPlot(row=6, col=0, title=plane_title)
+        self.p_planes = self.win.addPlot(row=7, col=0, title=plane_title)
         self.plane0_curve = self.p_planes.plot(pen=pg.mkPen("w", width=1))
         self.plane1_curve = self.p_planes.plot(pen=pg.mkPen((255, 180, 0), width=1))
         self.plane2_curve = self.p_planes.plot(pen=pg.mkPen((0, 200, 255), width=1))
         self.plane3_curve = self.p_planes.plot(pen=pg.mkPen((200, 80, 255), width=1))
+        dash_style = getattr(QtCore.Qt, "DashLine", QtCore.Qt.PenStyle.DashLine)
+        self.delta_plane_curve = self.p_planes.plot(
+            pen=pg.mkPen((180, 180, 180), width=1, style=dash_style)
+        )
 
         # Posture pane (ACT/HOLD/BAN shading)
-        posture_row = 8 if self.hist else 7
+        posture_row = 9 if self.hist else 8
         self.p_posture = self.win.addPlot(row=posture_row, col=0, title="Posture (BAN/HOLD/ACT)")
         self.p_posture.setYRange(-1.5, 1.5)
         self.p_posture.setMouseEnabled(y=False)
@@ -257,7 +273,7 @@ class Dashboard(QtWidgets.QMainWindow):
         self.hist_cash = None
         self.hist_exec = None
         if self.hist:
-            self.p_hist = self.win.addPlot(row=7, col=0, title="Histograms (cash_eff bps / exec drag bps)")
+            self.p_hist = self.win.addPlot(row=8, col=0, title="Histograms (cash_eff bps / exec drag bps)")
             self.hist_cash = pg.BarGraphItem(x=[], height=[], width=0.9, brush=pg.mkBrush(200, 200, 200, 120))
             self.hist_exec = pg.BarGraphItem(x=[], height=[], width=0.9, brush=pg.mkBrush(80, 200, 255, 120))
             self.p_hist.addItem(self.hist_cash)
@@ -398,10 +414,14 @@ class Dashboard(QtWidgets.QMainWindow):
         mdl_rate = log["mdl_rate"] if "mdl_rate" in log else None
         stress = log["stress"] if "stress" in log else None
         goal_prob = log["goal_prob"] if "goal_prob" in log else None
+        thesis_depth = log["thesis_depth"] if "thesis_depth" in log else None
+        action_signal = log["action_signal"] if "action_signal" in log else None
+        thesis_hold = log["thesis_hold"] if "thesis_hold" in log else None
         plane_rate0 = log["plane_rate0"] if "plane_rate0" in log else None
         plane_rate1 = log["plane_rate1"] if "plane_rate1" in log else None
         plane_rate2 = log["plane_rate2"] if "plane_rate2" in log else None
         plane_rate3 = log["plane_rate3"] if "plane_rate3" in log else None
+        delta_plane = log["delta_plane"] if "delta_plane" in log else None
         hold_roll = rolling_hold(log, window=200)
         posture = None
         if "ban" in log or "hold" in log or "action" in log:
@@ -533,6 +553,25 @@ class Dashboard(QtWidgets.QMainWindow):
         elif should_debug:
             print("[debug] mdl/goal columns missing; goal pane empty.")
 
+        if thesis_depth is not None or action_signal is not None or thesis_hold is not None:
+            if thesis_depth is not None:
+                self.thesis_depth_curve.setData(x_plot, thesis_depth)
+            if action_signal is not None:
+                self.thesis_signal_curve.setData(x_plot, action_signal)
+            if thesis_hold is not None:
+                self.thesis_hold_curve.setData(x_plot, thesis_hold)
+            depth_series = []
+            if thesis_depth is not None:
+                depth_series.append(np.array(thesis_depth, dtype=float))
+            if depth_series:
+                dmin = min(-1.5, float(np.nanmin(depth_series[0])))
+                dmax = float(np.nanmax(depth_series[0])) if depth_series else 1.0
+                self.p_thesis.setYRange(dmin, max(1.5, dmax + 0.5), padding=0.05)
+            else:
+                self.p_thesis.setYRange(-1.5, 2.0, padding=0.05)
+        elif should_debug:
+            print("[debug] thesis columns missing; thesis pane empty.")
+
         if plane_rate0 is not None or plane_rate1 is not None or plane_rate2 is not None or plane_rate3 is not None:
             eps = 1e-9
             if self.plane_norm_window and self.plane_norm_window > 1:
@@ -572,7 +611,12 @@ class Dashboard(QtWidgets.QMainWindow):
                 self.plane2_curve.setData(x_plot, plane_rate2)
             if plane_rate3 is not None:
                 self.plane3_curve.setData(x_plot, plane_rate3)
+            if delta_plane is not None:
+                delta_arr = np.clip(np.array(delta_plane, dtype=float), -3.0, 3.0)
+                self.delta_plane_curve.setData(x_plot, delta_arr)
             plane_series = [s for s in (plane_rate0, plane_rate1, plane_rate2, plane_rate3) if s is not None]
+            if delta_plane is not None:
+                plane_series.append(delta_arr)
             if plane_series:
                 plane_all = pd.concat([pd.Series(s) for s in plane_series]).to_numpy()
                 pmin = float(np.nanmin(plane_all))

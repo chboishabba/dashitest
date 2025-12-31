@@ -56,6 +56,9 @@ def synthetic_log(n=200):
     entropy = np.random.uniform(0, 1, size=n)
     regime = np.random.randint(0, 3, size=n)
     action = np.random.choice([-1, 0, 1], size=n)
+    thesis_depth = np.random.randint(0, 4, size=n)
+    action_signal = np.random.choice([-1, 0, 1], size=n)
+    thesis_hold = (np.random.rand(n) > 0.8).astype(int)
     return pd.DataFrame(
         {
             "t": t,
@@ -67,6 +70,9 @@ def synthetic_log(n=200):
             "entropy": entropy,
             "regime": regime,
             "action": action,
+            "thesis_depth": thesis_depth,
+            "action_signal": action_signal,
+            "thesis_hold": thesis_hold,
         }
     )
 
@@ -132,8 +138,11 @@ def draw(log: pd.DataFrame, pr_curve: pd.DataFrame = None):
     centers, rates_acc, rates_unacc = engagement_vs_actionability(log)
     has_engagement = centers is not None and (rates_acc is not None or rates_unacc is not None)
     has_mdl = any(c in log for c in ("mdl_rate", "stress", "goal_prob"))
+    has_thesis = any(c in log for c in ("thesis_depth", "action_signal", "thesis_hold"))
     rows = 3
     if has_mdl:
+        rows += 1
+    if has_thesis:
         rows += 1
     if pr_curve is not None:
         rows += 1
@@ -178,6 +187,20 @@ def draw(log: pd.DataFrame, pr_curve: pd.DataFrame = None):
         if "goal_prob" in log:
             plt.plot(t, log["goal_prob"], label="goal_prob")
         plt.ylim(0, 1.05)
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        next_row += 1
+
+    if has_thesis:
+        plt.subplot(rows, 1, next_row)
+        if "thesis_depth" in log:
+            plt.plot(t, log["thesis_depth"], label="thesis_depth")
+        if "action_signal" in log:
+            plt.plot(t, log["action_signal"], label="action_signal")
+        if "thesis_hold" in log:
+            plt.plot(t, log["thesis_hold"], label="thesis_hold")
+        depth_max = float(log["thesis_depth"].max()) if "thesis_depth" in log else 1.0
+        plt.ylim(-1.5, max(1.5, depth_max + 0.5))
         plt.legend()
         plt.grid(True, alpha=0.3)
         next_row += 1
