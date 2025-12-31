@@ -136,6 +136,7 @@ Run from this directory with `PYTHONPATH=.` to avoid import issues.
 - `run_trader.py` logs edge metrics (`edge_raw`, `edge_ema`); optional cap gate with `--edge-gate --edge-decay --edge-alpha`.
 - `run_trader.py` uses a bounded thesis memory counter (`--thesis-depth-max`) to delay soft-veto exits.
 - `run_trader.py` exposes goal/MDL tuning (`--goal-cash-x --goal-eps --est-tax-rate --mdl-noise-mult --mdl-switch-penalty --mdl-trade-penalty`).
+- `run_trader.py` supports thesis memory (`--thesis-memory`) with per-step logging of thesis state/evidence, position persistence on neutral signals, and optional benchmark-regret reward fields.
 - `training_dashboard_pg.py` can render rolling histograms with `--hist --hist-window N --hist-bins M`.
 - `training_dashboard_pg.py` expects per-step logs (e.g., `logs/trading_log_*.csv` with a `price` column); trade logs (`logs/trading_log_trades_*.csv`) are not supported.
 
@@ -171,6 +172,9 @@ Per-step log (see `logs/trading_log*.csv`) includes:
 - PnL detail: `realized_pnl_step`, `realized_pnl_total`, `unrealized_pnl`, `trade_pnl`, `trade_pnl_pct`, `trade_duration`
 - Ternary control: `direction`, `edge_t`, `permission`, `capital_pressure`, `risk_budget`, `action_t`
 - Thesis memory: `action_signal`, `thesis_depth`, `thesis_hold`
+- Thesis memory (FSM): `thesis_d`, `thesis_s`, `thesis_a`, `thesis_c`, `thesis_v`, `thesis_alpha`, `thesis_beta`, `thesis_rho`, `thesis_ds`, `thesis_sum`, `thesis_event`, `thesis_reason`, `thesis_override`
+- Belief state: `belief_state`, `belief_dir`, `belief_unknown`
+- Benchmark-regret reward: `r_step`, `tc_step`, `benchmark_x`, `reward_regret`
 - Action persistence: `action_run_length`, `time_since_last_switch`
 - Shadow thesis: `shadow_delta_mdl`, `shadow_would_promote`, `shadow_is_tie`, `shadow_reject`
 - Plane diagnostics: `plane_abs`, `plane_sign`, `plane_sign_flips_W`, `plane_would_veto`
@@ -200,6 +204,15 @@ Geometry plots (no controller changes, see `scripts/plot_decision_geometry.py`):
 - Decision heatmaps: `plane_abs × stress → {promotion_rate, action_rate, mean_pnl}`
 - Time-series overlay: price + `plane_rate` + `plane_abs` with promote/action markers
 - Optional ternary simplex: normalize `p_bad`, `plane_abs`, `stress` to sum to 1
+- Use `--simplex-by-thesis` to emit separate simplex plots by `(thesis_d, thesis_s)`
+
+## Planned controller extensions (not implemented)
+
+These are design targets only; log the inputs first and validate geometry before changing behavior.
+
+- Add an orthogonal volatility regime feature from OHLC (realized vol + ternary regime flag).
+- Add a minimal thesis-memory state machine (direction/strength/age/cooldown/invalidation).
+- Add a benchmark-regret reward option vs a constant-exposure baseline (optionally risk-adjusted by realized vol).
 - Use fixed quantile bins (q05..q95) with under/overflow bins and suppress bins with < 30 samples
 - If no signed `plane_rate` is logged, use `delta_plane` as the signed proxy and `plane_abs = abs(delta_plane)`
 - If quantile edges collapse (identical values), fall back to linear bins over finite min/max

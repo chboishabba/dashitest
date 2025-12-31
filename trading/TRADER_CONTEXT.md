@@ -103930,3 +103930,1280 @@ If you want, next we can:
 * or formally redefine the reward so flat is no longer dominant
 
 Just tell me which path you want to walk.
+
+
+Below is a **minimal, implementable** “thesis memory” state machine that stays faithful to the *ternary machine* idea, plus a **formal reward rewrite** that makes “flat” stop being the default winner (by turning the whole problem into **regret minimisation vs a benchmark**), and then the **single best orthogonal feature** to add next.
+
+---
+
+# 1) Minimal thesis-memory state machine (ternary-first)
+
+## 1.1 State
+
+Let trits be (T={-1,0,+1}).
+
+At each step (t), keep:
+
+* **Thesis direction**: (d_t \in T)
+  (d_t=0) means no active thesis; (+1) thesis-long; (-1) thesis-short.
+
+* **Thesis strength**: (s_t \in {0,1,2})
+  (0 = none, 1 = weak, 2 = strong). Minimal “2-bit” memory without going continuous.
+
+* **Thesis age**: (a_t \in \mathbb{N})
+
+* **Cooldown**: (c_t \in \mathbb{N})
+  prevents immediate re-entry after invalidation.
+
+* **Invalidation accumulator**: (v_t \in {0,1,2})
+  counts “evidence against thesis” inside a window.
+
+That’s it. No new signals required.
+
+## 1.2 Inputs you already have (or are logging)
+
+At each (t), assume these are available:
+
+* ( \text{plane_sign}_t \in T)
+* ( \text{plane_sign_flips_W}_t \in \mathbb{N})
+* ( \text{plane_abs}_t \ge 0)
+* ( \text{stress}_t \ge 0)
+* ( p_bad_t \in [0,1])
+* “shadow would promote” flag: ( \text{shadow_would_promote}_t \in {0,1})
+* “would veto” flag (prospective): ( \text{plane_would_veto}_t \in {0,1})
+
+## 1.3 Ternary evidence trits
+
+Define three trits from continuous diagnostics:
+
+### (A) Alignment trit
+
+[
+\alpha_t =
+\begin{cases}
++1 & \text{if } \text{plane_sign}_t \neq 0 \text{ and consistent with desired direction}\
+0 & \text{if } \text{plane_sign}_t = 0\
+-1 & \text{if } \text{plane_sign}_t \text{ opposes desired direction}
+\end{cases}
+]
+
+For “desired direction”, use:
+
+* if no thesis: proposed (d^\star_t := \text{plane_sign}_t) (or sign of your signed proxy)
+* if thesis exists: desired direction is (d_t)
+
+### (B) Stability trit
+
+[
+\beta_t=
+\begin{cases}
+-1 & \text{if } \text{plane_sign_flips_W}_t > 1 \ (\text{or } \text{plane_would_veto}_t=1)\
+0 & \text{if } \text{plane_sign_flips_W}_t = 1\
++1 & \text{if } \text{plane_sign_flips_W}_t = 0
+\end{cases}
+]
+
+### (C) Risk trit
+
+Use any monotone map; simplest:
+[
+\rho_t =
+\begin{cases}
+-1 & \text{if } p_bad_t \text{ high or } \text{stress}_t \text{ high}\
+0 & \text{if mid}\
++1 & \text{if low}
+\end{cases}
+]
+
+(You already have good intuition for the cutpoints; keep them stable and logged.)
+
+## 1.4 Thesis entry / reinforce / decay / exit rules
+
+### Entry rule (minimal)
+
+Enter thesis only when *shadow* says “this is promotable” **and** stability isn’t yelling:
+
+If (d_t=0) and (c_t=0) and (\text{shadow_would_promote}_t=1) and (\beta_t \ge 0) and (\rho_t \ge 0):
+
+* set (d_{t+1} := d^\star_t) (typically (\text{plane_sign}_t))
+* set (s_{t+1} := 1)
+* set (a_{t+1} := 0)
+* set (v_{t+1} := 0)
+
+### Reinforcement / decay (ternary update)
+
+If (d_t \neq 0), update strength by a single signed trit:
+
+Define:
+[
+\Delta s_t := \mathrm{clip}*{{-1,0,+1}}\big( \alpha_t + \beta_t + \rho_t \big)
+]
+Then:
+[
+s*{t+1} := \mathrm{clip}*{[0,2]}(s_t + \Delta s_t)
+]
+And increment age (a*{t+1}=a_t+1).
+
+Interpretation:
+
+* if alignment+stability+risk all good → thesis hardens
+* if they turn bad → thesis fades quickly
+
+### Invalidation accumulator
+
+Also:
+
+* if (\alpha_t=-1) or (\beta_t=-1) or (\rho_t=-1), then (v_{t+1}= \min(2, v_t+1))
+* else (v_{t+1}=\max(0, v_t-1))
+
+### Exit rule (minimal)
+
+Exit thesis if *any*:
+
+1. **Strength hits zero**: (s_{t+1}=0)
+2. **Hard invalidation**: (v_{t+1}=2)
+3. **Timeout**: (a_t \ge A_{\max}) (cheap “don’t marry the trade”)
+
+When exiting:
+
+* set (d_{t+1}=0)
+* set cooldown (c_{t+1}=C) (small, like a few windows)
+* reason string: `thesis_decay` / `thesis_invalidated` / `thesis_timeout`
+
+Cooldown update:
+
+* if (c_t>0): (c_{t+1}=c_t-1)
+
+## 1.5 How thesis interacts with action (minimal)
+
+This is the whole point: **thesis is temporary commitment** that sits between HOLD and permanent model splits.
+
+When (d_t \neq 0):
+
+* bias action selection toward (d_t)
+* AND forbid immediate flip-flop unless invalidated
+
+Concrete minimal rule:
+
+* If thesis active and stability is OK ((\beta_t \ge 0)) and risk isn’t bad ((\rho_t \ge 0)): **do not close to flat** unless an explicit risk stop triggers.
+* If thesis active and (\beta_t=-1) or (\rho_t=-1): allow flatten with reason `thesis_risk` or `thesis_unstable`.
+
+This alone will lengthen runs and reduce churn *without inventing new signals*.
+
+---
+
+# 2) Redefine reward so “flat” stops dominating
+
+Right now, “flat” wins because your effective objective is “don’t be wrong” + MDL penalties.
+
+To break that, you need a reward that makes inaction *measurably costly* **when the market moved** — i.e. switch from absolute PnL to **regret vs a benchmark**.
+
+## 2.1 Benchmark-regret reward (cleanest)
+
+Let:
+
+* price (P_t)
+* your position (x_t \in {-1,0,+1}) (or continuous size if you already have it)
+* one-step asset return (r_t := \log(P_{t+1}/P_t))
+* transaction/turnover cost (k \ge 0), paid on position change: (\mathrm{tc}*t := k,|x*{t+1}-x_t|)
+
+Pick a benchmark exposure (\bar{x}) (e.g. (\bar{x}=+1) for buy-and-hold, or (\bar{x}=0.5) for “always partly in”).
+
+Define **regret reward**:
+[
+R_t := (x_t - \bar{x}), r_t ;-; \mathrm{tc}_t
+]
+
+Interpretation:
+
+* If market goes up and you’re flat while benchmark is long: (x_t-\bar{x}<0) ⇒ you get negative reward.
+* Flat is no longer neutral; it’s “under-exposed relative to benchmark”.
+
+This *guarantees* flat cannot be globally dominant in drifting assets.
+
+### Why this matches your MDL worldview
+
+It doesn’t say “trade more”.
+It says: **pay rent for model simplicity** in the form of underperformance vs a simple baseline.
+
+You’re making “flat” compete against a trivial model: *constant exposure*.
+
+## 2.2 Add risk control without undoing the effect
+
+If you want risk-adjusted regret:
+
+Let (\hat{\sigma}_t) be a realized-vol estimate (we’ll add it as the orthogonal feature below), and add exposure penalty:
+[
+R_t := (x_t - \bar{x}), r_t ;-; \lambda,|x_t|,\hat{\sigma}*t ;-; k,|x*{t+1}-x_t|
+]
+
+This still punishes missing trends, but stops the system from going “always long forever”.
+
+## 2.3 Where thesis fits this reward
+
+Thesis memory is what prevents the regret objective from devolving into “chase every tick”:
+
+* regret pushes you to participate
+* thesis keeps you committed long enough to matter
+* stability/risk trits prevent participation in jitter
+
+---
+
+# 3) The single best orthogonal feature to add
+
+**Add a realized volatility regime feature from OHLC.**
+
+It’s the best “one feature” because:
+
+* It’s available in *every* dataset you’re already running (OHLC exists even when volume doesn’t).
+* It is genuinely orthogonal to your current geometry axes: **plane_abs** (curvature/turning) and **stress/p_bad** (controller confidence) don’t directly measure amplitude.
+* It gives you a principled way to answer: *“when is churn acceptable?”* and *“when should thesis decay faster?”*
+
+## 3.1 Minimal definition
+
+Use Parkinson range volatility (uses high/low; very cheap):
+
+[
+\hat{\sigma}^2_t := \frac{1}{4\ln 2}\left(\ln\frac{H_t}{L_t}\right)^2
+]
+Optionally EWMA smooth it:
+[
+\hat{\sigma}*t \leftarrow (1-\gamma)\hat{\sigma}*{t-1}+\gamma \sqrt{\hat{\sigma}^2_t}
+]
+
+Then convert to a ternary regime trit:
+[
+\text{vol_regime}*t \in T =
+\begin{cases}
+-1 & \hat{\sigma}*t < q*{33}\
+0 & q*{33} \le \hat{\sigma}*t \le q*{66}\
++1 & \hat{\sigma}*t > q*{66}
+\end{cases}
+]
+
+Log both:
+
+* continuous (\hat{\sigma}_t)
+* ternary `vol_regime_t`
+
+## 3.2 How it plugs into thesis + reward
+
+* Use `vol_regime_t` inside (\rho_t) (risk trit): high vol often increases (p_bad) and should accelerate invalidation/decay unless thesis is strong.
+* Use (\hat{\sigma}_t) in the reward penalty (-\lambda |x_t|\hat{\sigma}_t), which makes the system prefer exposure in calm regimes and avoid “benchmark regret at any price”.
+
+---
+
+# Practical sequencing (so this doesn’t explode)
+
+1. Implement thesis state + logging first (no new reward yet).
+2. Add (\hat{\sigma}_t) logging + `vol_regime_t` trit.
+3. Re-run geometry plots using heatmaps conditioned on `vol_regime_t` (you should see simplex “thicken”).
+4. Switch reward to benchmark-regret (start with (\bar{x}=+1), then tune toward (\bar{x}\in(0,1)) if too aggressive).
+
+If you want, I can write the exact transition table in “ternary machine” style (a literal state-transition matrix over ((d,s,v,\beta,\rho,\alpha)))—but the rules above are already minimal enough to code cleanly and to reason about with your existing diagnostics.
+
+
+Below is a **drop-in spec** you can paste into your repo as `docs/thesis_memory_spec.md` (or similar). It’s written so you can implement it without ambiguity, keep everything ternary-first, and get clean loggable reasons.
+
+---
+
+# Thesis Memory State Machine Spec (Ternary-First)
+
+## 0) Purpose
+
+“Thesis memory” is a **minimal, discrete** commitment layer between instantaneous gating and long-horizon policy learning.
+
+Goals:
+
+1. **Stop churn-to-flat** when the environment is stable and risk is acceptable.
+2. **Exit quickly** when thesis becomes invalidated or unstable.
+3. Stay fully **ternary** in decisions (direction and evidence), with only a tiny amount of discrete memory.
+
+Non-goals:
+
+* No new predictors required (except optional realized vol feature in v2).
+* Not a portfolio optimizer. It’s a **stateful governor**.
+
+---
+
+## 1) Definitions
+
+### 1.1 Ternary set
+
+* `T = {-1, 0, +1}`
+
+### 1.2 Core thesis state (persistent)
+
+At each time step `t`, the thesis memory holds:
+
+* `d_t ∈ T` : **thesis direction**
+
+  * `0 = no thesis`
+  * `+1 = thesis-long`
+  * `-1 = thesis-short`
+
+* `s_t ∈ {0,1,2}` : **thesis strength**
+
+  * `0 none, 1 weak, 2 strong`
+
+* `a_t ∈ ℕ` : **thesis age** (steps since entry)
+
+* `c_t ∈ ℕ` : **cooldown** (steps remaining before a new thesis can be entered)
+
+* `v_t ∈ {0,1,2}` : **invalidation accumulator** (evidence-against counter)
+
+**State tuple:** `M_t := (d_t, s_t, a_t, c_t, v_t)`
+
+### 1.3 Inputs required (per step)
+
+You already have these (or are logging them):
+
+* `plane_sign_t ∈ T`
+* `plane_sign_flips_W_t ∈ ℕ`
+* `plane_abs_t ≥ 0`
+* `stress_t ≥ 0`
+* `p_bad_t ∈ [0,1]`
+* `shadow_would_promote_t ∈ {0,1}`
+* `plane_would_veto_t ∈ {0,1}`
+
+### 1.4 Derived trits (per step)
+
+We define 3 evidence trits: **alignment**, **stability**, **risk**.
+
+#### 1.4.1 Proposed direction `d*_t`
+
+* If `d_t = 0`: `d*_t := plane_sign_t`
+* Else: `d*_t := d_t` (desired direction is the existing thesis)
+
+#### 1.4.2 Alignment trit `α_t ∈ T`
+
+Using `desired := d*_t`:
+
+* If `plane_sign_t = 0` → `α_t := 0`
+* Else if `plane_sign_t == desired` → `α_t := +1`
+* Else → `α_t := -1`
+
+#### 1.4.3 Stability trit `β_t ∈ T`
+
+* If `plane_would_veto_t = 1` OR `plane_sign_flips_W_t > 1` → `β_t := -1`
+* Else if `plane_sign_flips_W_t = 1` → `β_t := 0`
+* Else (`plane_sign_flips_W_t = 0`) → `β_t := +1`
+
+#### 1.4.4 Risk trit `ρ_t ∈ T`
+
+Define stable cutpoints (logged, constant per run):
+
+Let:
+
+* `p_bad_hi`, `p_bad_lo` with `0 ≤ p_bad_lo < p_bad_hi ≤ 1`
+* `stress_hi`, `stress_lo` with `0 ≤ stress_lo < stress_hi`
+
+Then:
+
+* If `p_bad_t ≥ p_bad_hi` OR `stress_t ≥ stress_hi` → `ρ_t := -1`
+* Else if `p_bad_t ≤ p_bad_lo` AND `stress_t ≤ stress_lo` → `ρ_t := +1`
+* Else → `ρ_t := 0`
+
+**Implementation note:** this is intentionally monotone and boring. Keep it stable.
+
+---
+
+## 2) Transition function
+
+The update is a single function:
+
+`(M_t, inputs_t) -> (M_{t+1}, events_t)`
+
+Where `events_t` is a structured log object.
+
+### 2.1 Cooldown update (always runs)
+
+* If `c_t > 0`: `c' := c_t - 1`
+* Else: `c' := 0`
+
+Use `c'` as the cooldown value for `M_{t+1}` unless overwritten by exit logic.
+
+### 2.2 Entry logic (only when no thesis)
+
+**Entry preconditions:**
+
+If all are true:
+
+* `d_t = 0`
+* `c_t = 0` (or equivalently `c' = 0`)
+* `shadow_would_promote_t = 1`
+* `β_t ≥ 0`
+* `ρ_t ≥ 0`
+* `d*_t != 0` (don’t enter a zero-direction thesis)
+
+**Then enter:**
+
+* `d_{t+1} := d*_t`
+* `s_{t+1} := 1`
+* `a_{t+1} := 0`
+* `v_{t+1} := 0`
+* `c_{t+1} := 0`
+
+Emit event:
+
+* `event = thesis_enter`
+* `reason = shadow_promote`
+* log: `d_enter, s_enter=1`
+
+If entry preconditions fail, remain flat thesis:
+
+* `d_{t+1} = 0`, `s_{t+1}=0`, `a_{t+1}=0`, `v_{t+1}=0`, `c_{t+1}=c'`
+
+---
+
+### 2.3 Update logic (only when thesis active)
+
+If `d_t != 0`:
+
+#### 2.3.1 Strength update via signed trit
+
+Compute:
+
+* `sum := α_t + β_t + ρ_t`  (sum in `{-3..+3}`)
+* `Δs_t := clip_T(sum)` where `clip_T(z)` is:
+
+  * `+1` if `z ≥ 1`
+  * `0` if `z = 0`
+  * `-1` if `z ≤ -1`
+
+Then:
+
+* `s_tmp := clip_{0..2}(s_t + Δs_t)`
+
+Where `clip_{0..2}` clamps into `{0,1,2}`.
+
+#### 2.3.2 Age update
+
+* `a_tmp := a_t + 1`
+
+#### 2.3.3 Invalidation accumulator update
+
+Let `bad := (α_t=-1) OR (β_t=-1) OR (ρ_t=-1)`.
+
+* If `bad`: `v_tmp := min(2, v_t + 1)`
+* Else: `v_tmp := max(0, v_t - 1)`
+
+---
+
+### 2.4 Exit logic (only when thesis active)
+
+Exit if **any** of:
+
+1. `s_tmp = 0`
+2. `v_tmp = 2`
+3. `a_tmp ≥ A_max` (constant per run)
+
+If exit triggers:
+
+* `d_{t+1} := 0`
+* `s_{t+1} := 0`
+* `a_{t+1} := 0`
+* `v_{t+1} := 0`
+* `c_{t+1} := C` (constant per run)
+
+Exit reason (pick first match in this precedence order):
+
+1. If `v_tmp = 2` → `thesis_invalidated`
+2. Else if `s_tmp = 0` → `thesis_decay`
+3. Else → `thesis_timeout`
+
+Emit event:
+
+* `event = thesis_exit`
+* `reason = ...`
+* include snapshot: `(d_t,s_t,a_t,v_t)` and `(α_t,β_t,ρ_t,Δs_t)`
+
+If no exit:
+
+* `d_{t+1} := d_t`
+* `s_{t+1} := s_tmp`
+* `a_{t+1} := a_tmp`
+* `v_{t+1} := v_tmp`
+* `c_{t+1} := c'`
+
+Optionally emit:
+
+* `event = thesis_update`
+* `reason = reinforce | decay | hold`
+
+  * `reinforce` if `Δs_t=+1`
+  * `decay` if `Δs_t=-1`
+  * `hold` if `Δs_t=0`
+
+---
+
+## 3) Action interaction spec
+
+This defines how thesis memory constrains your action selector.
+
+### 3.1 Terms
+
+Let your action chooser propose an action each step:
+
+* `proposed_action_t ∈ {SHORT, FLAT, LONG}` (or `{-1,0,+1}`)
+
+Let the final executed position be:
+
+* `x_{t+1} ∈ {-1,0,+1}`
+
+### 3.2 Minimal thesis constraint
+
+If thesis active (`d_t != 0`):
+
+* If `β_t ≥ 0` AND `ρ_t ≥ 0`:
+
+  * **Do not allow flattening** unless an explicit risk stop triggers.
+  * Concretely: if `proposed_action_t = FLAT`, override to `d_t` (keep thesis direction).
+  * Log `override = thesis_hold_bias`.
+
+* If `β_t = -1` OR `ρ_t = -1`:
+
+  * Flattening is allowed (thesis can de-risk).
+  * If `proposed_action_t = FLAT`, accept and log reason:
+
+    * `thesis_unstable` if `β_t=-1`
+    * `thesis_risk` if `ρ_t=-1`
+
+### 3.3 Flip-flop prevention
+
+If thesis active (`d_t != 0`), **forbid direct reversal** (e.g. `LONG -> SHORT`) unless thesis exits first.
+
+Concretely:
+
+* If `proposed_action_t = -d_t`:
+
+  * If exit will occur this step (per Section 2.4), allow reversal next step after exit.
+  * Else override to either `d_t` or `FLAT` depending on risk:
+
+    * if `ρ_t=-1` or `β_t=-1` → override to `FLAT` (de-risk)
+    * else override to `d_t` (hold thesis)
+  * Log `override = thesis_no_flipflop`
+
+This is the “don’t instantly negate yourself” rule.
+
+---
+
+## 4) Reward spec rewrite (benchmark regret)
+
+This is the formal replacement for “flat dominance”.
+
+### 4.1 Variables
+
+* Price `P_t`
+* One-step log return `r_t := log(P_{t+1}/P_t)`
+* Your position `x_t ∈ {-1,0,+1}`
+* Transaction cost coefficient `k ≥ 0`
+* Transaction cost paid on change:
+
+  * `tc_t := k * |x_{t+1} - x_t|`
+
+### 4.2 Benchmark exposure
+
+Choose a constant benchmark exposure `\bar{x} ∈ [0,1]` (start with `\bar{x}=+1` for drift assets).
+
+### 4.3 Reward
+
+Regret reward:
+[
+R_t := (x_t - \bar{x}), r_t ;-; tc_t
+]
+
+**Interpretation:** if the asset rises and you’re underexposed vs benchmark, you are penalized.
+
+### 4.4 Optional risk-adjusted regret (v2)
+
+When you add realized vol `\hat{\sigma}_t`:
+[
+R_t := (x_t - \bar{x}), r_t ;-; \lambda |x_t|\hat{\sigma}*t ;-; k|x*{t+1}-x_t|
+]
+
+---
+
+## 5) Logging requirements
+
+Every step log:
+
+### 5.1 Thesis state
+
+* `thesis_d, thesis_s, thesis_a, thesis_c, thesis_v`
+
+### 5.2 Evidence trits
+
+* `alpha, beta, rho`
+* `ds = Δs_t`
+* `sum = α+β+ρ`
+
+### 5.3 Events
+
+One of:
+
+* `thesis_enter`
+* `thesis_update`
+* `thesis_exit`
+* `thesis_none` (optional)
+
+With:
+
+* `event_reason`
+* optional `override_reason` if action overridden
+
+### 5.4 Reward components
+
+* `r_t`
+* `tc_t`
+* `benchmark_x`
+* `R_t`
+* (optional) `sigma_t`, `risk_penalty_t`
+
+This makes it debuggable and plot-friendly.
+
+---
+
+## 6) Parameters (constants per run)
+
+Required constants:
+
+* `W` : window used for `plane_sign_flips_W`
+* `A_max` : max thesis duration
+* `C` : cooldown duration
+* `p_bad_lo, p_bad_hi`
+* `stress_lo, stress_hi`
+* `k` : transaction cost coefficient
+* `benchmark_x` : `\bar{x}`
+
+Suggested starting points (not binding):
+
+* `A_max` = 50–300 steps (depends on your bar size)
+* `C` = 3–10 steps
+* `k` small but non-zero so churn is visible
+
+---
+
+## 7) Acceptance tests (you can unit test these)
+
+1. **Entry only on promote + nonnegative stability/risk**
+
+   * If `shadow_would_promote=0` → never enter.
+   * If `β=-1` or `ρ=-1` → never enter.
+
+2. **Invalidation exits fast**
+
+   * Two consecutive bad evidences should hit `v=2` and exit with `thesis_invalidated`.
+
+3. **Strength clips properly**
+
+   * `s` never outside `{0,1,2}`.
+
+4. **Cooldown blocks re-entry**
+
+   * After exit, `C` steps must pass before any new entry.
+
+5. **No flip-flop**
+
+   * With thesis active and no exit, you can’t go from `d` to `-d` in one step.
+
+6. **Reward penalizes flat in uptrend**
+
+   * If `benchmark_x=+1`, `r_t>0`, and `x_t=0`, then `(x_t-benchmark_x)r_t < 0`.
+
+---
+
+## 8) Implementation interface (recommended)
+
+### 8.1 Data structures
+
+* `ThesisState(d:int, s:int, a:int, c:int, v:int)`
+* `Inputs(plane_sign:int, flips:int, plane_abs:float, stress:float, p_bad:float, shadow_promote:int, would_veto:int)`
+* `Derived(alpha:int, beta:int, rho:int, ds:int, sum:int)`
+
+### 8.2 Pure function
+
+`step_thesis(state, inputs, params) -> (new_state, derived, event)`
+
+Then separately:
+
+`apply_thesis_constraints(new_state or old_state, derived, proposed_action, risk_stop_flag) -> (final_action, override_event)`
+
+Keep them separate so you can test logic without trading plumbing.
+
+---
+
+If you want, paste your current action-selection code signature (just the function header + what it returns), and I’ll map this spec into your exact `run_trader.py` wiring with **exact fields + reason strings** consistent with your existing logs (e.g. `reason=flat`, `reason=thesis_invalidated`, etc.).
+
+
+Yep — the run output you pasted is the tell: **the thesis layer is not actually preventing “close-to-flat each bar”**, because *every* close is still `reason=flat` and almost all `dur=1`.
+
+That means one of these is true (and in practice it’s often **(1) + (3)**):
+
+1. **Thesis never enters** (so constraints never apply)
+2. **Thesis enters but your trade logger still labels closes as `flat`** (reason plumbing bug)
+3. **Your execution loop is “round-tripping” each step** (open → close next step because “desired position” defaults back to 0)
+
+Here’s the concrete spec-level fix pack that stops this immediately.
+
+---
+
+## A) Make thesis constraints *authoritative* over the position target
+
+Right now you likely do something like:
+
+* compute `proposed_action` from gating/model
+* maybe call `apply_thesis_constraints()`
+* but later some other rule (MDL / edge-gate / “no signal”) overwrites target back to flat
+
+**Fix:** establish one single variable: `x_target` (next position). Thesis constraints must be the **last writer** to `x_target` unless a hard stop triggers.
+
+### Required ordering (non-negotiable)
+
+Per step:
+
+1. compute `proposed_x` from model/gates (may be -1/0/+1)
+2. compute thesis update: `(state_next, derived, thesis_event)`
+3. compute `x_target = apply_thesis_constraints(state_current, derived, proposed_x, risk_stop)`
+4. execute trade transition from `x_t` → `x_target`
+
+**Key detail:** `apply_thesis_constraints` should use **state_current (d_t,s_t,…)**, not `state_next`, otherwise you’ll allow flattening on the exact bar you strengthened or entered.
+
+If you use `state_next` you get this failure mode:
+
+* bar t: thesis enters (`d_{t+1} ≠ 0`) but constraints see `d_t=0` → allow flat → you immediately close.
+
+---
+
+## B) Stop “flat-by-default” from overwriting the target
+
+The dur=1 pattern screams: your base action chooser returns `0` most steps (or a later stage forces 0), so you’re constantly going long/short for one bar then reverting.
+
+**Fix:** add an explicit persistence rule *before* thesis even matters:
+
+> If `proposed_x` is “no opinion” (0), do not auto-flatten; default to **carry forward** `x_t` unless risk stop.
+
+This is minimal and makes your machine stable:
+
+```python
+if proposed_x == 0 and not risk_stop:
+    proposed_x = x_t
+```
+
+Then thesis can still override as intended, but you won’t churn just because “no signal”.
+
+If you want this to remain ternary-first: treat “0” from the model as **UNKNOWN**, not “close”.
+
+---
+
+## C) Make close reasons truthful (right now you’re blind)
+
+Even if thesis is working, your trade prints will still show `reason=flat` if your close reason is derived solely from the final position being 0.
+
+**Fix:** the reason string must come from the *decision source*.
+
+### Required precedence for close reason
+
+When closing or flipping:
+
+1. if hard risk stop: `risk_stop`
+2. else if thesis forced it: `thesis_risk` / `thesis_unstable` / `thesis_invalidated` / `thesis_timeout` / `thesis_decay`
+3. else if model chose flat: `flat`
+4. else: `flip` / `rebalance` / etc.
+
+In other words, you need `override_reason` (from `apply_thesis_constraints`) and/or `thesis_event.reason` to propagate into the trade-close log.
+
+**Immediate sanity check to add to logs:**
+Print (or CSV log) these *per step*:
+
+* `x_t, proposed_x, final_x`
+* `thesis_d, thesis_s, thesis_v, thesis_c`
+* `alpha,beta,rho`
+* `override_reason` (or empty)
+
+If thesis is doing anything, you’ll see non-empty overrides and `thesis_d != 0` persisting.
+
+---
+
+## D) The one-line acceptance test your output is currently failing
+
+You already have “no flatten when thesis stable & risk ok” in the spec.
+
+So add this invariant during sim:
+
+> If `d_t != 0` and `beta_t >= 0` and `rho_t >= 0` and not `risk_stop`, then `final_x != 0`.
+
+If that ever trips, print the whole step context.
+
+Your output suggests it is *constantly* tripping (or `d_t` is always 0).
+
+---
+
+## E) Why you’re still seeing only `reason=flat` after “matching spec”
+
+Because **trade logs are lagging indicators**: they show what the *execution engine* did, not what your thesis module computed. If the position target is overwritten back to 0 later, the thesis can be “implemented” and still have **zero causal power**.
+
+Your pasted run says the thesis layer currently has ~zero causal power.
+
+---
+
+## The minimal patch set (do these 3 and rerun)
+
+1. **Use `state_current` inside `apply_thesis_constraints`**, not `state_next`.
+2. Add **carry-forward**: if the model outputs 0, keep `x_t` unless risk stop.
+3. Propagate `override_reason` / thesis exit reasons into trade close logs so `reason=flat` is no longer a lie.
+
+After that, you should immediately see:
+
+* fewer `dur=1`
+* close reasons like `thesis_risk`, `thesis_invalidated`, etc.
+* long runs where thesis holds through “no signal” bars
+
+---
+
+If you paste just these two function bodies (or even just their signatures + key lines):
+
+* `step_thesis_memory(...)`
+* `apply_thesis_constraints(...)`
+
+…I’ll point out exactly where the overwrite/ordering bug is happening and give you the precise diff.
+
+
+Good — this is actually very diagnostic now. The plots + the code together tell a **very specific story**, and it’s not “the thesis logic is wrong” so much as **where it is wired into the dynamics**.
+
+I’m going to do three things:
+
+1. **Interpret the geometry you posted** (what it proves, not just what it looks like)
+2. **Pinpoint the two concrete bugs / mismatches in `run_trader.py`** that explain the behavior
+3. Give you a **minimal, surgical fix set** (no refactor, no philosophy) that will *immediately* change the simplex and action-rate heatmaps
+
+---
+
+## 1) What the geometry is actually saying (important)
+
+### 1.1 The simplex collapse is real — and expected *given the current wiring*
+
+Across all three runs:
+
+* Almost all mass lies on **one edge of the simplex**
+* That edge is effectively:
+
+  ```
+  plane_abs > 0
+  stress → small / monotone
+  p_bad → low
+  ```
+
+This is *not* a plotting bug.
+
+It means:
+
+> **Your controller almost never experiences a stable interior regime** where:
+>
+> * plane_abs ≈ 0 (no structural movement)
+> * stress is moderate
+> * p_bad is ambiguous
+
+In other words:
+**the market + your plane construction almost always looks “eventful”**, even when price is locally drifting.
+
+That has two consequences:
+
+1. `plane_sign_flips_W` is *almost always nonzero*
+2. `beta_t` is therefore almost never `+1`
+
+So your thesis FSM is *structurally biased* toward:
+
+* `beta ∈ {0,-1}`
+* frequent invalidation pressure
+* weak reinforcement
+
+That alone explains why thesis depth never grows.
+
+But that’s only half the problem.
+
+---
+
+## 2) The two *actual* implementation bugs (these matter more)
+
+### Bug #1 (critical): **You never carry forward when the model says “0”**
+
+This is the big one.
+
+### Where it happens
+
+Inside `run_trading_loop`, thesis branch:
+
+```python
+action_proposed = 0 if hard_veto else action_signal
+action_t, thesis_override = apply_thesis_constraints(
+    state.d, derived, action_proposed, hard_veto, event.exit_trigger
+)
+```
+
+But **if `state.d == 0`**, `apply_thesis_constraints` just returns:
+
+```python
+if thesis_d == 0:
+    return action_t, override
+```
+
+So if:
+
+* `action_signal == 0`
+* `thesis_d == 0`
+
+👉 `action_t = 0`
+👉 **You flatten immediately**, even if you were just in a position.
+
+There is **no persistence rule** here unless thesis is already active.
+
+This is why your trades are all `dur=1`.
+
+> Thesis can *only* prevent flattening **after it already exists** — but nothing prevents flattening on the bar *before* thesis gets a chance to accumulate.
+
+### Consequence in the plots
+
+* Action-rate heatmaps show near-zero action everywhere
+* Mean ΔPnL heatmaps are mostly grey
+* Promotion ≠ participation
+
+You are promoting ideas but **never letting them live**.
+
+---
+
+### Bug #2 (subtle but important): **Thesis is derived from `pos`, not from the FSM**
+
+This line:
+
+```python
+thesis = int(np.sign(pos))
+```
+
+This is passed into `ternary_controller(...)`.
+
+That means:
+
+* The *controller* believes “thesis” exists **only if position is non-zero**
+* But your **FSM thesis (`thesis_d`) is independent of `pos`**
+
+So you have two “theses”:
+
+| Thing                | Meaning        |
+| -------------------- | -------------- |
+| `thesis_d`           | FSM commitment |
+| `thesis` (sign(pos)) | Exposure state |
+
+They are **not the same**, and the controller never sees `thesis_d`.
+
+Result:
+
+* The controller happily outputs `0` even while FSM thesis exists
+* FSM then tries to override, but too late / too weakly
+* Net effect: oscillation around flat
+
+This mismatch is visible in the overlay plots: purple bands (promotions) do **not** correspond to sustained positions.
+
+---
+
+## 3) Minimal fix set (this will change the plots immediately)
+
+No redesign. Just three changes.
+
+---
+
+### Fix 1: **Add carry-forward when no thesis but position exists**
+
+Right after computing `action_proposed` and before constraints:
+
+```python
+# NEW: persistence when model is neutral
+if action_proposed == 0 and pos != 0 and not hard_veto:
+    action_proposed = int(np.sign(pos))
+```
+
+This one line does *exactly* what your original non-thesis `thesis_depth` logic used to do.
+
+Effect:
+
+* Trades stop auto-closing
+* Durations jump from 1 → O(10–100)
+* Action-rate heatmap fills in
+
+---
+
+### Fix 2: **Feed FSM thesis into the controller**
+
+Replace:
+
+```python
+thesis = int(np.sign(pos))
+```
+
+with:
+
+```python
+thesis = thesis_d
+```
+
+This aligns:
+
+* what the controller *thinks* you’re committed to
+* with what the FSM *actually* believes
+
+Effect:
+
+* `ternary_controller` stops emitting 0s immediately after promotion
+* Thesis reinforcement becomes possible
+* The simplex interior starts populating
+
+---
+
+### Fix 3: **Let low-flip regimes produce β = +1 occasionally**
+
+Right now:
+
+```python
+if inputs.plane_would_veto == 1 or inputs.plane_sign_flips_w > 1:
+    beta = -1
+elif inputs.plane_sign_flips_w == 1:
+    beta = 0
+else:
+    beta = 1
+```
+
+Given your plane construction, `plane_sign_flips_w == 0` is **rare**.
+
+Minimal relaxation (do *not* overthink this):
+
+```python
+elif inputs.plane_sign_flips_w <= 1:
+    beta = 1
+```
+
+That is: treat “≤1 flip in window” as stable.
+
+Effect:
+
+* Thesis strength can actually increase to `s=2`
+* Invalidation counter decays instead of ratcheting up
+* You’ll see clear reinforced bands in the overlay plot
+
+---
+
+## 4) What you should expect after these fixes
+
+### Geometry
+
+* Simplex stops collapsing to a single edge
+* You’ll see **thickened bands** in mid-stress / low plane_abs regions
+* Promotion-rate ≠ action-rate anymore (good!)
+
+### Trades
+
+* `dur=1` almost disappears
+* Close reasons diversify:
+
+  * `thesis_decay`
+  * `thesis_invalidated`
+  * `thesis_timeout`
+* Mean ΔPnL heatmap develops structure (not all grey)
+
+### Thesis logs
+
+You should start seeing sequences like:
+
+```
+thesis_enter
+thesis_update reinforce
+thesis_update hold
+thesis_update reinforce
+...
+thesis_exit thesis_decay
+```
+
+If you *don’t*, then we look at thresholds — but right now the system never even reaches that regime.
+
+---
+
+## 5) Key takeaway (important for your design intuition)
+
+Your math and FSM were **already correct**.
+
+The failure mode was:
+
+> **You removed the implicit “hold last position” assumption without replacing it everywhere.**
+
+A ternary machine **must** distinguish:
+
+* `0 = unknown / no new info`
+* from
+* `0 = actively flatten`
+
+Right now, your code treats them as the same unless a thesis is already active — which is too late.
+
+Once you fix that, the simplex plots will stop looking pathological and start looking *informative*.
+
+If you want, next we can:
+
+* condition the simplex on `thesis_s`
+* or formally separate `UNKNOWN` vs `FLAT` as a fourth symbol (without breaking ternary math)
+
+But first: apply the three fixes and re-run one BTC tape.
+
+
+Yep — do it in two moves:
+
+1. **Condition the simplex on `thesis_s` (and really on `(thesis_d, thesis_s)`),** so you stop mixing “no thesis / weak / strong” regimes in one cloud.
+2. **Split “UNKNOWN” from “FLAT” in the discrete logic,** so “do nothing because we don’t know” ≠ “do nothing because neutrality is the best action”.
+
+Below is a clean formal way to do both, plus a complete enumeration of the resulting logical states.
+
+---
+
+## 1) Condition the simplex on `thesis_s` (and `(thesis_d, thesis_s)`)
+
+Right now your thesis memory has:
+
+* `thesis_d ∈ {-1,0,+1}`  (direction; `0` means “no active thesis”)
+* `thesis_s ∈ {0,1,2}`    (strength; decays/reinforces via `ds`)
+
+From your `step_thesis_memory`, when `d==0` you keep `s=0`; when `d≠0`, `s` lives in `{1,2}` and exiting happens when `s_tmp==0` or `v==2` or timeout.
+
+So the *natural conditioning key* for the simplex is:
+
+[
+\text{thesis_key}(t) :=
+\begin{cases}
+\text{NONE} & d(t)=0\
+\text{LONG_}s(t) & d(t)=+1\
+\text{SHORT_}s(t) & d(t)=-1
+\end{cases}
+]
+
+That gives you **5 disjoint regimes**:
+
+* NONE
+* LONG_1, LONG_2
+* SHORT_1, SHORT_2
+
+### What to change in plotting (conceptually)
+
+Wherever you build your simplex point list `P = {(p_bad, plane_abs, stress)}` over time, also carry `d(t), s(t)`.
+
+Then:
+
+* either **make one simplex per regime** (5 subplots), or
+* **one simplex with coloring by regime**, but **never aggregate promotion/action stats across regimes**.
+
+Masking is literally:
+
+* `mask_NONE = (d==0)`
+* `mask_L1 = (d==+1) & (s==1)`
+* `mask_L2 = (d==+1) & (s==2)`
+* `mask_S1 = (d==-1) & (s==1)`
+* `mask_S2 = (d==-1) & (s==2)`
+
+And you compute:
+
+* the simplex scatter only from points in that mask
+* the heatmaps (promotion rate, action rate, mean ΔPnL) only from events in that mask
+
+This is the key: **conditioning must apply to denominators** (counts) as well as numerators.
+
+---
+
+## 2) Formally separate UNKNOWN vs FLAT
+
+Right now, “unknown / undecided / no thesis” and “flat position” are collapsing into the same symbol `0` in multiple places:
+
+* plane signal uses `plane_sign ∈ {-1,0,+1}` where `0` blends “no directional evidence” with “market is flat”
+* action uses `a ∈ {-1,0,+1}` where `0` blends “stay flat” with “can’t decide / don’t trade”
+
+### Minimal formal split
+
+Introduce a **4-valued epistemic signal** for direction:
+
+[
+\hat d \in {-1, 0, +1, \bot}
+]
+
+* `-1`: evidence for short
+* `+1`: evidence for long
+* `0`: evidence for neutral/mean-revert/flat *as a real belief*
+* `⊥`: **UNKNOWN** (insufficient / contradictory / missing / low-confidence)
+
+Then keep **action space ternary**:
+
+[
+a \in {-1, 0, +1}
+]
+
+…but now action `0` is explicitly **FLAT**, not “unknown”.
+
+### Where UNKNOWN lives
+
+UNKNOWN is not an action; it’s part of **belief/state**. So the trader becomes:
+
+* belief / thesis state: contains `⊥` vs `0` distinction
+* action: still ternary
+
+That alone prevents the “flat dominates because it’s also the abstain button” pathology.
+
+---
+
+## 3) Enumerate all logical states (minimal, after the split)
+
+Let’s define the minimal **thesis-belief state** as:
+
+* `θ ∈ {UNK, FLAT, LONG, SHORT}`  (UNK = ⊥)
+* `s ∈ {0,1,2}`                   (strength)
+* constraint: `s=0` iff `θ ∈ {UNK, FLAT}`
+
+Then the complete logical state set is exactly **6 states**:
+
+1. **UNK**  := `(θ=UNK,  s=0)`
+2. **FLAT** := `(θ=FLAT, s=0)`
+3. **L1**   := `(θ=LONG, s=1)`
+4. **L2**   := `(θ=LONG, s=2)`
+5. **S1**   := `(θ=SHORT,s=1)`
+6. **S2**   := `(θ=SHORT,s=2)`
+
+If you also want a “cooldown” flag (your `c>0`), you can either:
+
+* treat cooldown as *a guard* (not a state), or
+
+* extend the state space minimally by splitting UNK/FLAT into cooldown/not:
+
+* UNK, UNK_CD, FLAT, FLAT_CD, L1, L2, S1, S2  (**8 states**)
+
+But if you want *minimal thesis-memory state machine*, the **6-state** version is the clean canonical one.
+
+---
+
+## 4) How to condition the simplex on `thesis_s` with UNKNOWN vs FLAT present
+
+After the split, the conditioning key becomes:
+
+* UNK, FLAT, L1, L2, S1, S2
+
+So you either:
+
+* plot **6 simplices**, or
+* plot one simplex and color by those 6 categories
+
+And the heatmaps should also be per-category:
+
+* action rate given category
+* promotion rate given category (promotion now means entering LONG/SHORT from UNK/FLAT, depending on your policy)
+* mean ΔPnL given category
+
+This will immediately show you whether the “simplex edge hugging” is coming from:
+
+* UNK absorbing everything (epistemic uncertainty)
+* FLAT absorbing everything (policy preference)
+* thesis states being reached but not acted on (constraints / veto / p_bad / stress gates)
+
+---
+
+If you paste (or point me at) the specific plotting function that produced these simplex/heatmap images, I’ll tell you *exactly* what masks/labels to add and where to thread `(θ,s)` through so the conditioning is mathematically correct (especially the denominators for rates).

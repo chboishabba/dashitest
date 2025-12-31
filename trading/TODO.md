@@ -12,4 +12,9 @@
 - [ ] Plot stress histogram pane in PG dashboard.
 - [x] Guard training_dashboard_pg.py against trade-log selection (auto-select per-step log or show clear error).
 - [ ] Implement explicit baseline simulation for regret (sell-all-at-t0 path).
+- [ ] Add realized-volatility regime feature (continuous + ternary regime flag) and log it.
+- [x] Implement minimal thesis-memory state machine (direction/strength/age/cooldown/invalidation) with logging.
+- [x] Add benchmark-regret reward option vs constant exposure (optional vol-adjusted penalty).
+- [ ] Condition decision simplex on thesis state (split by thesis_d/thesis_s).
+- [ ] Split UNKNOWN vs FLAT in belief logging (distinct belief_state).
 - [ ] Enable plane-aware strategy selection (MDL selector over strategies).

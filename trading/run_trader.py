@@ -16,6 +16,7 @@ import math
 import os
 import sys
 import subprocess
+from dataclasses import dataclass
 from collections import deque
 import pandas as pd
 import numpy as np
@@ -59,6 +60,17 @@ PBAD_BAN = 0.7             # ban threshold for ternary permission
 K_LATENT_TAU = 0.25        # capital pressure dead-zone
 RISK_HEADROOM_LOW = 0.2    # ternary risk budget low threshold
 RISK_HEADROOM_HIGH = 0.5   # ternary risk budget high threshold
+
+# Thesis memory (FSM) defaults
+THESIS_MEMORY_DEFAULT = False
+THESIS_A_MAX = 200
+THESIS_COOLDOWN = 5
+THESIS_PBAD_LO = PBAD_CAUTION
+THESIS_PBAD_HI = PBAD_BAN
+THESIS_STRESS_LO = 0.2
+THESIS_STRESS_HI = 0.5
+THESIS_TC_K = 0.0
+THESIS_BENCHMARK_X = 1.0
 
 # --- State helper ----------------------------------------------------------
 
@@ -190,6 +202,165 @@ def norm_ppf(p: float) -> float:
     ) / (
         (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1.0)
     )
+
+
+def clip_ternary_sum(val: int | float) -> int:
+    if val >= 1:
+        return 1
+    if val <= -1:
+        return -1
+    return 0
+
+
+def compute_regret_reward(prev_action: int, log_ret: float, benchmark_x: float, tc_step: float) -> float:
+    return (prev_action - benchmark_x) * log_ret - tc_step
+
+
+@dataclass
+class ThesisState:
+    d: int
+    s: int
+    a: int
+    c: int
+    v: int
+
+
+@dataclass
+class ThesisInputs:
+    plane_sign: int
+    plane_sign_flips_w: int
+    plane_would_veto: int
+    stress: float
+    p_bad: float
+    shadow_would_promote: int
+
+
+@dataclass
+class ThesisParams:
+    a_max: int
+    cooldown: int
+    p_bad_lo: float
+    p_bad_hi: float
+    stress_lo: float
+    stress_hi: float
+
+
+@dataclass
+class ThesisDerived:
+    alpha: int
+    beta: int
+    rho: int
+    ds: int
+    sum: int
+
+
+@dataclass
+class ThesisEvent:
+    event: str
+    reason: str
+    exit_trigger: bool
+
+
+def step_thesis_memory(state: ThesisState, inputs: ThesisInputs, params: ThesisParams):
+    d_star = inputs.plane_sign if state.d == 0 else state.d
+    if inputs.plane_sign == 0:
+        alpha = 0
+    elif inputs.plane_sign == d_star:
+        alpha = 1
+    else:
+        alpha = -1
+    if inputs.plane_would_veto == 1 or inputs.plane_sign_flips_w > 1:
+        beta = -1
+    elif inputs.plane_sign_flips_w <= 1:
+        beta = 1
+    else:
+        beta = 0
+    if inputs.p_bad >= params.p_bad_hi or inputs.stress >= params.stress_hi:
+        rho = -1
+    elif inputs.p_bad <= params.p_bad_lo and inputs.stress <= params.stress_lo:
+        rho = 1
+    else:
+        rho = 0
+    sum_trits = alpha + beta + rho
+    ds = clip_ternary_sum(sum_trits)
+    derived = ThesisDerived(alpha=alpha, beta=beta, rho=rho, ds=ds, sum=sum_trits)
+    c_next = state.c - 1 if state.c > 0 else 0
+    event = ThesisEvent(event="thesis_none", reason="", exit_trigger=False)
+    if state.d == 0:
+        if (
+            c_next == 0
+            and inputs.shadow_would_promote == 1
+            and beta >= 0
+            and rho >= 0
+            and d_star != 0
+        ):
+            new_state = ThesisState(d=d_star, s=1, a=0, c=0, v=0)
+            event = ThesisEvent(event="thesis_enter", reason="shadow_promote", exit_trigger=False)
+        else:
+            new_state = ThesisState(d=0, s=0, a=0, c=c_next, v=0)
+    else:
+        s_tmp = max(0, min(2, state.s + ds))
+        a_tmp = state.a + 1
+        bad_evidence = alpha == -1 or beta == -1 or rho == -1
+        if bad_evidence:
+            v_tmp = min(2, state.v + 1)
+        else:
+            v_tmp = max(0, state.v - 1)
+        exit_reason = ""
+        if v_tmp == 2:
+            exit_reason = "thesis_invalidated"
+        elif s_tmp == 0:
+            exit_reason = "thesis_decay"
+        elif a_tmp >= params.a_max:
+            exit_reason = "thesis_timeout"
+        if exit_reason:
+            new_state = ThesisState(d=0, s=0, a=0, c=params.cooldown, v=0)
+            event = ThesisEvent(event="thesis_exit", reason=exit_reason, exit_trigger=True)
+        else:
+            new_state = ThesisState(d=state.d, s=s_tmp, a=a_tmp, c=c_next, v=v_tmp)
+            if ds > 0:
+                reason = "reinforce"
+            elif ds < 0:
+                reason = "decay"
+            else:
+                reason = "hold"
+            event = ThesisEvent(event="thesis_update", reason=reason, exit_trigger=False)
+    return new_state, derived, event
+
+
+def apply_thesis_constraints(
+    thesis_d: int,
+    derived: ThesisDerived,
+    proposed_action: int,
+    hard_veto: bool,
+    exit_trigger: bool,
+):
+    action_t = proposed_action
+    override = ""
+    if thesis_d == 0:
+        return action_t, override
+    if proposed_action == -thesis_d:
+        if exit_trigger:
+            action_t = 0
+        else:
+            if derived.beta == -1 or derived.rho == -1 or hard_veto:
+                action_t = 0
+            else:
+                action_t = thesis_d
+        override = "thesis_no_flipflop"
+    elif proposed_action == 0:
+        if hard_veto:
+            action_t = 0
+        elif derived.beta >= 0 and derived.rho >= 0 and not exit_trigger:
+            action_t = thesis_d
+            override = "thesis_hold_bias"
+        else:
+            action_t = 0
+            if derived.beta == -1:
+                override = "thesis_unstable"
+            elif derived.rho == -1:
+                override = "thesis_risk"
+    return action_t, override
 
 
 def fmt_ts() -> str:
@@ -357,6 +528,15 @@ def run_trading_loop(
     edge_gate: bool = False,
     edge_decay: float = 0.9,
     thesis_depth_max: int = THESIS_DEPTH_MAX,
+    thesis_memory: bool = THESIS_MEMORY_DEFAULT,
+    thesis_a_max: int = THESIS_A_MAX,
+    thesis_cooldown: int = THESIS_COOLDOWN,
+    thesis_pbad_lo: float = THESIS_PBAD_LO,
+    thesis_pbad_hi: float = THESIS_PBAD_HI,
+    thesis_stress_lo: float = THESIS_STRESS_LO,
+    thesis_stress_hi: float = THESIS_STRESS_HI,
+    tc_k: float = THESIS_TC_K,
+    benchmark_x: float = THESIS_BENCHMARK_X,
 ):
     def shadow_mdl_for_window(ret_window):
         n = len(ret_window)
@@ -418,6 +598,11 @@ def run_trading_loop(
     align_age = 0       # how long state and thesis have been aligned
     prev_state = 0
     capital_pressure = 0
+    thesis_d = 0
+    thesis_s = 0
+    thesis_a = 0
+    thesis_c = 0
+    thesis_v = 0
     trade_id = 0
     trade_entry_step = None
     trade_entry_price = 0.0
@@ -468,8 +653,7 @@ def run_trading_loop(
             desired = 1
         else:
             desired = -1
-        direction = desired
-        thesis = int(np.sign(pos))
+        thesis = thesis_d if thesis_memory else int(np.sign(pos))
         # Plane classification for this step (used for logging/gating)
         abs_ret = abs(ret)
         noise_floor = max(sigma_slow, 1e-9)
@@ -486,6 +670,53 @@ def run_trading_loop(
         plane_flip_flags.append(flip)
         plane_sign_flips_w = int(sum(plane_flip_flags))
         plane_would_veto = int(plane_sign_flips_w > 1)
+
+        if desired == 0:
+            if plane_index < 0:
+                belief_state = "unknown"
+            else:
+                belief_state = "flat"
+            belief_dir = 0
+        else:
+            belief_state = "long" if desired > 0 else "short"
+            belief_dir = desired
+        belief_unknown = int(belief_state == "unknown")
+        direction = belief_dir
+
+        active_trit = 1.0 if plane_index >= 0 else 0.0
+        active_trit_count += active_trit
+        plane_hits = []
+        plane_rates = []
+        for k in range(PLANE_COUNT):
+            hit = 1.0 if plane_index == k else 0.0
+            plane_counts[k] += hit
+            plane_hits.append(hit)
+            plane_rates.append(plane_counts[k] / max(t, 1))
+        stress = active_trit_count / max(t, 1)
+
+        shadow_delta_mdl = np.nan
+        shadow_would_promote = 0
+        shadow_is_tie = 0
+        shadow_reject = 0
+        w = SHADOW_REFIT_WINDOW
+        if t - w >= 1 and t + w - 1 <= total_steps:
+            start = t - w - 1
+            mid = t - 1
+            end = t + w - 1
+            left = returns[start:mid]
+            right = returns[mid:end]
+            both = returns[start:end]
+            mdl_current = shadow_mdl_for_window(both)
+            if not np.isnan(mdl_current):
+                mdl_left = shadow_mdl_for_window(left)
+                mdl_right = shadow_mdl_for_window(right)
+                split_penalty = SHADOW_SPLIT_PENALTY_MULT * np.log(max(len(both), 1.0))
+                mdl_split = mdl_left + mdl_right + split_penalty
+                shadow_delta_mdl = mdl_split - mdl_current
+                eps = SHADOW_MDL_EPS_MULT * max(1.0, abs(mdl_current))
+                shadow_would_promote = int(shadow_delta_mdl < -eps)
+                shadow_is_tie = int(abs(shadow_delta_mdl) <= eps)
+                shadow_reject = int(shadow_delta_mdl > eps)
 
         p_bad_t = float(p_bad[t]) if t < len(p_bad) else 0.0
         stress_veto = bool(bad_flag[t]) if t < len(bad_flag) else False
@@ -504,26 +735,73 @@ def run_trading_loop(
         thesis_hold = False
         thesis_depth_prev = thesis_depth
         hard_veto = permission == -1 or stress_veto
-        if hard_veto:
-            action_t = 0
+        thesis_event = "thesis_none"
+        thesis_reason = ""
+        thesis_override = ""
+        thesis_alpha = 0
+        thesis_beta = 0
+        thesis_rho = 0
+        thesis_ds = 0
+        thesis_sum = 0
+        if thesis_memory:
+            state = ThesisState(d=thesis_d, s=thesis_s, a=thesis_a, c=thesis_c, v=thesis_v)
+            inputs = ThesisInputs(
+                plane_sign=plane_sign,
+                plane_sign_flips_w=plane_sign_flips_w,
+                plane_would_veto=plane_would_veto,
+                stress=stress,
+                p_bad=p_bad_t,
+                shadow_would_promote=shadow_would_promote,
+            )
+            params = ThesisParams(
+                a_max=thesis_a_max,
+                cooldown=thesis_cooldown,
+                p_bad_lo=thesis_pbad_lo,
+                p_bad_hi=thesis_pbad_hi,
+                stress_lo=thesis_stress_lo,
+                stress_hi=thesis_stress_hi,
+            )
+            new_state, derived, event = step_thesis_memory(state, inputs, params)
+            action_proposed = 0 if hard_veto else action_signal
+            if action_proposed == 0 and pos != 0 and not hard_veto:
+                action_proposed = int(np.sign(pos))
+            action_t, thesis_override = apply_thesis_constraints(
+                state.d, derived, action_proposed, hard_veto, event.exit_trigger
+            )
+            thesis_event = event.event
+            thesis_reason = event.reason
+            thesis_alpha = derived.alpha
+            thesis_beta = derived.beta
+            thesis_rho = derived.rho
+            thesis_ds = derived.ds
+            thesis_sum = derived.sum
+            thesis_d = new_state.d
+            thesis_s = new_state.s
+            thesis_a = new_state.a
+            thesis_c = new_state.c
+            thesis_v = new_state.v
             thesis_depth = 0
         else:
-            if action_signal != 0 and action_signal != prev_action:
-                thesis_depth = 1
-            elif action_signal != 0 and action_signal == prev_action and permission == 1:
-                thesis_depth = min(thesis_depth_prev + 1, thesis_depth_max)
-            elif action_signal == 0 and thesis_depth_prev > 0:
-                thesis_depth = thesis_depth_prev - 1
-            else:
-                thesis_depth = thesis_depth_prev
-
-            if action_signal == 0 and thesis_depth_prev > 1:
-                action_t = prev_action
-                thesis_hold = True
-            elif action_signal == 0:
+            if hard_veto:
                 action_t = 0
+                thesis_depth = 0
             else:
-                action_t = action_signal
+                if action_signal != 0 and action_signal != prev_action:
+                    thesis_depth = 1
+                elif action_signal != 0 and action_signal == prev_action and permission == 1:
+                    thesis_depth = min(thesis_depth_prev + 1, thesis_depth_max)
+                elif action_signal == 0 and thesis_depth_prev > 0:
+                    thesis_depth = thesis_depth_prev - 1
+                else:
+                    thesis_depth = thesis_depth_prev
+
+                if action_signal == 0 and thesis_depth_prev > 1:
+                    action_t = prev_action
+                    thesis_hold = True
+                elif action_signal == 0:
+                    action_t = 0
+                else:
+                    action_t = action_signal
         base_cap = PARTICIPATION_CAP * volume[t]
         vel_term = 1.0 + 10.0 * max(abs(ret), z_vel)
         cap = base_cap * vel_term
@@ -698,44 +976,11 @@ def run_trading_loop(
             thesis_depth_peak = max(thesis_depth_peak, thesis_depth)
 
         # Proxy MDL and stress (plane-aware surprise)
-        active_trit = 1.0 if plane_index >= 0 else 0.0
-        active_trit_count += active_trit
-        plane_hits = []
-        plane_rates = []
-        for k in range(PLANE_COUNT):
-            hit = 1.0 if plane_index == k else 0.0
-            plane_counts[k] += hit
-            plane_hits.append(hit)
-            plane_rates.append(plane_counts[k] / max(t, 1))
         if action_t != prev_action:
             side_cost += mdl_switch_penalty
         if fill != 0:
             side_cost += mdl_trade_penalty
         mdl_rate = (side_cost + active_trit_count) / max(t, 1)
-        shadow_delta_mdl = np.nan
-        shadow_would_promote = 0
-        shadow_is_tie = 0
-        shadow_reject = 0
-        w = SHADOW_REFIT_WINDOW
-        if t - w >= 1 and t + w - 1 <= total_steps:
-            start = t - w - 1
-            mid = t - 1
-            end = t + w - 1
-            left = returns[start:mid]
-            right = returns[mid:end]
-            both = returns[start:end]
-            mdl_current = shadow_mdl_for_window(both)
-            if not np.isnan(mdl_current):
-                mdl_left = shadow_mdl_for_window(left)
-                mdl_right = shadow_mdl_for_window(right)
-                split_penalty = SHADOW_SPLIT_PENALTY_MULT * np.log(max(len(both), 1.0))
-                mdl_split = mdl_left + mdl_right + split_penalty
-                shadow_delta_mdl = mdl_split - mdl_current
-                eps = SHADOW_MDL_EPS_MULT * max(1.0, abs(mdl_current))
-                shadow_would_promote = int(shadow_delta_mdl < -eps)
-                shadow_is_tie = int(abs(shadow_delta_mdl) <= eps)
-                shadow_reject = int(shadow_delta_mdl > eps)
-        stress = active_trit_count / max(t, 1)
 
         # Goal probability + shortfall via normal approximation
         pnl_delta_window.append(c_spend - c_spend_prev)
@@ -771,6 +1016,10 @@ def run_trading_loop(
             1.0,
         )
         regret = (START_CASH - fees_accrued) - mean_ct
+        log_ret = np.log(price[t] / price[t - 1]) if price[t - 1] > 0 else 0.0
+        tc_step = tc_k * abs(action_t - prev_action)
+        reward_regret = compute_regret_reward(prev_action, log_ret, benchmark_x, tc_step)
+        risk_penalty = 0.0
         sigma_ref = (
             (sigma_target or 0.0) * price[t] * max(abs(pos), 1.0)
             if sigma_target
@@ -798,6 +1047,11 @@ def run_trading_loop(
             "goal_align": goal_align,
             "goal_pressure": goal_pressure,
             "regret": regret,
+            "r_step": log_ret,
+            "tc_step": tc_step,
+            "benchmark_x": benchmark_x,
+            "reward_regret": reward_regret,
+            "risk_penalty": risk_penalty,
             "es_shortfall": es_shortfall,
             "mdl_rate": mdl_rate,
             "stress": stress,
@@ -823,6 +1077,9 @@ def run_trading_loop(
             "ban": int(permission == -1),
             "can_trade": int(permission == 1),
             "direction": direction,
+            "belief_state": belief_state,
+            "belief_dir": belief_dir,
+            "belief_unknown": belief_unknown,
             "edge_t": edge_t,
             "permission": permission,
             "capital_pressure": capital_pressure,
@@ -865,6 +1122,19 @@ def run_trading_loop(
             "thesis_age": thesis_age,
             "thesis_depth": thesis_depth,
             "thesis_hold": int(thesis_hold),
+            "thesis_d": thesis_d,
+            "thesis_s": thesis_s,
+            "thesis_a": thesis_a,
+            "thesis_c": thesis_c,
+            "thesis_v": thesis_v,
+            "thesis_alpha": thesis_alpha,
+            "thesis_beta": thesis_beta,
+            "thesis_rho": thesis_rho,
+            "thesis_ds": thesis_ds,
+            "thesis_sum": thesis_sum,
+            "thesis_event": thesis_event,
+            "thesis_reason": thesis_reason,
+            "thesis_override": thesis_override,
             "state_age": state_age,
             "align_age": align_age,
         }
@@ -1018,6 +1288,15 @@ def main(
     edge_decay: float = 0.9,
     edge_alpha: float = EDGE_EMA_ALPHA,
     thesis_depth_max: int = THESIS_DEPTH_MAX,
+    thesis_memory: bool = THESIS_MEMORY_DEFAULT,
+    thesis_a_max: int = THESIS_A_MAX,
+    thesis_cooldown: int = THESIS_COOLDOWN,
+    thesis_pbad_lo: float = THESIS_PBAD_LO,
+    thesis_pbad_hi: float = THESIS_PBAD_HI,
+    thesis_stress_lo: float = THESIS_STRESS_LO,
+    thesis_stress_hi: float = THESIS_STRESS_HI,
+    tc_k: float = THESIS_TC_K,
+    benchmark_x: float = THESIS_BENCHMARK_X,
     geometry_plots: bool = True,
     geometry_overlay: bool = True,
     geometry_simplex: bool = True,
@@ -1115,6 +1394,15 @@ def main(
                     edge_decay=edge_decay,
                     edge_ema_alpha=edge_alpha,
                     thesis_depth_max=thesis_depth_max,
+                    thesis_memory=thesis_memory,
+                    thesis_a_max=thesis_a_max,
+                    thesis_cooldown=thesis_cooldown,
+                    thesis_pbad_lo=thesis_pbad_lo,
+                    thesis_pbad_hi=thesis_pbad_hi,
+                    thesis_stress_lo=thesis_stress_lo,
+                    thesis_stress_hi=thesis_stress_hi,
+                    tc_k=tc_k,
+                    benchmark_x=benchmark_x,
                 )
                 if not log_combined:
                     emit_geometry(log_path, source)
@@ -1168,6 +1456,15 @@ def main(
         edge_decay=edge_decay,
         edge_ema_alpha=edge_alpha,
         thesis_depth_max=thesis_depth_max,
+        thesis_memory=thesis_memory,
+        thesis_a_max=thesis_a_max,
+        thesis_cooldown=thesis_cooldown,
+        thesis_pbad_lo=thesis_pbad_lo,
+        thesis_pbad_hi=thesis_pbad_hi,
+        thesis_stress_lo=thesis_stress_lo,
+        thesis_stress_hi=thesis_stress_hi,
+        tc_k=tc_k,
+        benchmark_x=benchmark_x,
     )
     emit_geometry(LOG, source)
 
@@ -1214,6 +1511,15 @@ if __name__ == "__main__":
     ap.add_argument("--edge-decay", type=float, default=0.9, help="Cap multiplier when edge gate triggers.")
     ap.add_argument("--edge-alpha", type=float, default=EDGE_EMA_ALPHA, help="EMA alpha for edge metric.")
     ap.add_argument("--thesis-depth-max", type=int, default=THESIS_DEPTH_MAX, help="Max thesis memory depth.")
+    ap.add_argument("--thesis-memory", action="store_true", help="Enable thesis memory FSM.")
+    ap.add_argument("--thesis-a-max", type=int, default=THESIS_A_MAX, help="Max thesis age.")
+    ap.add_argument("--thesis-cooldown", type=int, default=THESIS_COOLDOWN, help="Cooldown steps after thesis exit.")
+    ap.add_argument("--thesis-pbad-lo", type=float, default=THESIS_PBAD_LO, help="Low p_bad threshold for thesis risk trit.")
+    ap.add_argument("--thesis-pbad-hi", type=float, default=THESIS_PBAD_HI, help="High p_bad threshold for thesis risk trit.")
+    ap.add_argument("--thesis-stress-lo", type=float, default=THESIS_STRESS_LO, help="Low stress threshold for thesis risk trit.")
+    ap.add_argument("--thesis-stress-hi", type=float, default=THESIS_STRESS_HI, help="High stress threshold for thesis risk trit.")
+    ap.add_argument("--tc-k", type=float, default=THESIS_TC_K, help="Transaction cost coefficient for reward_regret.")
+    ap.add_argument("--benchmark-x", type=float, default=THESIS_BENCHMARK_X, help="Benchmark exposure for reward_regret.")
     ap.add_argument("--geometry-dir", type=str, default="logs/geometry", help="Output directory for geometry plots.")
     ap.add_argument("--geometry-simplex", action="store_true", help="Render simplex plot in geometry output.")
     ap.add_argument("--no-geometry-simplex", dest="geometry_simplex", action="store_false")
@@ -1247,6 +1553,15 @@ if __name__ == "__main__":
         edge_decay=args.edge_decay,
         edge_alpha=args.edge_alpha,
         thesis_depth_max=args.thesis_depth_max,
+        thesis_memory=args.thesis_memory,
+        thesis_a_max=args.thesis_a_max,
+        thesis_cooldown=args.thesis_cooldown,
+        thesis_pbad_lo=args.thesis_pbad_lo,
+        thesis_pbad_hi=args.thesis_pbad_hi,
+        thesis_stress_lo=args.thesis_stress_lo,
+        thesis_stress_hi=args.thesis_stress_hi,
+        tc_k=args.tc_k,
+        benchmark_x=args.benchmark_x,
         geometry_plots=args.geometry_plots,
         geometry_overlay=args.geometry_overlay,
         geometry_simplex=args.geometry_simplex,
