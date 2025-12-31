@@ -135,6 +135,7 @@ Run from this directory with `PYTHONPATH=.` to avoid import issues.
 - `run_trader.py` supports `--max-steps`, `--max-trades`, and `--max-seconds` for bounded runs.
 - `run_trader.py` logs edge metrics (`edge_raw`, `edge_ema`); optional cap gate with `--edge-gate --edge-decay --edge-alpha`.
 - `run_trader.py` uses a bounded thesis memory counter (`--thesis-depth-max`) to delay soft-veto exits.
+- `run_trader.py` exposes goal/MDL tuning (`--goal-cash-x --goal-eps --est-tax-rate --mdl-noise-mult --mdl-switch-penalty --mdl-trade-penalty`).
 - `training_dashboard_pg.py` can render rolling histograms with `--hist --hist-window N --hist-bins M`.
 
 ## Sanity test outcomes
@@ -171,6 +172,7 @@ Per-step log (see `logs/trading_log*.csv`) includes:
 - Thesis memory: `action_signal`, `thesis_depth`, `thesis_hold`
 - Action persistence: `action_run_length`, `time_since_last_switch`
 - Shadow thesis: `shadow_delta_mdl`, `shadow_would_promote`, `shadow_is_tie`, `shadow_reject`
+- Plane diagnostics: `plane_abs`, `plane_sign`, `plane_sign_flips_W`, `plane_would_veto`
 
 Per-trade log (see `logs/trading_log_trades_*.csv`) includes:
 - `trade_id`, `entry_step`, `exit_step`, `entry_price`, `exit_price`, `trade_duration`
@@ -190,6 +192,8 @@ Then aggregate:
 - Promotion rate vs `plane_abs`, `stress`, and `plane_abs × stress`
 - PnL vs action run length per plane bucket
 - "Would-veto" counts for a prospective plane-stability gate
+- Promotion/PnL vs `plane_sign_flips_W` and `plane_would_veto`
+- Mean ΔPnL vs `action_run_length` with plane sign persistence and stress quartiles
 
 Geometry plots (no controller changes, see `scripts/plot_decision_geometry.py`):
 - Decision heatmaps: `plane_abs × stress → {promotion_rate, action_rate, mean_pnl}`
@@ -198,3 +202,8 @@ Geometry plots (no controller changes, see `scripts/plot_decision_geometry.py`):
 - Use fixed quantile bins (q05..q95) with under/overflow bins and suppress bins with < 30 samples
 - If no signed `plane_rate` is logged, use `delta_plane` as the signed proxy and `plane_abs = abs(delta_plane)`
 - If quantile edges collapse (identical values), fall back to linear bins over finite min/max
+
+`run_trader.py` emits geometry plots by default into `logs/geometry/` with a UTC timestamp
+and source label in the filename. The simplex (triangle) plot is enabled by default;
+use `--no-geometry-simplex` to skip it, `--no-geometry-overlay` to skip overlays,
+or `--no-geometry-plots` to disable all geometry plots.

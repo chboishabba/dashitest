@@ -13,6 +13,10 @@ Then in another terminal:
 import time
 import pathlib
 import math
+import os
+import sys
+import subprocess
+from collections import deque
 import pandas as pd
 import numpy as np
 
@@ -36,6 +40,7 @@ MDL_NOISE_MULT = 2.0       # sigma multiplier for active-trit threshold
 MDL_SWITCH_PENALTY = 1.0   # side cost for state switches
 MDL_TRADE_PENALTY = 1.0    # side cost for executed trades
 SHADOW_REFIT_WINDOW = 64   # refit window size for shadow MDL split diagnostic
+PLANE_FLIP_WINDOW = SHADOW_REFIT_WINDOW  # rolling window for plane sign flips
 SHADOW_SPLIT_PENALTY_MULT = 1.0  # split penalty multiplier (log n)
 SHADOW_MDL_EPS_MULT = 1e-12  # scale-aware epsilon multiplier for promote/tie/reject
 PLANE_BASE = 3.0           # base for surprise planes
@@ -399,6 +404,8 @@ def run_trading_loop(
     active_trit_count = 0.0
     plane_counts = [0.0 for _ in range(PLANE_COUNT)]
     plane_k_prev = 0
+    plane_sign_prev = 0
+    plane_flip_flags = deque(maxlen=max(1, PLANE_FLIP_WINDOW))
     sigma_slow = 0.0
     edge_ema = 0.0
     side_cost = 0.0
@@ -474,6 +481,11 @@ def run_trading_loop(
             plane_index = -1
             plane_k = 0
         delta_plane = plane_k - plane_k_prev
+        plane_sign = int(np.sign(delta_plane))
+        flip = int(plane_sign != 0 and plane_sign_prev != 0 and plane_sign != plane_sign_prev)
+        plane_flip_flags.append(flip)
+        plane_sign_flips_w = int(sum(plane_flip_flags))
+        plane_would_veto = int(plane_sign_flips_w > 1)
 
         p_bad_t = float(p_bad[t]) if t < len(p_bad) else 0.0
         stress_veto = bool(bad_flag[t]) if t < len(bad_flag) else False
@@ -793,6 +805,10 @@ def run_trading_loop(
             "plane_index": plane_index,
             "plane_k": plane_k,
             "delta_plane": delta_plane,
+            "plane_abs": abs(delta_plane),
+            "plane_sign": plane_sign,
+            "plane_sign_flips_W": plane_sign_flips_w,
+            "plane_would_veto": plane_would_veto,
             "sigma_slow": sigma_slow,
             "plane0": plane_hits[0] if PLANE_COUNT > 0 else 0.0,
             "plane1": plane_hits[1] if PLANE_COUNT > 1 else 0.0,
@@ -919,6 +935,7 @@ def run_trading_loop(
         prev_goal_prob = goal_prob
         c_spend_prev = c_spend
         plane_k_prev = plane_k
+        plane_sign_prev = plane_sign
         if fill != 0:
             trade_count += 1
             if max_trades is not None and trade_count >= max_trades:
@@ -984,6 +1001,12 @@ def main(
     risk_frac: float = DEFAULT_RISK_FRAC,
     contract_mult: float = CONTRACT_MULT,
     sigma_target: float = SIGMA_TARGET,
+    est_tax_rate: float = EST_TAX_RATE,
+    goal_cash_x: float = GOAL_CASH_X,
+    goal_eps: float = GOAL_EPS,
+    mdl_noise_mult: float = MDL_NOISE_MULT,
+    mdl_switch_penalty: float = MDL_SWITCH_PENALTY,
+    mdl_trade_penalty: float = MDL_TRADE_PENALTY,
     progress_every: int = 0,
     log_level: str = "info",
     run_all: bool = False,
@@ -995,7 +1018,49 @@ def main(
     edge_decay: float = 0.9,
     edge_alpha: float = EDGE_EMA_ALPHA,
     thesis_depth_max: int = THESIS_DEPTH_MAX,
+    geometry_plots: bool = True,
+    geometry_overlay: bool = True,
+    geometry_simplex: bool = True,
+    geometry_dir: str = "logs/geometry",
 ):
+    run_ts = pd.Timestamp.utcnow().strftime("%Y%m%dT%H%M%SZ")
+
+    def slugify(value: str) -> str:
+        keep = []
+        for ch in value:
+            if ch.isalnum() or ch in ("-", "_"):
+                keep.append(ch)
+            else:
+                keep.append("_")
+        return "".join(keep)
+
+    def emit_geometry(log_path: pathlib.Path, source_name: str):
+        if not geometry_plots:
+            return
+        geometry_root = pathlib.Path(geometry_dir)
+        geometry_root.mkdir(parents=True, exist_ok=True)
+        prefix = geometry_root / f"{slugify(source_name)}_{run_ts}"
+        cmd = [
+            sys.executable,
+            "scripts/plot_decision_geometry.py",
+            "--csv",
+            str(log_path),
+            "--save-prefix",
+            str(prefix),
+            "--no-show",
+        ]
+        if geometry_overlay:
+            cmd.append("--overlay")
+        if geometry_simplex:
+            cmd.append("--simplex")
+        env = os.environ.copy()
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = f".{os.pathsep}{existing}" if existing else "."
+        try:
+            subprocess.run(cmd, check=False, env=env)
+        except Exception as exc:
+            print(f"[warn] geometry plots failed for {log_path}: {exc}")
+
     source = "stooq"
     try:
         if run_all:
@@ -1034,6 +1099,12 @@ def main(
                     risk_frac=risk_frac,
                     contract_mult=contract_mult,
                     sigma_target=sigma_target,
+                    est_tax_rate=est_tax_rate,
+                    goal_cash_x=goal_cash_x,
+                    goal_eps=goal_eps,
+                    mdl_noise_mult=mdl_noise_mult,
+                    mdl_switch_penalty=mdl_switch_penalty,
+                    mdl_trade_penalty=mdl_trade_penalty,
                     log_path=log_path,
                     trade_log_path=trade_log_path,
                     progress_every=progress_every,
@@ -1045,8 +1116,12 @@ def main(
                     edge_ema_alpha=edge_alpha,
                     thesis_depth_max=thesis_depth_max,
                 )
+                if not log_combined:
+                    emit_geometry(log_path, source)
                 if inter_run_sleep > 0:
                     time.sleep(inter_run_sleep)
+            if log_combined and combined_path is not None:
+                emit_geometry(combined_path, "combined")
             return
 
         csv_path = find_btc_csv()
@@ -1079,6 +1154,12 @@ def main(
         risk_frac=risk_frac,
         contract_mult=contract_mult,
         sigma_target=sigma_target,
+        est_tax_rate=est_tax_rate,
+        goal_cash_x=goal_cash_x,
+        goal_eps=goal_eps,
+        mdl_noise_mult=mdl_noise_mult,
+        mdl_switch_penalty=mdl_switch_penalty,
+        mdl_trade_penalty=mdl_trade_penalty,
         log_path=LOG,
         trade_log_path=pathlib.Path("logs/trade_log.csv"),
         progress_every=progress_every,
@@ -1088,6 +1169,7 @@ def main(
         edge_ema_alpha=edge_alpha,
         thesis_depth_max=thesis_depth_max,
     )
+    emit_geometry(LOG, source)
 
 
 if __name__ == "__main__":
@@ -1100,6 +1182,12 @@ if __name__ == "__main__":
     ap.add_argument("--sleep", type=float, default=0.0, help="Sleep per step.")
     ap.add_argument("--risk-frac", type=float, default=DEFAULT_RISK_FRAC, help="Risk fraction.")
     ap.add_argument("--sigma-target", type=float, default=SIGMA_TARGET, help="Target vol.")
+    ap.add_argument("--est-tax-rate", type=float, default=EST_TAX_RATE, help="Estimated tax rate on realized PnL.")
+    ap.add_argument("--goal-cash-x", type=float, default=GOAL_CASH_X, help="Spendable cash target.")
+    ap.add_argument("--goal-eps", type=float, default=GOAL_EPS, help="Tail fraction for expected shortfall.")
+    ap.add_argument("--mdl-noise-mult", type=float, default=MDL_NOISE_MULT, help="Sigma multiplier for active-trit threshold.")
+    ap.add_argument("--mdl-switch-penalty", type=float, default=MDL_SWITCH_PENALTY, help="Side cost for state switches.")
+    ap.add_argument("--mdl-trade-penalty", type=float, default=MDL_TRADE_PENALTY, help="Side cost for executed trades.")
     ap.add_argument("--progress-every", type=int, default=0, help="Print progress every N steps.")
     ap.add_argument("--all", action="store_true", help="Run over all CSVs under data/raw.")
     ap.add_argument("--raw-root", type=str, default="data/raw", help="Root directory to scan when --all set.")
@@ -1126,6 +1214,14 @@ if __name__ == "__main__":
     ap.add_argument("--edge-decay", type=float, default=0.9, help="Cap multiplier when edge gate triggers.")
     ap.add_argument("--edge-alpha", type=float, default=EDGE_EMA_ALPHA, help="EMA alpha for edge metric.")
     ap.add_argument("--thesis-depth-max", type=int, default=THESIS_DEPTH_MAX, help="Max thesis memory depth.")
+    ap.add_argument("--geometry-dir", type=str, default="logs/geometry", help="Output directory for geometry plots.")
+    ap.add_argument("--geometry-simplex", action="store_true", help="Render simplex plot in geometry output.")
+    ap.add_argument("--no-geometry-simplex", dest="geometry_simplex", action="store_false")
+    ap.add_argument("--geometry-overlay", action="store_true", help="Render overlay plot in geometry output.")
+    ap.add_argument("--no-geometry-overlay", dest="geometry_overlay", action="store_false")
+    ap.add_argument("--geometry-plots", dest="geometry_plots", action="store_true", help="Emit geometry plots.")
+    ap.add_argument("--no-geometry-plots", dest="geometry_plots", action="store_false", help="Skip geometry plots.")
+    ap.set_defaults(geometry_plots=True, geometry_overlay=True, geometry_simplex=True)
     args = ap.parse_args()
     main(
         max_steps=args.max_steps,
@@ -1134,6 +1230,12 @@ if __name__ == "__main__":
         sleep_s=args.sleep,
         risk_frac=args.risk_frac,
         sigma_target=args.sigma_target,
+        est_tax_rate=args.est_tax_rate,
+        goal_cash_x=args.goal_cash_x,
+        goal_eps=args.goal_eps,
+        mdl_noise_mult=args.mdl_noise_mult,
+        mdl_switch_penalty=args.mdl_switch_penalty,
+        mdl_trade_penalty=args.mdl_trade_penalty,
         progress_every=args.progress_every,
         log_level=args.log_level,
         run_all=args.all,
@@ -1145,4 +1247,8 @@ if __name__ == "__main__":
         edge_decay=args.edge_decay,
         edge_alpha=args.edge_alpha,
         thesis_depth_max=args.thesis_depth_max,
+        geometry_plots=args.geometry_plots,
+        geometry_overlay=args.geometry_overlay,
+        geometry_simplex=args.geometry_simplex,
+        geometry_dir=args.geometry_dir,
     )

@@ -173,7 +173,9 @@ def plot_overlay(df: pd.DataFrame, plane_rate: str, args) -> plt.Figure:
     promote_mask = df["shadow_would_promote"] == 1
     action_mask = df["action_active"] == 1
     flip_mask = None
-    if "plane_sign_flips_W" in df.columns:
+    if "plane_would_veto" in df.columns:
+        flip_mask = df["plane_would_veto"] == 1
+    elif "plane_sign_flips_W" in df.columns:
         flip_mask = df["plane_sign_flips_W"] > 1
     elif args.flip_window and args.flip_window > 1:
         flips = _compute_flip_count(plane, args.flip_window)
@@ -265,6 +267,7 @@ def main():
     ap.add_argument("--flip-window", type=int, default=None, help="Window for sign-flip veto overlay")
     ap.add_argument("--simplex", action="store_true", help="Render ternary simplex")
     ap.add_argument("--simplex-sample", type=int, default=5000, help="Max points for simplex plot")
+    ap.add_argument("--no-show", action="store_true", help="Skip interactive display")
     args = ap.parse_args()
 
     df = pd.read_csv(args.csv)
@@ -281,7 +284,8 @@ def main():
         out = f"{args.save_prefix}_heatmaps.png"
         fig.savefig(out, dpi=200)
         print(f"Saved {out}")
-    plt.show()
+    if not args.no_show:
+        plt.show()
 
     if args.overlay:
         fig = plot_overlay(df, "plane_rate_used", args)
@@ -289,7 +293,8 @@ def main():
             out = f"{args.save_prefix}_overlay.png"
             fig.savefig(out, dpi=200)
             print(f"Saved {out}")
-        plt.show()
+        if not args.no_show:
+            plt.show()
 
     if args.simplex:
         fig = plot_simplex(df, args)
@@ -297,7 +302,8 @@ def main():
             out = f"{args.save_prefix}_simplex.png"
             fig.savefig(out, dpi=200)
             print(f"Saved {out}")
-        plt.show()
+        if not args.no_show:
+            plt.show()
 
 
 if __name__ == "__main__":

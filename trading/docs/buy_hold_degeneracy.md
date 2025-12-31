@@ -517,6 +517,7 @@ Per-step fields to log:
 * `plane_abs = abs(plane_rate)`
 * `plane_sign = sign(plane_rate)`
 * `plane_sign_flips_W` (rolling sign flips within window `W`)
+* `plane_would_veto = (plane_sign_flips_W > 1)` (diagnostic only)
 
 If promotions cluster where `plane_abs` rises and `stress` rises, the detector is
 aligned. If promotions fire on plane jitter alone, the split penalty is too weak.
@@ -527,6 +528,22 @@ Stability gate candidate (defer implementation until diagnostics confirm):
 * Do not promote when plane rate flips sign more than once within window `W`.
 * This is a veto rule, not a new signal; it preserves HOLD in monotone series and
   prevents churn in heavy-tail streams. See `TRADER_CONTEXT.md:101638`.
+
+Plane-stability diagnostic (logging-only):
+
+* Log `plane_sign_flips_W` and `plane_would_veto` and aggregate:
+  * promotion rate vs `plane_sign_flips_W`
+  * mean ΔPnL vs `plane_sign_flips_W`
+  * `shadow_would_promote` vs `plane_would_veto`
+* References: `TRADER_CONTEXT.md:102286`, `TRADER_CONTEXT.md:102292`.
+
+Run-length conditional diagnostic (logging-only):
+
+* Bucket by `action_run_length`, plane sign persistence (e.g., flips in `W`),
+  and stress quartiles.
+* Aggregate mean ΔPnL per bucket to test whether longer runs and stable sign
+  correlate with positive PnL. References: `TRADER_CONTEXT.md:101447`,
+  `TRADER_CONTEXT.md:103231`.
 
 ## Decision geometry plots (logging-only)
 
@@ -564,10 +581,10 @@ Overlay diagnostic (time-series):
   shadow promotion, action, and would-veto events. See
   `TRADER_CONTEXT.md:102095`.
 
-Ternary simplex (optional, diagnostic clarity):
+Ternary simplex (diagnostic clarity):
 
 * Normalize `p_bad`, `plane_abs`, `stress` to sum to 1 and plot in a simplex.
-  Color by action and mark promote/tie/reject. See `TRADER_CONTEXT.md:102127`.
+  Color by action and mark promote/tie/reject. See `TRADER_CONTEXT.md:102116`.
 
 Minimum per-step fields needed for plots:
 

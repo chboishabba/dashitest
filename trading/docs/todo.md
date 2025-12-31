@@ -32,14 +32,18 @@ TODO
 - [x] Re-run the 15s sanity suite after refit-based shadow MDL; summarize promote/tie/reject counts.
 - [x] Apply switching penalty on action-state changes (not desired state) and log action run length stats.
 - [ ] Aggregate promote/tie/reject vs `p_bad`, `capital_pressure`, and `edge_t`, including PnL contribution by run length.
-- [ ] Add plane-rate diagnostics (logging-only): `plane_abs`, `plane_sign`, `plane_sign_flips_W`.
+- [x] Add plane-rate diagnostics (logging-only): `plane_abs`, `plane_sign`, `plane_sign_flips_W`.
 - [ ] Aggregate promotions vs `plane_abs`, `stress`, and joint buckets; add PnL by plane bucket and action run length.
+- [x] Log `plane_sign_flips_W` and `plane_would_veto` for plane-stability diagnostics.
+- [ ] Aggregate promotion/PnL vs `plane_sign_flips_W` and `plane_would_veto`.
+- [ ] Aggregate mean ΔPnL vs `action_run_length`, plane sign persistence, and stress quartiles.
 - [x] Build decision heatmaps from logs: `plane_abs × stress → {promotion_rate, action_rate, mean_pnl}`.
 - [x] Lock heatmap binning: quantile bins (q05..q95) + under/overflow + min bin count threshold.
 - [x] Add fallback to linear bins when quantile edges collapse.
 - [x] Add time-series overlay plot: price + `plane_rate` + `plane_abs` with promote/action markers.
 - [x] Add optional ternary simplex plot using normalized `p_bad`, `plane_abs`, `stress`.
 - [x] In plotting, use `delta_plane` as signed plane-rate proxy if no signed `plane_rate` column exists.
+- [x] Emit geometry plots after `run_trader.py` runs with timestamped labels under `logs/geometry/`.
 - [ ] Count "would-veto" events for a prospective plane-stability rule (sign flips > 1 within `W`).
 - [ ] Decide on plane-stability gate after diagnostics; implement only if supported.
 - [ ] Defer `SHADOW_REFIT_WINDOW` / `SHADOW_SPLIT_PENALTY_MULT` sweeps until plane diagnostics are summarized.

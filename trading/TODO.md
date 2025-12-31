@@ -7,7 +7,7 @@
 - [x] Plot plane rates in the PG dashboard (with optional normalization/log scale).
 - [x] Add edge_ema metric + optional cap gate.
 - [x] Add bounded thesis memory (thesis_depth) to delay soft-veto exits.
-- [ ] Add goal/MDL config to CLI (goal cash, deadline, tax rate, MDL params).
+- [x] Add goal/MDL config to CLI (goal cash, deadline, tax rate, MDL params).
 - [ ] Add edge_ema panel (or overlay) to the PG dashboard.
 - [ ] Plot stress histogram pane in PG dashboard.
 - [ ] Implement explicit baseline simulation for regret (sell-all-at-t0 path).
