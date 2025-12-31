@@ -764,8 +764,9 @@ def run_trading_loop(
             belief_rho = 1
         else:
             belief_rho = 0
-        belief_delta_plus = clip_ternary_sum(belief_alpha_plus + belief_beta + belief_rho + permission)
-        belief_delta_minus = clip_ternary_sum(belief_alpha_minus + belief_beta + belief_rho + permission)
+        belief_gate = int(permission == 1 and belief_beta != -1 and belief_rho != -1)
+        belief_delta_plus = belief_alpha_plus * belief_gate
+        belief_delta_minus = belief_alpha_minus * belief_gate
         belief_plus = update_belief(
             belief_plus, belief_delta_plus, belief_alpha_plus, belief_beta, belief_rho, permission
         )
@@ -1147,6 +1148,8 @@ def run_trading_loop(
             "belief_state": belief_state,
             "belief_plus": belief_plus,
             "belief_minus": belief_minus,
+            "belief_alpha_plus": belief_alpha_plus,
+            "belief_alpha_minus": belief_alpha_minus,
             "belief_delta_plus": belief_delta_plus,
             "belief_delta_minus": belief_delta_minus,
             "decision_kind": decision_kind,

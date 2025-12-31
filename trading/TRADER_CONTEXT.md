@@ -105517,16 +105517,22 @@ For a given direction (d):
   \pi_t \in {-1,0,+1}
   ]
 
-### Belief increment (ternary, clipped)
+### Belief increment (directional, gated)
 
-For each side independently:
+Let the global terms **gate** belief updates rather than add free energy:
 
 [
-\Delta B_t(d)
-= \operatorname{clip}_{{-1,0,+1}}
-\big(
-\alpha_t(d) + \beta_t + \rho_t + \pi_t
-\big)
+g_t =
+\begin{cases}
+1 & \pi_t = 1 \land \beta_t \neq -1 \land \rho_t \neq -1 \
+0 & \text{otherwise}
+\end{cases}
+]
+
+Then for each side independently:
+
+[
+\Delta B_t(d) = g_t \cdot \alpha_t(d)
 ]
 
 ### Belief update rule
@@ -105536,7 +105542,7 @@ Let (B_t(d)\in{\bot,0,1,2}):
 ```
 if π_t == -1:
     B_{t+1}(d) = 0        # forced disbelief (ban)
-elif α_t(d)==0 and β_t<=0:
+elif α_t(d)==0 and β_t==-1:
     B_{t+1}(d) = ⊥        # epistemic unknown
 else:
     if B_t(d) == ⊥:
@@ -106288,3 +106294,376 @@ Right now, with 25% conflict, your simplex-by-belief is mostly telling you “bo
 
 If you paste the ~20 lines in `run_trader.py` where you compute `alpha_plus/alpha_minus` (or whatever feeds the belief deltas), I’ll point to the exact line that’s causing `(2,2)` to dominate and give you the precise replacement.
 
+
+
+Short answer: **split by *responsibility boundaries*, not by size**, and keep the hot loop thin.
+Your current `run_trader.py` is doing **six jobs at once**, which is why it feels hard to reason about.
+
+Below is a **concrete, low-risk refactor plan** that keeps behaviour identical while making it tractable.
+
+---
+
+## 1️⃣ Identify the natural seams (already present)
+
+Your file already *contains* the seams — they’re just not separated yet. From reading the code, the responsibilities are:
+
+| Responsibility             | What it currently includes                  |
+| -------------------------- | ------------------------------------------- |
+| **Data ingestion**         | CSV discovery, parsing, cleaning            |
+| **Signal extraction**      | Triadic state, planes, stress, MDL          |
+| **Policy / control**       | Ternary controller, permissions, thesis FSM |
+| **Execution & accounting** | Position updates, slippage, PnL             |
+| **Logging & telemetry**    | Row construction, CSV writes, prints        |
+| **Orchestration / CLI**    | `main()`, argument parsing, multi-run       |
+
+Each of these can become a *stable module* with very little cross-talk.
+
+---
+
+## 2️⃣ Minimal module split (recommended)
+
+This is the **smallest split** that gives you sanity without rewriting everything.
+
+```
+trading/
+├── io/
+│   ├── prices.py        # CSV discovery + load_prices
+│   └── logs.py          # CSV append, trade logs
+│
+├── signals/
+│   ├── triadic.py       # compute_triadic_state
+│   ├── stress.py        # compute_structural_stress
+│   ├── planes.py        # plane detection, flips, rates
+│   └── shadow_mdl.py    # shadow MDL window logic
+│
+├── policy/
+│   ├── ternary.py       # ternary_controller, permission, sign
+│   ├── thesis.py        # ThesisState, FSM, constraints
+│   └── belief.py        # belief update + labels
+│
+├── execution/
+│   ├── sizing.py        # cap, risk parity, edge gate
+│   ├── fills.py         # fill logic, slippage, fees
+│   └── accounting.py   # PnL, equity, drawdown
+│
+├── engine/
+│   └── loop.py          # run_trading_loop (thin)
+│
+├── cli.py               # argparse + main()
+└── run_trader.py        # imports + entrypoint only
+```
+
+> 🔑 **Rule:** `engine/loop.py` should *not* know how CSVs work, how MDL works, or how logging formats rows.
+
+---
+
+## 3️⃣ What stays inside the hot loop (important)
+
+The loop should reduce to **pure state transition**:
+
+```python
+state = step_signals(state, price[t])
+decision = policy(state)
+fill = execution(decision, state)
+accounting.update(fill, price[t])
+logger.emit(state, decision, fill)
+```
+
+Anything that:
+
+* parses files
+* builds dicts
+* formats strings
+* computes rolling windows from scratch
+
+should live **outside** or behind a function boundary.
+
+---
+
+## 4️⃣ Split order (lowest risk → highest)
+
+Do this **incrementally**, committing after each step:
+
+### Step 1 — Pure helpers (no state)
+
+Move these *first* (zero risk):
+
+* `norm_*`
+* `clip_ternary_sum`
+* `compute_triadic_state`
+* `compute_structural_stress`
+
+👉 New home: `signals/`, `utils/`
+
+---
+
+### Step 2 — Thesis FSM (already isolated)
+
+Your thesis FSM is *already perfect* for extraction:
+
+* `ThesisState`
+* `ThesisInputs`
+* `ThesisParams`
+* `step_thesis_memory`
+* `apply_thesis_constraints`
+
+👉 New home: `policy/thesis.py`
+
+Nothing else needs to change.
+
+---
+
+### Step 3 — Logging isolation
+
+Create a single function:
+
+```python
+emit_step_row(row, log_path)
+emit_trade_row(trade_row, trade_log_path)
+```
+
+Move **all CSV writes and prints** out of the loop body.
+
+👉 New home: `io/logs.py`
+
+This alone will shrink the loop by ~25%.
+
+---
+
+### Step 4 — Execution math
+
+Group these together:
+
+* cap calculation
+* slippage
+* fill logic
+* fee logic
+
+👉 New home: `execution/`
+
+At this point, the loop becomes readable.
+
+---
+
+## 5️⃣ What *not* to split yet
+
+Avoid these until later:
+
+* Splitting the loop itself into classes
+* Turning everything into objects
+* Abstracting the ternary algebra further
+
+Right now, **clarity > architecture purity**.
+
+---
+
+## 6️⃣ Resulting mental model (why this works)
+
+After the split, you’ll be able to reason in layers:
+
+* **Signals** ask: *what is happening?*
+* **Policy** asks: *what should we do?*
+* **Execution** asks: *what actually happened?*
+* **Accounting** asks: *did it help?*
+
+That matches exactly how you already think about:
+
+* thesis vs field
+* permission vs action
+* regret vs realised PnL
+
+You’re just letting the code reflect it.
+
+---
+
+## 7️⃣ If you want, next step
+
+If you want, I can:
+
+* Propose **exact function signatures** for each module
+* Produce a **diff-style refactor plan**
+* Or collapse the loop to ~200 lines without changing behaviour
+
+All recommendations above are based directly on `run_trader.py` as provided .
+
+Just tell me how aggressive you want to be.
+
+
+Short answer: **yes — but not yet in the way you might think.**
+You *do* need plane-aware logic, but **belief-plane awareness must come before strategy-plane awareness**, otherwise you’re selecting strategies on top of a corrupted epistemic substrate.
+
+What you just discovered with the belief collapse is *exactly* why the ordering matters.
+
+---
+
+## The correct dependency order (this is the key insight)
+
+Think in layers:
+
+```
+MARKET → plane_sign / geometry
+        ↓
+BELIEF LAYER (epistemics)
+        ↓
+THESIS (commitment / hysteresis)
+        ↓
+STRATEGY SELECTION (MDL / policies)
+        ↓
+ACTION
+```
+
+Right now you’re asking:
+
+> “Don’t we need plane-aware?”
+
+The answer is:
+
+> **Yes — but the belief layer must be plane-aware *first*.
+> Strategy plane-awareness comes later.**
+
+If you jump straight to “plane-aware strategy selection”, you’re asking the MDL selector to reason over **states that don’t yet mean what you think they mean**.
+
+### Belief-plane awareness is a prerequisite
+
+Plane awareness must first live in the **belief layer**:
+
+* The active plane determines which belief side can move.
+* The opposite belief side must decay or hold (never gain).
+* Global terms (`beta`, `rho`, `permission`) only gate *whether* belief can move.
+
+This must be true before any plane-aware strategy selection.
+
+---
+
+## Why plane-aware belief is non-optional
+
+Your belief FSM is answering this question:
+
+> *“Given what I’m seeing, how strongly do I believe LONG vs SHORT?”*
+
+That question is **definitionally plane-aware**.
+
+If belief updates are not conditioned on *which plane is active*, you get exactly what you observed:
+
+* symmetric accumulation
+* `(B⁺, B⁻) → (2,2)`
+* “conflict” becoming a basin instead of a boundary
+
+That’s not a tuning issue — it’s a missing conditional.
+
+### Correct belief update semantics (this is the invariant)
+
+At any timestep:
+
+* **Only the active plane is allowed to add belief**
+* The opposite belief must either decay or stay neutral
+* Global terms (`beta`, `rho`, `permission`) only decide *whether* belief may move, not *which direction*
+
+Formally:
+
+```
+if plane_sign == +1 and gate_passes:
+    B⁺ += α
+    B⁻ -= decay
+elif plane_sign == -1 and gate_passes:
+    B⁻ += α
+    B⁺ -= decay
+else:
+    both decay or hold
+```
+
+This is *plane-aware belief*.
+Without this, *no downstream plane logic is trustworthy*.
+
+---
+
+## Why plane-aware strategy selection must wait
+
+Your TODO item:
+
+```
+[ ] Enable plane-aware strategy selection (MDL selector over strategies)
+```
+
+This is the **right final step**, but only *after*:
+
+* belief α is antisymmetric ✔️
+* belief deltas are gated ✔️
+* conflict is rare and transient ✔️
+* belief_state actually partitions the simplex meaningfully ✔️
+
+Otherwise, the MDL selector will do something pathological:
+
+* learn that “conflict” is common
+* prefer strategies that avoid commitment
+* reinforce flat/unknown dominance again
+
+You’d be encoding epistemic confusion *into the policy layer*.
+
+---
+
+## What “plane-aware strategy selection” actually means (later)
+
+Once belief is fixed, **then** plane-aware strategy selection becomes clean and powerful.
+
+Conceptually:
+
+* Each strategy is evaluated **conditioned on belief_state × plane**
+* MDL chooses *which policy class to apply*, not the action itself
+
+Example:
+
+| belief_state | plane | preferred strategy |
+| ------------ | ----- | ------------------ |
+| L2           | +     | trend-hold         |
+| L1           | +     | cautious scale-in  |
+| S2           | −     | short trend        |
+| CONFLICT     | ±     | no-trade / probe   |
+| UNK          | 0     | flat / observe     |
+
+But notice:
+👉 **belief_state already encodes plane dominance**.
+That’s why belief must be right first.
+
+---
+
+## Your updated TODO list is exactly correct
+
+Your new TODO items are in the *right order*:
+
+1. **Log belief alpha per side**
+   → verify antisymmetry
+
+2. **Gate belief deltas**
+   → remove symmetric energy injection
+
+3. **Verify `(alpha_plus, alpha_minus)` counts**
+   → empirical proof the FSM is directional
+
+4. **Then** enable plane-aware strategy selection
+   → now the MDL layer has something real to condition on
+
+This is textbook epistemic hygiene.
+
+---
+
+## Mental model to keep you honest
+
+* **Plane** = “what geometry is active”
+* **Belief** = “what do I think is true”
+* **Thesis** = “what I’m committing to”
+* **Strategy** = “how I act given belief”
+
+If belief is not plane-aware, everything above it becomes superstition.
+
+---
+
+### If you want next steps
+
+I can:
+
+* write the **exact belief update pseudocode** you should lock in as an invariant
+* give you a **unit test** that fails if `(B⁺,B⁻)` symmetry reappears
+* or sketch the **MDL plane-aware selector** once belief_state histograms look sane
+
+You’re on the right path — the conflict spike was the signal, not the bug.

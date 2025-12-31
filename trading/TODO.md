@@ -22,4 +22,8 @@
 - [x] Add belief FSM shadow logging (belief_plus/belief_minus + deltas + belief_state).
 - [x] Add simplex split by belief_state (UNK/FLAT/L1/L2/S1/S2/CONFLICT).
 - [x] Relax belief collapse rule to trigger only on beta == -1.
-- [ ] Enable plane-aware strategy selection (MDL selector over strategies).
+- [x] Log belief alpha per side (belief_alpha_plus/belief_alpha_minus) for antisymmetry checks.
+- [x] Gate belief deltas by permission/beta/rho so only directional alpha moves beliefs.
+- [ ] Verify `(alpha_plus, alpha_minus)` counts from logs after a 5k tape run.
+- [ ] Decide: decay vs hold when plane_sign == 0 (belief-plane behavior in neutral geometry).
+- [ ] Enable plane-aware strategy selection (MDL selector over strategies), after belief-plane behavior is locked.

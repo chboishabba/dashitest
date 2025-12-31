@@ -173,7 +173,7 @@ Per-step log (see `logs/trading_log*.csv`) includes:
 - Ternary control: `direction`, `edge_t`, `permission`, `capital_pressure`, `risk_budget`, `action_t`
 - Thesis memory: `action_signal`, `thesis_depth`, `thesis_hold`
 - Thesis memory (FSM): `thesis_d`, `thesis_s`, `thesis_a`, `thesis_c`, `thesis_v`, `thesis_alpha`, `thesis_beta`, `thesis_rho`, `thesis_ds`, `thesis_sum`, `thesis_event`, `thesis_reason`, `thesis_override`
-- Belief/decision state: `belief_state`, `belief_plus`, `belief_minus`, `belief_delta_plus`, `belief_delta_minus`, `decision_kind`
+- Belief/decision state: `belief_state`, `belief_plus`, `belief_minus`, `belief_alpha_plus`, `belief_alpha_minus`, `belief_delta_plus`, `belief_delta_minus`, `decision_kind`
 - Benchmark-regret reward: `r_step`, `tc_step`, `benchmark_x`, `reward_regret`
 - Action persistence: `action_run_length`, `time_since_last_switch`
 - Shadow thesis: `shadow_delta_mdl`, `shadow_would_promote`, `shadow_is_tie`, `shadow_reject`
@@ -185,6 +185,11 @@ Per-trade log (see `logs/trading_log_trades_*.csv`) includes:
 - `thesis_depth_exit` (thesis depth at close, when logged)
 - `thesis_depth_prev` (thesis depth one step before close, when logged)
 - `thesis_depth_peak` (max thesis depth observed during the trade, when logged)
+
+## Belief update (directional gating)
+
+- Directional belief increments are gated by `permission`, `beta`, and `rho`, then apply the signed `alpha` per side.
+- See `TRADER_CONTEXT.md:105520` for the formal definition.
 
 ## Planned diagnostics (logging-only)
 
@@ -215,6 +220,7 @@ These are design targets only; log the inputs first and validate geometry before
 - Add an orthogonal volatility regime feature from OHLC (realized vol + ternary regime flag).
 - Add a minimal thesis-memory state machine (direction/strength/age/cooldown/invalidation).
 - Add a benchmark-regret reward option vs a constant-exposure baseline (optionally risk-adjusted by realized vol).
+- Plane-aware strategy selection depends on plane-aware belief updates (belief-plane awareness comes first).
 - Use fixed quantile bins (q05..q95) with under/overflow bins and suppress bins with < 30 samples
 - If no signed `plane_rate` is logged, use `delta_plane` as the signed proxy and `plane_abs = abs(delta_plane)`
 - If quantile edges collapse (identical values), fall back to linear bins over finite min/max
