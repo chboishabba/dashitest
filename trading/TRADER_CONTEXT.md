@@ -103654,3 +103654,279 @@ Until that happens:
 > It is the mathematically correct answer.**
 
 And your geometry just proved it.
+
+
+This is the right moment to ask that question — because the plots you’ve produced mean **you’re no longer guessing**. They tell you *exactly* why profitability is capped and what kind of change would actually move the needle.
+
+I’ll be very direct and structured.
+
+---
+
+## 0. First, a hard truth (but a good one)
+
+Right now your system is behaving **correctly**.
+
+* It is **not leaving money on the table by mistake**
+* It is **refusing to hallucinate structure**
+* It is **matching the information content of the market**
+
+So “become more profitable” **cannot** mean:
+
+* trade more
+* add heuristics
+* relax gates
+* tweak thresholds blindly
+
+All of those would increase *activity*, not *expected value*.
+
+Profitability can only increase if **one of three things changes**:
+
+1. The **market signal** you are feeding it
+2. The **time-scale alignment** of memory vs structure
+3. The **objective being optimised**
+
+Everything else is noise.
+
+---
+
+## 1. Why profit is capped right now (from your own geometry)
+
+Your plots prove three things:
+
+### (A) The market is informationally low-rank
+
+The simplex collapsing onto a ray means:
+
+> “Most of the variance lives in a single monotone dimension.”
+
+That dimension is price drift.
+
+### (B) Short-horizon curvature is not monetisable
+
+Your heatmaps show:
+
+* Promotions ≠ positive ΔPnL
+* Action ≠ reward
+* Plane magnitude ≠ persistence
+
+So **micro-structure does not pay** at your current horizon.
+
+### (C) Buy-and-hold dominates MDL
+
+This implies a theorem:
+
+> Any controller that trades more frequently must extract *new information* not present in price alone.
+
+You currently don’t.
+
+---
+
+## 2. Therefore: the only ways forward that actually work
+
+### Path 1 — Add **orthogonal information**, not better rules
+
+This is the *highest-ROI* path.
+
+Right now you feed:
+
+* price → plane → stress → MDL
+
+You need **another independent axis**.
+
+Examples that *count* (not all are easy):
+
+* Cross-asset spread (e.g. MSFT vs SPY)
+* Volatility regime indicator (realised vs implied proxy)
+* Volume / liquidity stress
+* Time-of-day / session structure
+* Regime labels (earnings windows, macro releases)
+
+**Rule of thumb:**
+
+> If it can be derived from the same price series, MDL will kill it.
+
+You need information that **changes description length**, not just parameters.
+
+---
+
+### Path 2 — Introduce *thesis memory* (but minimally)
+
+Right now the system asks, every step:
+
+> “Is a split *permanently* justified?”
+
+That’s an extremely high bar.
+
+What you’re missing is **temporary commitment**.
+
+You need a construct like:
+
+```
+thesis := {
+  direction,
+  confidence,
+  decay_rate,
+  invalidation_conditions
+}
+```
+
+Key properties:
+
+* It is **ephemeral**
+* It does **not fork the model**
+* It decays unless reinforced
+* It can exit for reasons other than `flat`
+
+This gives you:
+
+* Longer action runs
+* Fewer re-entries
+* Ability to monetise *persistent but non-eternal* structure
+
+Crucially:
+
+> This does NOT weaken MDL — it adds a cheaper intermediate description.
+
+Think of it as:
+
+* HOLD = 0 bits
+* THESIS = small fixed cost
+* SPLIT = large permanent cost
+
+Right now you jump from 0 → large. That’s why nothing fires.
+
+---
+
+### Path 3 — Change the objective (most people miss this)
+
+Your system is implicitly optimising:
+
+> **Expected PnL per unit description length**
+
+But traders often want:
+
+* drawdown control
+* convex payoff
+* tail protection
+* variance harvesting
+
+If you want more profit, ask:
+
+> *Profit in what sense?*
+
+Examples:
+
+* Volatility harvesting strategies will trade even in zero-drift markets
+* Carry strategies monetise time, not direction
+* Trend-following needs **multi-scale confirmation**, not single-plane geometry
+
+This may require:
+
+* A second reward channel
+* A multi-objective MDL
+* Explicit risk-budget optimisation
+
+Otherwise the system will keep saying “hold”.
+
+Correctly.
+
+---
+
+## 3. What NOT to do next (very important)
+
+Do **not**:
+
+* Lower thresholds
+* Force trades
+* Promote more aggressively
+* Disable vetoes
+* Tune parameters before changing information
+
+That will:
+
+* Increase trade count
+* Decrease true expectancy
+* Destroy the meaning of your diagnostics
+
+Your plots would turn into confetti — not signal.
+
+---
+
+## 4. Concrete next steps (in the right order)
+
+### Step 1 — Add one orthogonal feature
+
+Pick exactly one:
+
+* volatility regime
+* cross-asset relative strength
+* volume anomaly
+
+Log it. Do **not** trade on it yet.
+
+### Step 2 — Re-run geometry
+
+Plot:
+
+* simplex with new axis
+* ΔPnL conditioned on that axis
+
+If the simplex **fattens**, you’ve won.
+
+---
+
+### Step 3 — Add thesis memory (no new signals)
+
+Implement:
+
+* thesis entry when promote clusters persist
+* thesis decay
+* thesis-based exit reasons
+
+Then re-plot:
+
+* run length vs ΔPnL
+* exit reasons distribution
+
+---
+
+### Step 4 — Only then consider new actions
+
+If and only if:
+
+* longer runs have higher ΔPnL
+* exits cluster meaningfully
+* MDL no longer collapses to flat
+
+Then you can ask:
+
+> “Should we act more?”
+
+Until then, the answer is *correctly* “no”.
+
+---
+
+## 5. The punchline
+
+Your system has already done something most trading systems never do:
+
+> **It proved that the market you gave it does not pay for complexity.**
+
+That is not a failure.
+That is information.
+
+To become more profitable, you must either:
+
+1. Give it **new information**, or
+2. Let it **remember temporarily**, or
+3. Change **what ‘profit’ means**.
+
+Everything else is just noise with commissions.
+
+If you want, next we can:
+
+* design the minimal thesis-memory state machine
+* choose the *single best* orthogonal feature to add
+* or formally redefine the reward so flat is no longer dominant
+
+Just tell me which path you want to walk.

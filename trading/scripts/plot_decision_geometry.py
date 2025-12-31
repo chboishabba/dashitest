@@ -186,7 +186,7 @@ def plot_overlay(df: pd.DataFrame, plane_rate: str, args) -> plt.Figure:
     axes[0].set_ylabel("price")
 
     axes[1].plot(t, plane, color="tab:blue", linewidth=1.0, label="plane_rate")
-    axes[1].fill_between(t, 0.0, plane_abs, color="tab:orange", alpha=0.3, label="plane_abs")
+    axes[1].fill_between(t, 0.0, plane_abs, color="tab:orange", alpha=0.2, label="plane_abs")
     axes[1].set_ylabel("plane")
     axes[1].legend(loc="upper right", fontsize=8)
 
@@ -196,12 +196,12 @@ def plot_overlay(df: pd.DataFrame, plane_rate: str, args) -> plt.Figure:
 
     for ax in axes:
         for x in t[promote_mask]:
-            ax.axvline(x, color="purple", alpha=0.15, linewidth=1.0)
+            ax.axvline(x, color="purple", alpha=0.2, linewidth=1.0)
         for x in t[action_mask]:
-            ax.axvline(x, color="green", alpha=0.12, linewidth=1.0)
+            ax.axvline(x, color="green", alpha=0.2, linewidth=1.0)
         if flip_mask is not None:
             for x in t[flip_mask]:
-                ax.axvline(x, color="gray", alpha=0.12, linewidth=1.0, linestyle="--")
+                ax.axvline(x, color="gray", alpha=0.2, linewidth=1.0, linestyle="--")
 
     return fig
 

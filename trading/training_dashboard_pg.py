@@ -93,13 +93,32 @@ def list_csv_logs(log_dir: pathlib.Path):
     return sorted(p for p in log_dir.glob("*.csv") if p.is_file())
 
 
+def is_trade_log(path: pathlib.Path) -> bool:
+    return path.name.startswith("trading_log_trades_")
+
+
+def resolve_trade_log(path: pathlib.Path, logs_dir: pathlib.Path) -> pathlib.Path:
+    """
+    If the user selected a trade log, try to map it to the corresponding per-step log.
+    """
+    if not is_trade_log(path):
+        return path
+    step_name = path.name.replace("trading_log_trades_", "trading_log_", 1)
+    step_path = logs_dir / step_name
+    if step_path.exists():
+        print(f"[log] selected trade log; using per-step log {step_path.name}")
+        return step_path
+    print(f"[log] selected trade log {path.name}; no matching per-step log found.")
+    return path
+
+
 def select_log_path(cli_log: str | None, logs_dir: pathlib.Path, choice_idx: int | None = None):
     """
     Resolve the log path. If cli_log is provided, use it. Otherwise, list CSVs under logs_dir
     and let the user pick (defaulting to the newest).
     """
     if cli_log:
-        return pathlib.Path(cli_log)
+        return resolve_trade_log(pathlib.Path(cli_log), logs_dir)
 
     candidates = list_csv_logs(logs_dir)
     if not candidates:
@@ -107,7 +126,9 @@ def select_log_path(cli_log: str | None, logs_dir: pathlib.Path, choice_idx: int
         print(f"No CSV logs found under {logs_dir}. Falling back to {default_path} (may be missing).")
         return default_path
 
-    newest = max(candidates, key=lambda p: p.stat().st_mtime)
+    step_candidates = [p for p in candidates if not is_trade_log(p)]
+    newest_pool = step_candidates if step_candidates else candidates
+    newest = max(newest_pool, key=lambda p: p.stat().st_mtime)
     if choice_idx is not None:
         if 1 <= choice_idx <= len(candidates):
             return candidates[choice_idx - 1]
@@ -115,19 +136,22 @@ def select_log_path(cli_log: str | None, logs_dir: pathlib.Path, choice_idx: int
 
     print("Select a log CSV (Enter = newest):")
     for idx, path in enumerate(candidates, 1):
-        print(f"  [{idx}] {path.name}")
+        label = " (trade log)" if is_trade_log(path) else ""
+        print(f"  [{idx}] {path.name}{label}")
 
     try:
         choice = input(f"Choice [Enter for {newest.name}]: ").strip()
     except EOFError:
         choice = ""
 
+    selected = None
     if choice.isdigit():
         idx = int(choice)
         if 1 <= idx <= len(candidates):
-            return candidates[idx - 1]
-
-    return newest
+            selected = candidates[idx - 1]
+    if selected is None:
+        selected = newest
+    return resolve_trade_log(selected, logs_dir)
 
 
 def prepare_progressive_view(log, day_idx, day_keys, refresh_s, progressive_days):
@@ -188,6 +212,7 @@ class Dashboard(QtWidgets.QMainWindow):
         self.progressive_warned = False
         self.cached_log = pd.DataFrame()
         self.posture_spans = []
+        self.missing_columns_warned = False
         self.init_ui()
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.update_data)
@@ -371,8 +396,12 @@ class Dashboard(QtWidgets.QMainWindow):
 
         if ts_dt is not None and ts_dt.notna().any():
             x = ts_dt
+        elif "ts" in log.columns and log["ts"].notna().any():
+            x = log["ts"]
+        elif "t" in log.columns and log["t"].notna().any():
+            x = log["t"]
         else:
-            x = log["ts"] if "ts" in log.columns and log["ts"].notna().any() else log["t"]
+            x = np.arange(len(log))
         x_plot = coerce_plot_x(x, len(log))
         if len(x_plot) > 1:
             diffs = np.diff(x_plot)
@@ -403,6 +432,14 @@ class Dashboard(QtWidgets.QMainWindow):
                 "x_plot_dtype:", x_plot.dtype,
                 "x_plot_minmax:", (float(np.nanmin(x_plot)), float(np.nanmax(x_plot))) if len(x_plot) else None,
             )
+        if "price" not in log.columns:
+            if not self.missing_columns_warned:
+                print(
+                    f"[log] missing required column 'price' in {self.log_path.name}; "
+                    "select a per-step log (trading_log_*.csv)."
+                )
+                self.missing_columns_warned = True
+            return
         price = log["price"]
         pnl = log["pnl"] if "pnl" in log else None
         p_bad = log["p_bad"] if "p_bad" in log else None

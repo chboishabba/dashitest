@@ -10,5 +10,6 @@
 - [x] Add goal/MDL config to CLI (goal cash, deadline, tax rate, MDL params).
 - [ ] Add edge_ema panel (or overlay) to the PG dashboard.
 - [ ] Plot stress histogram pane in PG dashboard.
+- [x] Guard training_dashboard_pg.py against trade-log selection (auto-select per-step log or show clear error).
 - [ ] Implement explicit baseline simulation for regret (sell-all-at-t0 path).
 - [ ] Enable plane-aware strategy selection (MDL selector over strategies).

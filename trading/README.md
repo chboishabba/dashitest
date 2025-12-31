@@ -137,6 +137,7 @@ Run from this directory with `PYTHONPATH=.` to avoid import issues.
 - `run_trader.py` uses a bounded thesis memory counter (`--thesis-depth-max`) to delay soft-veto exits.
 - `run_trader.py` exposes goal/MDL tuning (`--goal-cash-x --goal-eps --est-tax-rate --mdl-noise-mult --mdl-switch-penalty --mdl-trade-penalty`).
 - `training_dashboard_pg.py` can render rolling histograms with `--hist --hist-window N --hist-bins M`.
+- `training_dashboard_pg.py` expects per-step logs (e.g., `logs/trading_log_*.csv` with a `price` column); trade logs (`logs/trading_log_trades_*.csv`) are not supported.
 
 ## Sanity test outcomes
 
