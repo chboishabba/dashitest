@@ -35,6 +35,7 @@ MDL_SWITCH_PENALTY = 1.0   # side cost for state switches
 MDL_TRADE_PENALTY = 1.0    # side cost for executed trades
 PLANE_BASE = 3.0           # base for surprise planes
 PLANE_COUNT = 4            # number of surprise planes to track (0..PLANE_COUNT-1)
+PLANE_SIGMA_SLOW_ALPHA = 0.002  # slow sigma EMA for plane normalization
 
 # Controls
 HOLD_DECAY = 0.6           # exposure decay factor when action -> HOLD
@@ -217,6 +218,12 @@ def find_stooq_csv():
     )
 
 
+def list_price_csvs(raw_root: pathlib.Path) -> list[pathlib.Path]:
+    if not raw_root.exists():
+        return []
+    return sorted(p for p in raw_root.rglob("*.csv") if p.is_file())
+
+
 def load_prices(path: pathlib.Path, return_time: bool = False):
     def read_basic(p):
         return pd.read_csv(p)
@@ -348,6 +355,8 @@ def run_trading_loop(
     prev_goal_prob = 0.0
     active_trit_count = 0.0
     plane_counts = [0.0 for _ in range(PLANE_COUNT)]
+    plane_k_prev = 0
+    sigma_slow = 0.0
     side_cost = 0.0
     thesis_age = 0      # how long we've held a non-zero thesis
     state_age = 0       # how long the field state has persisted
@@ -368,6 +377,10 @@ def run_trading_loop(
         if len(recent_rets) > 200:
             recent_rets.pop(0)
         sigma = np.std(recent_rets) if recent_rets else dz_min
+        sigma_slow = (
+            (1.0 - PLANE_SIGMA_SLOW_ALPHA) * sigma_slow
+            + PLANE_SIGMA_SLOW_ALPHA * abs(ret)
+        )
         # latent update (EWMA of volatility-normalized returns)
         z_update = ret / (sigma + 1e-9)
         z_update = np.clip(z_update, -5.0, 5.0)
@@ -448,13 +461,16 @@ def run_trading_loop(
         c_spend = cash - tax_est - fees_accrued
 
         # Proxy MDL and stress (plane-aware surprise)
-        noise_threshold = mdl_noise_mult * max(sigma, 1e-9)
         abs_ret = abs(ret)
+        noise_floor = max(sigma_slow, 1e-9)
+        noise_threshold = mdl_noise_mult * noise_floor
         if abs_ret > noise_threshold:
-            plane_index = int(np.floor(np.log(abs_ret / noise_threshold) / np.log(PLANE_BASE)))
-            plane_index = max(0, min(plane_index, PLANE_COUNT - 1))
+            plane_k = int(np.floor(np.log(abs_ret / noise_threshold) / np.log(PLANE_BASE)))
+            plane_index = max(0, min(plane_k, PLANE_COUNT - 1))
         else:
             plane_index = -1
+            plane_k = 0
+        delta_plane = plane_k - plane_k_prev
         active_trit = 1.0 if plane_index >= 0 else 0.0
         active_trit_count += active_trit
         plane_hits = []
@@ -526,6 +542,9 @@ def run_trading_loop(
             "stress": stress,
             "active_trit": active_trit,
             "plane_index": plane_index,
+            "plane_k": plane_k,
+            "delta_plane": delta_plane,
+            "sigma_slow": sigma_slow,
             "plane0": plane_hits[0] if PLANE_COUNT > 0 else 0.0,
             "plane1": plane_hits[1] if PLANE_COUNT > 1 else 0.0,
             "plane2": plane_hits[2] if PLANE_COUNT > 2 else 0.0,
@@ -560,15 +579,19 @@ def run_trading_loop(
                 log_path, mode="a", header=not log_path.exists(), index=False
             )
         if log_level in {"trades", "verbose"} and fill != 0:
-            print(
-                f"[trade] t={t:6d} px={price[t]:.2f} fill={fill:.4f} pos={pos:.4f} "
-                f"cap={cap:.4f} act={int(row['action'])} banned={int(banned)} "
-                f"cash_eff={row['cash_eff']:.5f} exec_eff={row['exec_eff']:.5f} "
-                f"c_spend={row['c_spend']:.2f} goal_p={row['goal_prob']:.3f} "
-                f"mdl={row['mdl_rate']:.4f} stress={row['stress']:.4f} "
-                f"plane={row['plane_index']} can_trade={row['can_trade']} "
-                f"regret={row['regret']:.2f}"
-            )
+            trade_throttle = progress_every if progress_every else 1
+            if t % trade_throttle != 0 and t != total_steps:
+                pass
+            else:
+                print(
+                    f"[trade] t={t:6d} px={price[t]:.2f} fill={fill:.4f} pos={pos:.4f} "
+                    f"cap={cap:.4f} act={int(row['action'])} banned={int(banned)} "
+                    f"cash_eff={row['cash_eff']:.5f} exec_eff={row['exec_eff']:.5f} "
+                    f"c_spend={row['c_spend']:.2f} goal_p={row['goal_prob']:.3f} "
+                    f"mdl={row['mdl_rate']:.4f} stress={row['stress']:.4f} "
+                    f"plane={row['plane_index']} can_trade={row['can_trade']} "
+                    f"regret={row['regret']:.2f}"
+                )
         if log_level != "quiet" and progress_every and (t % progress_every == 0 or t == total_steps):
             print(
                 f"[{source}] t={t:6d}/{total_steps:6d} pnl={row['pnl']:.4f} pos={row['pos']:.4f} "
@@ -582,6 +605,7 @@ def run_trading_loop(
         prev_pnl = pnl
         prev_goal_prob = goal_prob
         c_spend_prev = c_spend
+        plane_k_prev = plane_k
         time.sleep(sleep_s)  # slow enough to watch in dashboard
 
     # print summary stats
@@ -635,9 +659,45 @@ def main(
     sigma_target: float = SIGMA_TARGET,
     progress_every: int = 0,
     log_level: str = "info",
+    run_all: bool = False,
+    raw_root: str = "data/raw",
+    log_prefix: str = "logs/trading_log",
+    inter_run_sleep: float = 0.5,
 ):
     source = "stooq"
     try:
+        if run_all:
+            raw_root_path = pathlib.Path(raw_root)
+            csv_paths = list_price_csvs(raw_root_path)
+            if not csv_paths:
+                raise FileNotFoundError(f"No CSVs found under {raw_root_path}.")
+            for idx, csv_path in enumerate(csv_paths, 1):
+                try:
+                    price, volume, ts = load_prices(csv_path, return_time=True)
+                except Exception as exc:
+                    print(f"[skip] {csv_path} ({exc})")
+                    continue
+                source = f"{csv_path.parent.name}:{csv_path.stem}"
+                log_path = pathlib.Path(f"{log_prefix}_{csv_path.stem}.csv")
+                print(f"[run {idx}/{len(csv_paths)}] {csv_path} -> {log_path}")
+                run_trading_loop(
+                    price=price,
+                    volume=volume,
+                    source=source,
+                    time_index=ts,
+                    max_steps=max_steps,
+                    sleep_s=sleep_s,
+                    risk_frac=risk_frac,
+                    contract_mult=contract_mult,
+                    sigma_target=sigma_target,
+                    log_path=log_path,
+                    progress_every=progress_every,
+                    log_level=log_level,
+                )
+                if inter_run_sleep > 0:
+                    time.sleep(inter_run_sleep)
+            return
+
         csv_path = find_btc_csv()
         if csv_path is not None:
             price, volume, ts = load_prices(csv_path, return_time=True)
@@ -681,6 +741,15 @@ if __name__ == "__main__":
     ap.add_argument("--risk-frac", type=float, default=DEFAULT_RISK_FRAC, help="Risk fraction.")
     ap.add_argument("--sigma-target", type=float, default=SIGMA_TARGET, help="Target vol.")
     ap.add_argument("--progress-every", type=int, default=0, help="Print progress every N steps.")
+    ap.add_argument("--all", action="store_true", help="Run over all CSVs under data/raw.")
+    ap.add_argument("--raw-root", type=str, default="data/raw", help="Root directory to scan when --all set.")
+    ap.add_argument(
+        "--log-prefix",
+        type=str,
+        default="logs/trading_log",
+        help="Log prefix when --all set (per-file log suffix added).",
+    )
+    ap.add_argument("--inter-run-sleep", type=float, default=0.5, help="Pause between runs when --all set.")
     ap.add_argument(
         "--log-level",
         type=str,
@@ -696,4 +765,8 @@ if __name__ == "__main__":
         sigma_target=args.sigma_target,
         progress_every=args.progress_every,
         log_level=args.log_level,
+        run_all=args.all,
+        raw_root=args.raw_root,
+        log_prefix=args.log_prefix,
+        inter_run_sleep=args.inter_run_sleep,
     )

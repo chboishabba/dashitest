@@ -32,6 +32,7 @@ PYTHONPATH=. python run_all_two_pointO.py \
 - `regime.py`: Regime acceptance utilities (run-length, flip-rate, vol gates).
 - `runner.py`: Strategy/executor glue; builds bar dataframes and logs execution traces.
 - `run_trader.py`: Core trading loop, triadic state computation, stress/bad-flag logic, log writer.
+  - `python run_trader.py --all` runs all CSVs under `data/raw` sequentially (per-file logs).
 - `run_all.py`: Multi-market runner (with optional live dashboard).
 - `run_all_two_pointO.py`: Orchestrator for market summaries, tau sweeps, CA tape preview, and news windows.
 - `data_downloader.py`: Data ingestion for Stooq/Yahoo/CoinGecko/Binance; writes `data/raw`.

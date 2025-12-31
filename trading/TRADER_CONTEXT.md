@@ -93914,3 +93914,515 @@ The planes don't seem to move much if at all once in the steady state (I think i
 [trade] t= 33241 px=87914.50 fill=0.1107 pos=0.3891 cap=2.4280 act=1 banned=0 cash_eff=-0.00000 exec_eff=1.00000 c_spend=57982.49 goal_p=0.000 mdl=0.4560 stress=0.0454 plane=-1 can_trade=1 regret=42015.59
 [btc] t= 33241/ 33241 pnl=92190.4377 pos=0.3891 fill=0.1107 act=1 p_bad=0.631 bad=0 cash_eff=-0.00000 exec_eff=1.00000 mdl_rate=0.4560 stress=0.0454 goal_prob=0.000
 Run complete: source=btc, steps=33241, trades=12516, pnl=92190.4377
+
+
+
+This is a **very good observation**, and you’re right to be suspicious. What you’re seeing is *not* a bug so much as a **design saturation**: the planes have collapsed into a steady-state because of how they’re currently defined and normalised.
+
+I’ll break this into four parts:
+
+1. **What the planes are actually doing right now (why they look frozen)**
+2. **Why `plane = -1` dominates in steady state**
+3. **What signal you’re actually missing (and why the BAN still fires correctly)**
+4. **Two concrete fixes: one minimal, one “proper”**
+
+---
+
+## 1. What the planes are actually doing right now
+
+Your current plane definition (from the patch we discussed) is essentially:
+
+> “How many base-3 orders of magnitude is the current return above the *current* noise floor?”
+
+But crucially:
+
+* The **noise floor is adaptive** (`sigma`)
+* The **plane baseline (`k_bar`) is also adaptive**
+* Returns in BTC microstructure are **locally stationary** for long stretches
+
+So after warm-up, the system reaches a fixed point:
+
+> returns ≈ sigma
+> ⇒ `r / noise_threshold ≈ O(1)`
+> ⇒ `plane_k ≈ 0` almost always
+> ⇒ relative to `k_bar`, this maps to `plane = -1` (more compressible than baseline)
+
+That’s exactly what your logs show:
+
+```
+plane=-1  (for thousands of steps)
+stress≈0.045
+mdl_rate≈0.45
+```
+
+This is **not “no signal”** — it means:
+
+> *“The market is behaving exactly as expected under the current chart.”*
+
+In video terms: you’re staring at a static background with excellent prediction.
+
+---
+
+## 2. Why `plane = -1` dominates in steady state
+
+Let’s be precise.
+
+You defined:
+
+```text
+plane = sign(plane_k − k_bar)
+```
+
+But in steady state:
+
+* `plane_k` ≈ 0
+* `k_bar` ≈ 0 or 1
+* Therefore `plane_k < k_bar` → `plane = -1`
+
+So **“more compressible than expected” becomes the default label**.
+
+This is why you’re seeing:
+
+```
+plane=-1 can_trade=1
+```
+
+almost all the time.
+
+That’s not wrong — but it means **the plane signal has no *dynamic range*** in calm regimes.
+
+---
+
+## 3. The important part: BAN *is still firing correctly*
+
+Look closely at the catastrophic moments:
+
+```
+t=33203 px=88005.74 fill=-0.9017 ... banned=1 plane=1
+t=33205 px=87985.79 ... banned=1 plane=1
+t=33209 px=87954.88 ... banned=1 plane=1
+```
+
+What this tells us:
+
+* **BAN is driven by different geometry** (velocity, jump size, flip rate)
+* **Planes only spike *after* the break becomes obvious**
+* The planes are currently a **slow, relative MDL signal**, not a jump detector
+
+That’s actually correct per your formalism:
+
+> planes = p-adic *residual thickness*
+> BAN = causal survival constraint
+
+But you *want* planes to start moving **before** BAN, not only during.
+
+Right now they don’t.
+
+---
+
+## 4. What signal you’re missing
+
+You’re currently measuring:
+
+> **absolute surprise** relative to *current* sigma
+
+What you are *not* measuring is:
+
+> **change in compressibility over time**
+
+In video terms:
+You’re encoding each frame relative to the last frame, but **not measuring whether the codec itself is getting worse**.
+
+In trading terms:
+You’re not detecting **compression drift**.
+
+---
+
+## 5. Fix #1 (minimal, safe): add a *delta-plane*
+
+Keep everything you have. Add *one* extra signal:
+
+### Definition
+
+Let:
+
+```python
+delta_plane_t = plane_k - plane_k_prev
+```
+
+Then define a new ternary:
+
+```text
+M̃_t =
+  +1 if delta_plane < 0   (getting more compressible)
+   0 if delta_plane == 0
+  -1 if delta_plane > 0   (compressibility degrading)
+```
+
+### Why this works
+
+* In steady state: `delta_plane ≈ 0` → neutral
+* Before breaks: plane_k starts flickering upward → negative signal
+* During breaks: sustained `delta_plane > 0`
+
+### Where to use it
+
+* Feed **M̃_t**, not raw `plane`, into:
+
+  * sizing dampers
+  * derivative overlays
+  * *pre-BAN throttling*
+
+You do **not** replace BAN. You *precede* it.
+
+This will immediately make the plane trace “move”.
+
+---
+
+## 6. Fix #2 (proper, MDL-correct): stop renormalising the noise floor so aggressively
+
+Right now:
+
+```text
+noise_threshold = mdl_noise_mult * sigma_t
+```
+
+This *forces* plane collapse.
+
+Instead, split sigma into two timescales:
+
+```text
+sigma_fast = EMA(|ret|, τ_fast)
+sigma_slow = EMA(|ret|, τ_slow), τ_slow >> τ_fast
+```
+
+Then define planes using **sigma_slow**:
+
+```text
+plane_k = floor(log(|ret| / (mdl_noise_mult * sigma_slow)) / log(3))
+```
+
+Interpretation:
+
+* `sigma_fast` = execution / sizing
+* `sigma_slow` = codec expectation
+
+Now planes will move when:
+
+* volatility regime shifts
+* microstructure changes
+* trend onset begins
+
+This is *exactly* the video analogy:
+
+> motion compensation trained on yesterday, residuals spike today.
+
+---
+
+## 7. What this means for your monetisation idea
+
+Once planes *move*, you get:
+
+* **Early warning of regime change** (before BAN)
+* A clean trigger for:
+
+  * vol buys
+  * basis trades
+  * calendar spreads
+* A reason to *turn off* directional risk **without flattening**
+
+Right now your system does:
+
+> trade → explode → BAN → flatten
+
+With moving planes it becomes:
+
+> planes drift → reduce cap → switch overlay → BAN rarely fires
+
+That’s the difference between *surviving* and *monetising* hostile regimes.
+
+---
+
+## 8. Bottom line (important)
+
+* Your intuition is correct: **planes should move**
+* The reason they don’t is **over-normalisation**
+* BAN is still correct — planes are just late
+* Add **delta-plane** now (5 lines of code)
+* Add **slow-sigma planes** next (one parameter)
+
+If you want, next I can:
+
+* Propose exact constants (`τ_fast`, `τ_slow`) for BTC
+* Rewrite the plane panel so movement is visually obvious
+* Show how `delta_plane` would have reduced exposure *before* your worst sequence
+
+You’re very close — this is a refinement problem, not a rethink.
+
+
+Good — this log dump is *exactly* what we needed.
+Before adding anything new, here is a **clean, precise diagnosis of what your current system is already doing**, why `plane = -1` dominates, and what is *actually* going wrong (and what is **not** going wrong).
+
+I’ll keep this grounded strictly in the evidence you pasted.
+
+---
+
+## 1. What your current plane signal really means (right now)
+
+Right now, **`plane = -1` does NOT mean “bad”**.
+
+It means:
+
+> *“This bar is more compressible than the running baseline expectation.”*
+
+And your logs show that is almost always true.
+
+Why?
+
+Because:
+
+* returns are small relative to `sigma`
+* `sigma` is adaptive
+* your plane baseline is implicitly tracking the same regime
+
+So the system is saying, over and over:
+
+> “Nothing surprising is happening *relative to what I already expect*.”
+
+That is why:
+
+```
+plane = -1
+stress ≈ 0.045
+mdl_rate ≈ 0.45
+```
+
+stay **stable for tens of thousands of steps**.
+
+This is *exactly* what a well-matched predictor does in steady state.
+
+So:
+✅ **Plane logic is internally consistent**
+❌ **Plane logic is not informative about *future danger***
+
+Those are different problems.
+
+---
+
+## 2. Why catastrophic trades still happen with `plane = -1`
+
+Look at one representative failure:
+
+```
+[trade] t=14000 px=87438.95 fill=-0.7034 pos=13.0203 cap=4.4067 act=-1 banned=0
+...
+mdl=0.4251 stress=0.0519 plane=-1
+```
+
+Important facts:
+
+* `plane = -1` → model believes environment is *compressible*
+* `p_bad = 0.030` → BAN *explicitly* believes risk is low
+* `cap` is **large**
+* position ramps aggressively
+* **only later** do we see:
+
+  ```
+  p_bad ↑ → banned=1 → forced flatten
+  ```
+
+This tells us something very specific:
+
+> The **failure mode is not surprise**
+> The failure mode is **slow accumulation of directional exposure in a flat / noisy regime**
+
+In other words:
+
+*The model is not being “fooled” — it is being **overconfident***.
+
+Planes don’t catch this because **nothing unusual is happening in the residuals**.
+
+---
+
+## 3. What signal you are *actually* missing (before implementing anything new)
+
+Your system currently measures:
+
+| Quantity   | Question answered                                  |
+| ---------- | -------------------------------------------------- |
+| `plane`    | “Is this bar surprising relative to recent noise?” |
+| `stress`   | “How often do surprises occur?”                    |
+| `mdl_rate` | “How complex is my explanation of the data?”       |
+| `p_bad`    | “Is capital survival at risk *right now*?”         |
+
+What you are **not** measuring is:
+
+> **“Am I *earning* the right to keep risk on?”**
+
+That is a *capital efficiency* question, not an information question.
+
+And your own logs prove this:
+
+```
+mdl_rate slowly drifts upward
+stress slowly drifts downward
+plane remains -1
+PnL slowly bleeds
+position ramps anyway
+```
+
+This is a **classic Kelly-overbet-in-zero-edge** failure mode.
+
+---
+
+## 4. Why planes staying flat is actually correct (but insufficient)
+
+Your intuition was:
+
+> “Planes should move more.”
+
+But based on the data:
+
+**They shouldn’t.**
+
+Nothing structurally new is happening in price until BAN events.
+
+From an MDL / codec perspective:
+
+* The signal is stationary
+* Residuals are small
+* Compression rate is stable
+
+So planes are doing their job.
+
+**The real issue is that you are allowing size growth in a regime with ~zero edge.**
+
+Planes are *not designed* to catch that.
+
+---
+
+## 5. The real pre-failure signature hiding in your logs
+
+Look at these patterns (they repeat everywhere):
+
+```
+goal_p → 0
+mdl_rate ↑
+stress ↓ or flat
+plane = -1
+can_trade = 1
+```
+
+This combination means:
+
+> “I am very confident, very wrong, and still allowed to trade.”
+
+That is the bug.
+
+Not planes.
+
+---
+
+## 6. The missing gate (conceptually, before code)
+
+Before adding delta-planes, slow sigmas, etc., you need to recognise:
+
+### There are **two orthogonal failure modes**
+
+| Failure type            | Caught by                             |
+| ----------------------- | ------------------------------------- |
+| Surprise / regime break | BAN, planes                           |
+| Slow bleed / no edge    | **Capital efficiency gate** (missing) |
+
+Right now you only gate the first.
+
+---
+
+## 7. What *should* have stopped these sequences (in principle)
+
+Pick this sequence:
+
+```
+t ≈ 13500 → 16000
+plane = -1 throughout
+mdl_rate rises from 0.41 → 0.47
+goal_p collapses repeatedly
+PnL decays
+```
+
+A correct control system would say:
+
+> “I am not surprised, but I am not making money either. Reduce risk.”
+
+This is **not an information problem**.
+This is a **bet-sizing / Kelly problem**.
+
+---
+
+## 8. The minimal conceptual fix (no new signals yet)
+
+Before implementing *any* new plane logic, the system needs **one rule**:
+
+> **Risk may only increase if capital efficiency is positive.**
+
+Formally (conceptually):
+
+```
+if plane <= 0 and pnl_rate <= 0:
+    cap ← decay toward 0
+```
+
+Where `pnl_rate` is a slow EMA of realised return per unit exposure.
+
+This alone would have prevented:
+
+* the long slow ramps
+* the large positions before BAN
+* the massive regret spikes
+
+Planes are orthogonal — they don’t replace this.
+
+---
+
+## 9. Why this matters for your next steps
+
+If you implement delta-planes *before* fixing this:
+
+* planes will move
+* BAN will fire earlier
+* **but you will still bleed in flat regimes**
+
+That’s not what you want.
+
+The correct order is:
+
+1. **Capital efficiency gate (Kelly discipline)**
+2. Then **plane drift / delta-plane**
+3. Then **derivative monetisation**
+
+---
+
+## 10. Bottom line (very important)
+
+From the evidence you posted:
+
+* ❌ Planes are **not broken**
+* ❌ Plane flatness is **not the cause**
+* ✅ The system is **over-allocating in zero-edge regimes**
+* ✅ The missing control is **“earn the right to scale”**
+
+Planes tell you *when the world changes*.
+They do **not** tell you *when you are wrong but unsurprised*.
+
+That’s the distinction.
+
+---
+
+### If you want, next we can:
+
+* Define a **single scalar “capital efficiency” gate** using only existing logs
+* Show **exactly where in `run_trader.py` it slots in**
+* Re-run this same sequence mentally and show **where size would have decayed instead of ramping**
+* Then *after that*, layer in delta-planes properly
+
+This is the right order if you want robustness *and* monetisation.
