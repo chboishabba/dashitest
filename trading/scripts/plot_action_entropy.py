@@ -13,6 +13,8 @@ import argparse
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+
+from plot_utils import timestamped_path
 from trading.regime import RegimeSpec
 
 
@@ -132,8 +134,9 @@ def main():
     plt.axhline(0.0, color="red", linestyle="--", alpha=0.5)
     plt.tight_layout()
     if args.save:
-        plt.savefig(args.save, dpi=200)
-        print(f"Saved {args.save}")
+        save_path = timestamped_path(args.save)
+        plt.savefig(save_path, dpi=200)
+        print(f"Saved {save_path}")
     plt.show()
 
 

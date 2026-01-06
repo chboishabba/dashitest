@@ -13,6 +13,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+from plot_utils import timestamped_path
+
 
 def load_log(path: str) -> pd.DataFrame:
     try:
@@ -66,8 +68,9 @@ def plot_heatmap(density, time_edges, act_edges, title: str, save: str = None):
     cbar.set_label("P(acceptable)")
     plt.tight_layout()
     if save:
-        plt.savefig(save, dpi=200)
-        print(f"Saved {save}")
+        save_path = timestamped_path(save)
+        plt.savefig(save_path, dpi=200)
+        print(f"Saved {save_path}")
     plt.show()
 
 

@@ -10,6 +10,12 @@ The pipeline operates on grayscale video frames and targets lossless compression
 for the signed temporal residual stream. The benchmark prints both zero-order
 and contexted rANS results for each stream.
 
+Visualization note: `compression/video_bench.py` can emit balanced-ternary
+plane images via `--dump-planes`. These dumps are the codec's sheet
+visualization: each plane is a detail band (tree-Haar sheet) in the sense of
+the nested lift identity (`CONTEXT.md#L11567`–`CONTEXT.md#L11621`), matching the
+tree benchmark's `tree_detail_bands()` definition.
+
 ## Current Pipeline (Lossless)
 
 1. **Decode**

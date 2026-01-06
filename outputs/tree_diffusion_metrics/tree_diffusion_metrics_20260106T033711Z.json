@@ -1,0 +1,13 @@
+{
+  "n_leaves": 729,
+  "rbf_one_step_mse": 1.8394378820600145e-07,
+  "rbf_one_step_q_mse": 1.836441550153835e-07,
+  "rbf_rollout_mse": 8.190285928265993e-07,
+  "rbf_rollout_q_mse": 8.177416452795125e-07,
+  "test_samples": 100,
+  "train_samples": 200,
+  "tree_one_step_mse": 1.8394378820598038e-07,
+  "tree_one_step_q_mse": 1.8364415501536243e-07,
+  "tree_rollout_mse": 2.9949853187893108e-05,
+  "tree_rollout_q_mse": 2.551273799607712e-05
+}

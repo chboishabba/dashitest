@@ -15,6 +15,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+from plot_utils import timestamped_path
+
 
 def plot_counts(df, ax):
     acc = df["acceptable"].astype(bool)
@@ -81,8 +83,9 @@ def main():
     plot_heatmap(df, axes[1], bins=args.bins)
 
     if args.save:
-        plt.savefig(args.save, dpi=200)
-        print(f"Saved {args.save}")
+        save_path = timestamped_path(args.save)
+        plt.savefig(save_path, dpi=200)
+        print(f"Saved {save_path}")
     plt.show()
 
 

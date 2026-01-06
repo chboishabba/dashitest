@@ -1,6 +1,47 @@
 # Changelog
 
 ## Unreleased
+- Documented that the triadic video codec benchmark is stats-only and queued
+  plane-visualization output as a follow-up.
+- Tree diffusion benchmark now trains the tree kernel on quotient features
+  (`quotient_vector`) to break permutation equivalence.
+- Documented a valuation-only primes benchmark plan aligned with valuation depth.
+- Documented the long runtime for Gray-Scott KRR GIF export runs in the README.
+- Added a quotient-invariant integration spec for the triadic trader and
+  logged `q_*` quotient features (E/C/S + deltas) per step.
+- Fixed `run_trader.py` geometry plot invocation to resolve the correct
+  `trading/scripts/plot_decision_geometry.py` path.
+- Added quotient stability reporting and plotting helpers, plus a generic
+  energy landscape visualizer for dashifine outputs.
+- Documented timestamped plot output naming to avoid overwriting prior runs.
+- Plot scripts now auto-timestamp `--save` outputs (trading plots and
+  `plot_energy_landscape.py`) to prevent overwrites.
+- Added a tree diffusion benchmark spec and a runnable script to compare
+  Euclidean vs tree-geometry KRR under quotient metrics.
+- Tree diffusion benchmark now supports optional rollout plots via `--plots`.
+- Tree diffusion benchmark now reports a tree-intrinsic depth-energy quotient.
+- Tree diffusion benchmark now reports tree-band detail energies and a band
+  quotient rollout plot.
+- Documented the sheet-identity mapping between codec plane dumps and tree-band
+  detail sheets, plus the `--dump-planes` visualization hook.
+- Added `--dump-band-planes` to `tree_diffusion_bench.py` to emit per-band,
+  per-step sheet PNGs for codec-style visualization.
+- Added band-plane visualization modes (symmetric normalization, energy-height
+  scaling, and ternary thresholding) to align tree sheets with codec planes.
+- Added `--init-band` to seed tree diffusion with energy isolated to a single
+  band for depth-killing separation tests.
+- Added adversarial band init flags (`--adv-band`, `--adv-style`, `--adv-sparse-m`,
+  `--adv-mix-band`, `--adv-mix-eps`, `--adv-seed`) to stress depth-killing.
+- Documented a cleanup guideline to consolidate bulk PNG dumps into GIFs and
+  remove the individual PNGs.
+- Documented the null-separation/control-case interpretation for tree diffusion
+  and queued a symmetry-breaking variant.
+- Added a brief control-case interpretation note to the tree diffusion spec.
+- Documented discriminator checks for the tree diffusion benchmark.
+- Documented permutation-invariance caveat and queued a quotient-aware kernel
+  for the tree diffusion benchmark.
+- Documented Gray-Scott quotient-space evaluation metrics and selected the
+  V+radial(U) quotient target for rollout evaluation.
 - Benchmark scripts now emit timestamped run subdirectories under `--output_dir`
   to avoid overwriting prior outputs.
 - Added valuation-level indicator targets to the primes/divisibility benchmark

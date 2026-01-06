@@ -101,9 +101,10 @@ def main(
         geometry_root = pathlib.Path(geometry_dir)
         geometry_root.mkdir(parents=True, exist_ok=True)
         prefix = geometry_root / f"{slugify(source_name)}_{run_ts}"
+        script_path = pathlib.Path(__file__).resolve().parent / "scripts" / "plot_decision_geometry.py"
         cmd = [
             sys.executable,
-            "scripts/plot_decision_geometry.py",
+            str(script_path),
             "--csv",
             str(log_path),
             "--save-prefix",

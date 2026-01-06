@@ -15,6 +15,8 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
+from plot_utils import timestamped_path
+
 
 def load_surface(path: str):
     df = pd.read_csv(path)
@@ -74,8 +76,9 @@ def main():
         plot_surface(ax, left_table, args.left_label)
 
     if args.save:
-        plt.savefig(args.save, dpi=200)
-        print(f"Saved {args.save}")
+        save_path = timestamped_path(args.save)
+        plt.savefig(save_path, dpi=200)
+        print(f"Saved {save_path}")
     plt.show()
 
 

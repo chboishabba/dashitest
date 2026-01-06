@@ -17,6 +17,8 @@ import argparse
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+
+from plot_utils import timestamped_path
 from trading.regime import RegimeSpec
 
 
@@ -104,8 +106,9 @@ def plot_heatmap(grid, time_edges, act_edges, title, save=None):
     cbar.set_label("legitimacy margin (>0 deep inside; <0 violating)")
     plt.tight_layout()
     if save:
-        plt.savefig(save, dpi=200)
-        print(f"Saved {save}")
+        save_path = timestamped_path(save)
+        plt.savefig(save_path, dpi=200)
+        print(f"Saved {save_path}")
     plt.show()
 
 

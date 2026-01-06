@@ -15,6 +15,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+from plot_utils import timestamped_path
+
 
 def acceptable_runs(acc: np.ndarray) -> np.ndarray:
     runs = np.zeros_like(acc, dtype=int)
@@ -61,8 +63,9 @@ def plot_heatmap(grid, time_edges, act_edges, title, save=None):
     cbar.set_label("acceptable run-length (bars)")
     plt.tight_layout()
     if save:
-        plt.savefig(save, dpi=200)
-        print(f"Saved {save}")
+        save_path = timestamped_path(save)
+        plt.savefig(save_path, dpi=200)
+        print(f"Saved {save_path}")
     plt.show()
 
 

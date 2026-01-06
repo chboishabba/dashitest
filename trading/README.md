@@ -36,6 +36,7 @@ PYTHONPATH=. python run_all_two_pointO.py \
 - `run_all.py`: Multi-market runner (with optional live dashboard).
 - `run_all_two_pointO.py`: Orchestrator for market summaries, tau sweeps, CA tape preview, and news windows.
 - `docs/decision_alignment_check.md`: Spec for closest-profitable alignment checks on losing trades.
+- `docs/quotient_integration.md`: Quotient-invariant integration plan for learner-gated trader behavior.
 - `data_downloader.py`: Data ingestion for Stooq/Yahoo/CoinGecko/Binance; writes `data/raw`.
 - `ternary_trading_demo.py`: Self-contained demo; encodes ternary signals and compares baseline.
 - `training_dashboard.py`: Matplotlib dashboard for `logs/trading_log.csv`.
@@ -57,7 +58,9 @@ PYTHONPATH=. python run_all_two_pointO.py \
 
 ## Script catalog (analysis + plotting)
 
-Run from this directory with `PYTHONPATH=.` to avoid import issues.
+Run from this directory with `PYTHONPATH=.` to avoid import issues. Plot
+scripts auto-timestamp `--save` outputs to avoid overwriting prior plots (see
+`CONTEXT.md#L2532`).
 
 - `scripts/ca_epistemic_tape.py`: CA tape visualization driven by price series.  
   Command: `PYTHONPATH=. python scripts/ca_epistemic_tape.py --csv data/raw/stooq/btc_intraday_1s.csv`
@@ -97,6 +100,10 @@ Run from this directory with `PYTHONPATH=.` to avoid import issues.
   Command: `PYTHONPATH=. python scripts/plot_microstructure_overlay.py --log logs/trading_log.csv --save logs/microstructure_overlay.png`
 - `scripts/plot_policy_curvature.py`: Curvature of engagement policy vs actionability/state.  
   Command: `PYTHONPATH=. python scripts/plot_policy_curvature.py --log logs/trading_log.csv --save logs/policy_curvature.png`
+- `scripts/plot_quotient_features.py`: Time series of quotient invariants (`q_*`) with rolling mean.  
+  Command: `PYTHONPATH=. python scripts/plot_quotient_features.py --log logs/trading_log.csv --save logs/quotient.png` (auto-timestamped)
+- `scripts/score_quotient_stability.py`: Report quotient drift in stable vs transition segments.  
+  Command: `PYTHONPATH=. python scripts/score_quotient_stability.py --log logs/trading_log.csv --min-run 20`
 - `scripts/plot_regime_surface.py`: Plot acceptability surface from regime sweep CSV.  
   Command: `PYTHONPATH=. python scripts/plot_regime_surface.py --csv logs/accept_surface.csv --save logs/regime_surface.png`
 - `scripts/plot_temporal_homology.py`: Temporal homology diagnostics for acceptable regions.  
@@ -127,6 +134,7 @@ Run from this directory with `PYTHONPATH=.` to avoid import issues.
 - `logs/trading_log.csv`: Primary log for dashboards and analysis scripts.
 - `logs/trading_log_trades_*.csv`: Per-trade logs (one row per closed trade).
 - `logs/news_events/`: News slices fetched by `emit_news_windows` and `run_all_two_pointO`.
+- `logs/quotient_<timestamp>.png`: Optional quotient feature plot output from `plot_quotient_features.py`.
 
 ## Notes
 
@@ -181,6 +189,7 @@ Per-step log (see `logs/trading_log*.csv`) includes:
 - Action persistence: `action_run_length`, `time_since_last_switch`
 - Shadow thesis: `shadow_delta_mdl`, `shadow_would_promote`, `shadow_is_tie`, `shadow_reject`
 - Plane diagnostics: `plane_abs`, `plane_sign`, `plane_sign_flips_W`, `plane_would_veto`
+- Quotient invariants: `q_e64`, `q_c64`, `q_s64`, `q_de`, `q_dc`, `q_ds`
 
 Per-trade log (see `logs/trading_log_trades_*.csv`) includes:
 - `trade_id`, `entry_step`, `exit_step`, `entry_price`, `exit_price`, `trade_duration`

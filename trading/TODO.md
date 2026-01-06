@@ -17,6 +17,11 @@ Legend: (EXEC) implementation, (DECISION) policy decision, (ANALYSIS) analysis/v
 - [x] (DASHBOARD) Guard training_dashboard_pg.py against trade-log selection (auto-select per-step log or show clear error).
 - [ ] (EXEC) Implement explicit baseline simulation for regret (sell-all-at-t0 path).
 - [ ] (EXEC) Add realized-volatility regime feature (continuous + ternary regime flag) and log it.
+- [x] (DECISION) Lock quotient feature set + window (log-returns, MAD norm, W1=64/W2=256, E/C/S + deltas).
+- [x] (EXEC) Implement quotient extractor in `features/quotient.py` and log `q_*` fields.
+- [ ] (EXEC) Add quotient-gated ACCEPT/HOLD/BAN path to `strategy/triadic_strategy.py` (no direction control).
+- [ ] (ANALYSIS) Plot `q_*` time series on cached BTC/SPY runs; confirm regime stability vs raw drift.
+- [ ] (ANALYSIS) Run quotient stability report on cached BTC/SPY runs and capture summary stats.
 - [x] (EXEC) Implement minimal thesis-memory state machine (direction/strength/age/cooldown/invalidation) with logging.
 - [x] (EXEC) Add benchmark-regret reward option vs constant exposure (optional vol-adjusted penalty).
 - [x] (ANALYSIS) Condition decision simplex on thesis state (split by thesis_d/thesis_s).

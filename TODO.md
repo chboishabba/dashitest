@@ -15,6 +15,22 @@
   - Add a projection stress test (mask or subsample the input domain).
   - Interpret the top-10 eigenvalue printout against the temperature sweep.
   - Compare RBF/periodic RBF eigenspectra against dashifine temperature sweeps.
+  - Locate `dashifine/newtest1` + `dashifine/newtest2` energy landscape outputs
+    and visualize with `plot_energy_landscape.py` (heatmap + slope).
+  - Re-run the tree diffusion benchmark and record the tree-band quotient
+    metrics/plots (detail-band energies) alongside existing quotient metrics.
+  - Sweep `--adv-band`/`--adv-style` (randphase/sparse/mix) to compare band
+    kill rates and leakage between RBF and tree kernels.
+  - Add a symmetry-breaking tree diffusion variant (depth-varying diffusion or
+    non-commuting observation map) to force model separation.
+  - Add discriminator checks (kernel-matrix diff, distance-matrix correlation,
+    sparse impulse initializations) for the tree diffusion benchmark.
+  - Re-run the tree diffusion benchmark with the quotient-kernel tree model and
+    record whether rollout/quotient separation appears.
+
+- **Compression / codec follow-ups**
+  - Re-run the tree diffusion benchmark with `--dump-band-planes` and review
+    per-band rollout sheets (optionally stitch GIFs).
 
 - **Generalised learner roadmap (kernel + wave task → broader suite)**
   - Phase 0: lock in baselines, spectra, interpretation, domain assumptions,
@@ -34,10 +50,16 @@
     bias, and minimal conditions for success/failure; capture in a theory note.
   - Priority next: Phase 2 reaction–diffusion (Gray–Scott) one-step prediction,
     with dashifine vs periodic RBF comparison and output logging/plots.
+  - Implement Gray-Scott quotient-space rollout metrics for V+radial(U) per
+    `docs/grayscott_quotient.md`.
+  - Locate `dashifine/newtest/grayscott_krr.py` (not present in this repo) or
+    import it before adding quotient metrics.
   - Review Gray–Scott rollout curves and snapshot grids to compare U/V stability
     across kernels using per-component MSE logs.
   - Interpret conserved-quantity logs (mean U/V, total mass) to distinguish
     global drift from structural failure.
+  - Track runtime for Gray-Scott KRR (GIF export can take ~25m on CPU); consider
+    caching or runtime flags if this becomes a bottleneck.
   - Add a primes/divisibility benchmark series:
     - p-adic valuation (v_p) or divisibility indicator tasks.
     - Sieve-step prediction on a bitmask state.
@@ -45,6 +67,8 @@
     divisibility/v_p baselines are stable.
   - Review valuation-level indicator results to confirm hierarchy-aligned loss
     is behaving as expected.
+  - Add valuation-only targets (valuation vector, max prime power, ultrametric
+    distance) per `docs/valuation_primes_plan.md`.
 
 - **Packed backward passes**
   - MoE: histogram-based gradients directly from packed tokens (per expert, per lane counts), no unpacked view.

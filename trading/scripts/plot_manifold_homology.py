@@ -21,6 +21,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+from plot_utils import timestamped_path
+
 
 def mask_from_log(path: str, time_bins=100, act_bins=20):
     df = pd.read_csv(path)
@@ -78,8 +80,9 @@ def plot_overlap(mask_trader, mask_ca, x_edges, y_edges, title, save=None):
     plt.title(title)
     plt.tight_layout()
     if save:
-        plt.savefig(save, dpi=200)
-        print(f"Saved {save}")
+        save_path = timestamped_path(save)
+        plt.savefig(save_path, dpi=200)
+        print(f"Saved {save_path}")
     plt.show()
 
 

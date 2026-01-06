@@ -13,6 +13,8 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
+from plot_utils import timestamped_path
+
 
 def load_table(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
@@ -56,8 +58,9 @@ def main():
     plot_heat(axes[1], fn_table, "False-negative rate (HOLD & acceptable)", vmin=0.0, vmax=1.0)
 
     if args.save:
-        plt.savefig(args.save, dpi=200)
-        print(f"Saved {args.save}")
+        save_path = timestamped_path(args.save)
+        plt.savefig(save_path, dpi=200)
+        print(f"Saved {save_path}")
     plt.show()
 
 

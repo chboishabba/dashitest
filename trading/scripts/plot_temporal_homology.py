@@ -14,6 +14,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+from plot_utils import timestamped_path
+
 
 def slice_components(mask_slice):
     """Return list of (start_idx, end_idx) contiguous 1-runs in a 1D binary mask."""
@@ -117,8 +119,9 @@ def main():
     plt.colorbar(im, ax=axes[1], fraction=0.046, pad=0.04, label="component id")
 
     if args.save:
-        plt.savefig(args.save, dpi=200)
-        print(f"Saved {args.save}")
+        save_path = timestamped_path(args.save)
+        plt.savefig(save_path, dpi=200)
+        print(f"Saved {save_path}")
     plt.show()
 
 

@@ -16,6 +16,8 @@ import argparse
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+
+from plot_utils import timestamped_path
 from trading.regime import RegimeSpec
 
 
@@ -118,8 +120,9 @@ def plot_heatmap(grid, act_edges, marg_edges, title, save=None):
     plt.legend()
     plt.tight_layout()
     if save:
-        plt.savefig(save, dpi=200)
-        print(f"Saved {save}")
+        save_path = timestamped_path(save)
+        plt.savefig(save_path, dpi=200)
+        print(f"Saved {save_path}")
     plt.show()
 
 

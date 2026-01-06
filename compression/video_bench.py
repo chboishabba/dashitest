@@ -112,6 +112,65 @@ def rgb_to_ycocg_r(frames_rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.n
     return y_u8, co_mag, co_sign, cg_mag, cg_sign
 
 
+def _write_pgm(path: Path, img: np.ndarray) -> None:
+    h, w = img.shape
+    header = f"P5\n{w} {h}\n255\n".encode("ascii")
+    with path.open("wb") as handle:
+        handle.write(header)
+        handle.write(img.tobytes())
+
+
+def _write_png(path: Path, img: np.ndarray) -> bool:
+    try:
+        import imageio.v2 as imageio  # type: ignore
+
+        imageio.imwrite(path, img)
+        return True
+    except Exception:
+        pass
+    try:
+        import matplotlib.pyplot as plt  # type: ignore
+
+        plt.imsave(path, img, cmap="gray", vmin=0, vmax=255)
+        return True
+    except Exception:
+        return False
+
+
+def _dump_bt_planes(
+    out_dir: Path,
+    label_prefix: str,
+    planes_i8: np.ndarray,
+    mag: np.ndarray,
+    sign: np.ndarray,
+    max_frames: int,
+) -> None:
+    tag = label_prefix.rstrip("_") or "gray"
+    plane_dir = out_dir / f"{tag}_bt_planes"
+    plane_dir.mkdir(parents=True, exist_ok=True)
+    npz_path = plane_dir / "bt_planes.npz"
+    np.savez_compressed(npz_path, planes_i8=planes_i8, mag=mag, sign=sign)
+
+    png_dir = plane_dir / "png"
+    png_dir.mkdir(parents=True, exist_ok=True)
+    lut = np.array([0, 127, 255], dtype=np.uint8)
+    frame_limit = planes_i8.shape[1] if max_frames <= 0 else min(max_frames, planes_i8.shape[1])
+    png_ok = None
+    for pi in range(planes_i8.shape[0]):
+        for ti in range(frame_limit):
+            img_u8 = lut[planes_i8[pi, ti] + 1]
+            out_path = png_dir / f"plane{pi:02d}_t{ti:04d}.png"
+            if png_ok is None:
+                png_ok = _write_png(out_path, img_u8)
+                if not png_ok:
+                    _write_pgm(out_path.with_suffix(".pgm"), img_u8)
+                    print(f"PNG writer unavailable; wrote PGM to {out_path.with_suffix('.pgm')}")
+            elif png_ok:
+                _write_png(out_path, img_u8)
+            else:
+                _write_pgm(out_path.with_suffix(".pgm"), img_u8)
+
+
 def stream_entropy(symbols: np.ndarray) -> float:
     counts = np.bincount(symbols, minlength=int(symbols.max()) + 1)
     probs = counts[counts > 0] / counts.sum()
@@ -1067,6 +1126,8 @@ def run_video_bench(
     reuse_planes: int,
     color: bool,
     color_transform: str,
+    dump_planes_dir: Path | None,
+    dump_planes_frames: int,
 ) -> None:
     width, height, nb_frames = ffprobe_video(path)
     if color:
@@ -1099,6 +1160,8 @@ def run_video_bench(
                 reuse_block=reuse_block,
                 reuse_dict=reuse_dict,
                 reuse_planes=reuse_planes,
+                dump_planes_dir=dump_planes_dir,
+                dump_planes_frames=dump_planes_frames,
             )
             print("--- channel co_mag ---")
             co_summary = _bench_frames(
@@ -1118,6 +1181,8 @@ def run_video_bench(
                 reuse_block=reuse_block,
                 reuse_dict=reuse_dict,
                 reuse_planes=reuse_planes,
+                dump_planes_dir=dump_planes_dir,
+                dump_planes_frames=dump_planes_frames,
             )
             print("--- channel cg_mag ---")
             cg_summary = _bench_frames(
@@ -1137,6 +1202,8 @@ def run_video_bench(
                 reuse_block=reuse_block,
                 reuse_dict=reuse_dict,
                 reuse_planes=reuse_planes,
+                dump_planes_dir=dump_planes_dir,
+                dump_planes_frames=dump_planes_frames,
             )
             co_sign_bytes = len(rans.encode(co_sign.ravel(), alphabet=2))
             cg_sign_bytes = len(rans.encode(cg_sign.ravel(), alphabet=2))
@@ -1173,6 +1240,8 @@ def run_video_bench(
                     reuse_block=reuse_block,
                     reuse_dict=reuse_dict,
                     reuse_planes=reuse_planes,
+                    dump_planes_dir=dump_planes_dir,
+                    dump_planes_frames=dump_planes_frames,
                 )
                 if ch == 0:
                     total_bpp = 0.0
@@ -1204,6 +1273,8 @@ def run_video_bench(
         reuse_block=reuse_block,
         reuse_dict=reuse_dict,
         reuse_planes=reuse_planes,
+        dump_planes_dir=dump_planes_dir,
+        dump_planes_frames=dump_planes_frames,
     )
 
 
@@ -1224,6 +1295,8 @@ def _bench_frames(
     reuse_block: int,
     reuse_dict: int,
     reuse_planes: int,
+    dump_planes_dir: Path | None,
+    dump_planes_frames: int,
 ) -> None:
     actual_frames = frames.shape[0]
     if jax_pipeline:
@@ -1310,6 +1383,31 @@ def _bench_frames(
         bpc_combined = (total_bytes * 8) / pixels
         print(f"\n{label_prefix}multistream ({label} via rANS): {total_bytes} bytes ({bpc_combined:5.3f} bpc)")
 
+    if bt_cache is None:
+        bt_digits = _balanced_digits_needed(signed_resid)
+        bt_planes = _balanced_ternary_digits(signed_resid, bt_digits)
+        bt_planes_u8 = (bt_planes + 1).astype(np.uint8)
+        bt_planes_i8 = bt_planes.astype(np.int8).reshape(bt_digits, frames.shape[0], height, width)
+        bt_mag = np.abs(bt_planes_i8).astype(np.uint8)
+        bt_sign = (bt_planes_i8 > 0).astype(np.uint8)
+        bt_cache = {
+            "bt_planes_u8": bt_planes_u8,
+            "bt_planes_i8": bt_planes_i8,
+            "bt_mag": bt_mag,
+            "bt_sign": bt_sign,
+            "bt_digits": bt_digits,
+        }
+
+    if dump_planes_dir is not None:
+        _dump_bt_planes(
+            dump_planes_dir,
+            label_prefix,
+            bt_cache["bt_planes_i8"],
+            bt_cache["bt_mag"],
+            bt_cache["bt_sign"],
+            dump_planes_frames,
+        )
+
     summary = _report_triadic(
         label=f"{label_prefix}base",
         signed_resid=signed_resid,
@@ -1322,11 +1420,11 @@ def _bench_frames(
         reuse_block=reuse_block,
         reuse_dict=reuse_dict,
         reuse_planes=reuse_planes,
-        bt_planes_u8=bt_cache["bt_planes_u8"] if bt_cache else None,
-        bt_planes_i8=bt_cache["bt_planes_i8"] if bt_cache else None,
-        bt_mag=bt_cache["bt_mag"] if bt_cache else None,
-        bt_sign=bt_cache["bt_sign"] if bt_cache else None,
-        bt_digits_override=int(bt_cache["bt_digits"]) if bt_cache else None,
+        bt_planes_u8=bt_cache["bt_planes_u8"],
+        bt_planes_i8=bt_cache["bt_planes_i8"],
+        bt_mag=bt_cache["bt_mag"],
+        bt_sign=bt_cache["bt_sign"],
+        bt_digits_override=int(bt_cache["bt_digits"]),
     )
 
     if mc:
@@ -1423,6 +1521,13 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--reuse-block", type=int, default=16, help="Block size for reuse actions.")
     parser.add_argument("--reuse-dict", type=int, default=256, help="Block reuse dictionary size.")
     parser.add_argument("--reuse-planes", type=int, default=2, help="Planes used for block hash.")
+    parser.add_argument("--dump-planes", type=Path, help="Output dir for balanced-ternary plane PNGs + NPZ.")
+    parser.add_argument(
+        "--dump-planes-frames",
+        type=int,
+        default=1,
+        help="Number of frames to dump per plane (0 = all).",
+    )
     args = parser.parse_args(argv)
 
     if not args.video.exists():
@@ -1445,6 +1550,8 @@ def main(argv: list[str] | None = None) -> None:
         reuse_planes=args.reuse_planes,
         color=args.color,
         color_transform=args.color_transform,
+        dump_planes_dir=args.dump_planes,
+        dump_planes_frames=args.dump_planes_frames,
     )
 
 

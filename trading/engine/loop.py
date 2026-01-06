@@ -17,6 +17,7 @@ from policy.thesis import (
     apply_thesis_constraints,
     step_thesis_memory,
 )
+from features.quotient import compute_quotient_features
 from signals.stress import compute_structural_stress
 from signals.triadic import compute_triadic_state
 from ternary import clip_ternary_sum, ternary_controller, ternary_permission, ternary_sign
@@ -241,6 +242,7 @@ def run_trading_loop(
     cost = 0.0005
     rows = []
     recent_rets = []
+    log_returns = []
     fill_count = 0
     closed_trade_count = 0
     start_ts = time.time()
@@ -681,6 +683,8 @@ def run_trading_loop(
         )
         regret = (START_CASH - fees_accrued) - mean_ct
         log_ret = np.log(price[t] / price[t - 1]) if price[t - 1] > 0 else 0.0
+        log_returns.append(log_ret)
+        quotient = compute_quotient_features(log_returns)
         tc_step = tc_k * abs(action_t - prev_action)
         reward_regret = compute_regret_reward(prev_action, log_ret, benchmark_x, tc_step)
         risk_penalty = 0.0
@@ -727,6 +731,12 @@ def run_trading_loop(
             "plane_sign": plane_sign,
             "plane_sign_flips_W": plane_sign_flips_w,
             "plane_would_veto": plane_would_veto,
+            "q_e64": quotient["e64"],
+            "q_c64": quotient["c64"],
+            "q_s64": quotient["s64"],
+            "q_de": quotient["delta_e"],
+            "q_dc": quotient["delta_c"],
+            "q_ds": quotient["delta_s"],
             "sigma_slow": sigma_slow,
             "plane0": plane_hits[0] if PLANE_COUNT > 0 else 0.0,
             "plane1": plane_hits[1] if PLANE_COUNT > 1 else 0.0,

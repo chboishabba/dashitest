@@ -50,3 +50,10 @@ Note: This file tracks open analysis questions and design explorations. Implemen
 - [ ] Decide on plane-stability gate after diagnostics; implement only if supported.
 - [ ] Defer `SHADOW_REFIT_WINDOW` / `SHADOW_SPLIT_PENALTY_MULT` sweeps until plane diagnostics are summarized.
 - [ ] Update dashboards to display ternary state columns (permission, edge_t, capital_pressure, action_t).
+- [x] Define quotient feature candidates and expected invariants (log-returns, MAD norm, W1=64/W2=256, E/C/S + deltas).
+- [ ] Run a quotient-stability check: compare `Q(s_t)` drift vs `Pi(s_t)` stability on cached BTC/SPY logs.
+- [x] Add a simple plotter for `q_*` fields (time series + rolling stats).
+- [x] Add a quotient stability report script and capture BTC/SPY summaries.
+- [ ] Capture BTC/SPY summaries from `score_quotient_stability.py`.
+- [x] Decide if plot scripts should auto-timestamp `--save` outputs to enforce the no-overwrite policy.
+- [ ] Verify timestamped outputs for plot scripts on a short run.

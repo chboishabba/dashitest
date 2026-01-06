@@ -15,6 +15,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+from plot_utils import timestamped_prefix
+
 
 def _choose_plane_rate_col(df: pd.DataFrame, preferred: str | None) -> str:
     if preferred:
@@ -284,6 +286,7 @@ def main():
     )
     ap.add_argument("--no-show", action="store_true", help="Skip interactive display")
     args = ap.parse_args()
+    save_prefix = timestamped_prefix(args.save_prefix) if args.save_prefix else None
 
     df = pd.read_csv(args.csv)
     plane_rate_col = _choose_plane_rate_col(df, args.plane_rate_col)
@@ -295,8 +298,8 @@ def main():
     df["pnl_value"] = df[args.pnl_col].astype(float)
 
     fig = plot_heatmaps(df, args)
-    if args.save_prefix:
-        out = f"{args.save_prefix}_heatmaps.png"
+    if save_prefix:
+        out = f"{save_prefix}_heatmaps.png"
         fig.savefig(out, dpi=200)
         print(f"Saved {out}")
     if not args.no_show:
@@ -304,8 +307,8 @@ def main():
 
     if args.overlay:
         fig = plot_overlay(df, "plane_rate_used", args)
-        if args.save_prefix:
-            out = f"{args.save_prefix}_overlay.png"
+        if save_prefix:
+            out = f"{save_prefix}_overlay.png"
             fig.savefig(out, dpi=200)
             print(f"Saved {out}")
         if not args.no_show:
@@ -328,8 +331,8 @@ def main():
                 if not mask.any():
                     continue
                 fig = plot_simplex(df.loc[mask], args, title=f"Decision simplex ({key})")
-                if args.save_prefix:
-                    out = f"{args.save_prefix}_simplex_{key}.png"
+                if save_prefix:
+                    out = f"{save_prefix}_simplex_{key}.png"
                     fig.savefig(out, dpi=200)
                     print(f"Saved {out}")
                 if not args.no_show:
@@ -346,8 +349,8 @@ def main():
                 if not mask.any():
                     continue
                 fig = plot_simplex(df.loc[mask], args, title=f"Decision simplex (thesis_s={key})")
-                if args.save_prefix:
-                    out = f"{args.save_prefix}_simplex_{key}.png"
+                if save_prefix:
+                    out = f"{save_prefix}_simplex_{key}.png"
                     fig.savefig(out, dpi=200)
                     print(f"Saved {out}")
                 if not args.no_show:
@@ -366,16 +369,16 @@ def main():
                 if not mask.any():
                     continue
                 fig = plot_simplex(df.loc[mask], args, title=f"Decision simplex ({key})")
-                if args.save_prefix:
-                    out = f"{args.save_prefix}_simplex_{key}.png"
+                if save_prefix:
+                    out = f"{save_prefix}_simplex_{key}.png"
                     fig.savefig(out, dpi=200)
                     print(f"Saved {out}")
                 if not args.no_show:
                     plt.show()
         else:
             fig = plot_simplex(df, args)
-            if args.save_prefix:
-                out = f"{args.save_prefix}_simplex.png"
+            if save_prefix:
+                out = f"{save_prefix}_simplex.png"
                 fig.savefig(out, dpi=200)
                 print(f"Saved {out}")
             if not args.no_show:

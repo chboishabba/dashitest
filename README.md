@@ -1,4 +1,7 @@
 ## Project map (what each file does)
+- Plot scripts auto-timestamp `--save` outputs to avoid overwriting prior runs (see `CONTEXT.md#L2532`).
+- When a script dumps many PNGs (e.g., plane/band rollouts), roll them into a GIF
+  and delete the individual PNGs to keep outputs manageable.
 - `trading/data_downloader.py`: Fetch BTC data (daily/intraday/1s) from Binance/Yahoo/CoinGecko/Stooq; saves under `data/raw/stooq`.
 - `trading/run_trader.py`: Core bar-level trading loop with simple impact/fee model; writes `logs/trading_log.csv` and `data/run_history.csv`.
 - `trading/run_all.py`: Runs the trading loop across all cached markets (or synthetic), prints a scoreboard; `--live` streams the dashboard while running.
@@ -50,6 +53,9 @@
 - `dir_legit.png`: Generated plot asset (direction legitimacy).
 - `docs/bad_day.md`: Bad-day detection concept write-up.
 - `docs/compression_bench.md`: Compression benchmark notes.
+- `docs/tree_diffusion_benchmark.md`: Tree diffusion benchmark spec (ultrametric transport).
+- `docs/valuation_primes_plan.md`: Valuation-only primes benchmark plan.
+- `docs/energy_landscape_vis.md`: Energy landscape visualization notes for dashifine outputs.
 - `first_exit.png`: Generated plot asset (first-exit heatmap).
 - `five_trit_pack_bench.py`: Benchmark for 5-trit packing.
 - `fn_anatomy.png`: Generated plot asset (function anatomy).
@@ -76,6 +82,7 @@
 - `policy_curvature.png`: Generated plot asset (policy curvature).
 - `policy_distance.csv`: Output CSV for policy distance sweep.
 - `potts3_bench.py`: Potts model triadic benchmark.
+- `plot_energy_landscape.py`: Plot 2D energy landscapes (heatmap + optional slope).
 - `trading/base.py`: Base execution interface.
 - `trading/bar_exec.py`: Bar-level execution backend.
 - `trading/hft_exec.py`: HFT/LOB execution stub.
@@ -241,6 +248,8 @@ Correctness smoke: OK (matched harness reference on 10k words with specials)
 
 Benchmarking naïve baseline (C_XOR_naive), full semantics.
 Precomputed (stored) timings; run manually if you need to refresh:
+Gray-Scott KRR (GIF export) can be long on CPU; a recent run took ~25m:
+`PYTHONPATH=./dashifine python dashifine/newtest/grayscott_krr.py --rollout_gif_steps 20 --rollout_gif_stride 1 --rollout_gif_fps 8`
 N=     1000: 88474.91 µs/call       0.01 Mwords/s  (stored)
 N=   100000: 8802841.42 µs/call       0.01 Mwords/s  (stored)
 

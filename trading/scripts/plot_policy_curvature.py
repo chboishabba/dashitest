@@ -15,6 +15,8 @@ import argparse
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+
+from plot_utils import timestamped_path
 from trading.regime import RegimeSpec
 
 
@@ -109,8 +111,9 @@ def plot_results(act_mid, curv, state_mid, grid, act_edges, marg_edges, save=Non
     cbar.set_label("mean |curvature|")
 
     if save:
-        plt.savefig(save, dpi=200)
-        print(f"Saved {save}")
+        save_path = timestamped_path(save)
+        plt.savefig(save_path, dpi=200)
+        print(f"Saved {save_path}")
     plt.show()
 
 
