@@ -35,6 +35,7 @@ PYTHONPATH=. python run_all_two_pointO.py \
   - `python run_trader.py --all` runs all CSVs under `data/raw` sequentially (per-file logs).
 - `run_all.py`: Multi-market runner (with optional live dashboard).
 - `run_all_two_pointO.py`: Orchestrator for market summaries, tau sweeps, CA tape preview, and news windows.
+- `docs/decision_alignment_check.md`: Spec for closest-profitable alignment checks on losing trades.
 - `data_downloader.py`: Data ingestion for Stooq/Yahoo/CoinGecko/Binance; writes `data/raw`.
 - `ternary_trading_demo.py`: Self-contained demo; encodes ternary signals and compares baseline.
 - `training_dashboard.py`: Matplotlib dashboard for `logs/trading_log.csv`.
@@ -49,7 +50,7 @@ PYTHONPATH=. python run_all_two_pointO.py \
 
 ## Core runtime flow
 
-1) `run_trader.run_trading_loop` loads prices, computes triadic states, runs the trading loop, and writes logs.
+1) `engine/loop.run_trading_loop` loads prices, computes triadic states, runs the trading loop, and writes logs.
 2) `strategy.triadic_strategy.TriadicStrategy` turns state into `Intent`.
 3) `bar_exec.BarExecution` (or `hft_exec.LOBReplayExecution`) executes intents and returns fills.
 4) `training_dashboard.py` / `training_dashboard_pg.py` visualize `logs/trading_log.csv`.
@@ -62,6 +63,8 @@ Run from this directory with `PYTHONPATH=.` to avoid import issues.
   Command: `PYTHONPATH=. python scripts/ca_epistemic_tape.py --csv data/raw/stooq/btc_intraday_1s.csv`
 - `scripts/compute_policy_distance.py`: Compare engagement policy geometry between two logs.  
   Command: `PYTHONPATH=. python scripts/compute_policy_distance.py --a logs/trading_log.csv --b logs/trading_log.csv`
+- `scripts/compare_trade_alignment.py`: For losing trades, find closest profitable entry inputs (z-score distance).  
+  Command: `PYTHONPATH=. python scripts/compare_trade_alignment.py --log logs/trading_log.csv --trade-log logs/trade_log.csv --top-k 1`
 - `scripts/contextual_news.py`: Fetch contextual news/stress signals (Reuters RSS, TradingEconomics, yfinance).  
   Command: `PYTHONPATH=. python scripts/contextual_news.py` (prints signals for today; use `contextual_events()` in code for custom dates)
 - `scripts/emit_news_windows.py`: Find bad windows and fetch news (GDELT/NewsAPI/RSS).  
@@ -132,7 +135,7 @@ Run from this directory with `PYTHONPATH=.` to avoid import issues.
 - `training_dashboard_pg.py` requires `pyqtgraph` + Qt bindings; `data_downloader.py` optionally uses `yfinance`.
 - `run_trader.py` supports verbosity controls via `--log-level {quiet,info,trades,verbose}` and `--progress-every N`.
 - `run_trader.py` supports multi-tape logging with `--all` and `--log-combined` (writes `logs/trading_log_all.csv`).
-- `run_trader.py` supports `--max-steps`, `--max-trades`, and `--max-seconds` for bounded runs.
+- `run_trader.py` supports `--max-steps`, `--max-seconds`, and `--max-trades` (counts closed trades; see `TRADER_CONTEXT.md:98401`).
 - `run_trader.py` logs edge metrics (`edge_raw`, `edge_ema`); optional cap gate with `--edge-gate --edge-decay --edge-alpha`.
 - `run_trader.py` uses a bounded thesis memory counter (`--thesis-depth-max`) to delay soft-veto exits.
 - `run_trader.py` exposes goal/MDL tuning (`--goal-cash-x --goal-eps --est-tax-rate --mdl-noise-mult --mdl-switch-penalty --mdl-trade-penalty`).
@@ -168,7 +171,7 @@ Run summaries (per CSV):
 
 Per-step log (see `logs/trading_log*.csv`) includes:
 - Execution and movement: `price_exec`, `price_change`, `price_ret`, `fill_units`, `fill_value`
-- Position state: `avg_entry_price`, `entry_price`, `entry_step`, `trade_id`, `trade_open`, `price_move_entry`
+- Position state: `avg_entry_price`, `entry_price`, `entry_step`, `trade_id`, `trade_open`, `trade_closed`, `price_move_entry`
 - PnL detail: `realized_pnl_step`, `realized_pnl_total`, `unrealized_pnl`, `trade_pnl`, `trade_pnl_pct`, `trade_duration`
 - Ternary control: `direction`, `edge_t`, `permission`, `capital_pressure`, `risk_budget`, `action_t`
 - Thesis memory: `action_signal`, `thesis_depth`, `thesis_hold`
@@ -233,13 +236,14 @@ or `--no-geometry-plots` to disable all geometry plots.
 ## Refactor plan (responsibility boundaries first)
 
 When refactoring, split by responsibility boundaries (not file size) and keep the hot loop thin.
-Reference notes in `TRADER_CONTEXT.md:106299`.
+Reference notes in `TRADER_CONTEXT.md:106299` and `TRADER_CONTEXT.md:106694`.
+Workflow prompt record in `TRADER_CONTEXT.md:105374`.
 
-Proposed minimal module split:
+Proposed minimal module split (avoid stdlib `io` name collisions):
 
 ```
 trading/
-├── io/
+├── trading_io/
 │   ├── prices.py        # CSV discovery + load_prices
 │   └── logs.py          # CSV append, trade logs
 ├── signals/
@@ -260,3 +264,19 @@ trading/
 ├── cli.py               # argparse + main()
 └── run_trader.py        # imports + entrypoint only
 ```
+
+Step 1 (pure helpers) targets:
+- `signals/triadic.py`: `compute_triadic_state`
+- `signals/stress.py`: `compute_structural_stress`
+- `utils/stats.py`: `norm_cdf`, `norm_pdf`, `norm_ppf`
+- `ternary.py`: `clip_ternary_sum`
+Step 2 (price discovery/loading) targets:
+- `trading_io/prices.py`: `find_btc_csv`, `find_stooq_csv`, `list_price_csvs`, `load_prices`
+Step 3 (logging isolation) targets:
+- `trading_io/logs.py`: `emit_step_row`, `emit_trade_row`, `emit_run_summary`
+Step 4 (accounting extraction) targets:
+- `execution/accounting.py`: `compute_step_accounting`, `build_run_summary`
+Step 5 (engine extraction) targets:
+- `engine/loop.py`: `run_trading_loop`
+Step 6 (runner wiring) targets:
+- `run_all.py`, `run_all_two_pointO.py`: import `engine.loop` + `trading_io.prices` directly

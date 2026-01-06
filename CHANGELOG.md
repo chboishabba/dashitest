@@ -1,6 +1,39 @@
 # Changelog
 
 ## Unreleased
+- Benchmark scripts now emit timestamped run subdirectories under `--output_dir`
+  to avoid overwriting prior outputs.
+- Added valuation-level indicator targets to the primes/divisibility benchmark
+  and a summary plot for hierarchy-aligned loss.
+- Documented primes/divisibility interpretation guidance and queued
+  valuation-indicator targets to align loss with hierarchy.
+- Added optional rollout GIF export (with frame cleanup) to the Gray–Scott
+  operator-learning benchmark.
+- Added a primes/divisibility KRR benchmark with saved plots and summaries in
+  `newtest/primes_krr.py`.
+- Documented the field-comparison vs rollout distinction and queued a
+  primes/divisibility benchmark series in the roadmap.
+- Added per-component U/V rollout MSE logging to the Gray–Scott benchmark CSV.
+- Added Gray–Scott multi-step rollout diagnostics (error curves, snapshots, and
+  conserved-quantity logs) to the operator-learning benchmark.
+- Documented the Gray–Scott U/V interpretation and queued multi-step rollout
+  diagnostics in the roadmap.
+- Added a Gray–Scott operator-learning KRR benchmark with logged summaries and
+  saved spectra/field plots in `newtest/grayscott_krr.py`.
+- Added a wave-field baseline comparison summary (dashifine vs RBF/pRBF) and
+  recorded the Gray–Scott operator-learning priority in documentation/TODOs.
+- Documented output-capture expectations for wave benchmarks and added a
+  staged roadmap for the generalised learner experiments.
+- Added RBF and periodic RBF baselines (with eigenspectrum diagnostics) to the
+  wave KRR benchmark for direct spectral alignment comparisons.
+- Added kernel eigenspectrum diagnostics to the wave KRR benchmark so the
+  temperature sweep is tied to the underlying spectral geometry.
+- Documented interpretation/claims for the wave-kernel temperature sweep and
+  recorded next-step diagnostics in the dashifine README.
+- The placeholder `dashifine/Main_with_rotation.py` entry point now logs the
+  output image paths when run as a script for easier verification.
+- Added a dashifine spectral kernel module for PSD kernel experiments and a
+  wave-field KRR benchmark script to test wave-aligned generalization.
 - Compression bench upgrades:
   - Replaced the lzma shim with a real range coder in `compression/rans.py`.
   - Added balanced-ternary digit planes, per-plane Z2 quotient (mag + gated sign), and contexted coding in `compression/video_bench.py`.

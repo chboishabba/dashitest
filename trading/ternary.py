@@ -39,3 +39,11 @@ def ternary_controller(
     if direction == 0 or edge == 0 or direction != edge:
         return 0
     return direction
+
+
+def clip_ternary_sum(val: int | float) -> int:
+    if val >= 1:
+        return 1
+    if val <= -1:
+        return -1
+    return 0

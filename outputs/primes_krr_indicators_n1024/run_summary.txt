@@ -1,0 +1,18 @@
+Primes/divisibility KRR benchmark
+n_max=1024 m1=8 m2=9 seed=0
+lam=0.01 temperature=4.0 lengthscale=0.7
+p_list=[2, 3, 5, 7]
+div_p=2 mse_dash=0.302865 mse_prbf=0.000001
+div_p=3 mse_dash=0.134504 mse_prbf=0.000000
+div_p=5 mse_dash=0.212531 mse_prbf=0.174674
+div_p=7 mse_dash=0.138986 mse_prbf=0.119492
+vp_prime=2 vp_cap=6
+vp_mse_dash=0.038517 vp_mse_prbf=0.004997
+indicator_max_power=6
+indicator_k=1 mse_dash=0.302865 mse_prbf=0.000001
+indicator_k=2 mse_dash=0.075725 mse_prbf=0.000000
+indicator_k=3 mse_dash=0.018927 mse_prbf=0.000000
+indicator_k=4 mse_dash=0.049383 mse_prbf=0.043014
+indicator_k=5 mse_dash=0.033622 mse_prbf=0.032391
+indicator_k=6 mse_dash=0.018362 mse_prbf=0.018115
+outputs=divisibility_mse.png vp_prediction.png indicator_mse.png

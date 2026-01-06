@@ -1,6 +1,8 @@
 TODO
 ====
 
+Note: This file tracks open analysis questions and design explorations. Implementation status lives in `TODO.md`.
+
 - [x] Implement ternary controller and log ternary state fields.
 - [x] Replace binary ban/can_trade with ternary permission.
 - [x] Sanity check run_trader with `--max-steps` and `--all`.
@@ -10,12 +12,12 @@ TODO
 - [x] Document buy-and-hold degeneracy and minimal thesis-memory extension.
 - [x] Link buy-and-hold doc to related context in `TRADER_CONTEXT.md`.
 - [x] Document empirical confirmation from 15s sanity run in `docs/buy_hold_degeneracy.md`.
-- [ ] Implement bounded thesis-depth persistence per `docs/buy_hold_degeneracy.md` (state, transitions, exits).
+- [x] Implement bounded thesis-depth persistence per `docs/buy_hold_degeneracy.md` (state, transitions, exits). Implemented in `step_thesis_memory` with bounded depth + cooldown; remaining work is analysis/visualization only.
 - [x] Replace immediate flat-exit on desired=0 with thesis-depth decay + HOLD.
 - [ ] Add CLI/config for thesis depth max (default + validation).
 - [x] Log thesis depth per-step and per-trade; update field list in README if new columns are added.
 - [ ] Re-run full-history MSFT with thesis memory enabled; compare trade count, avg duration, and PnL.
-- [ ] Log thesis depth at exit and verify most exits occur near depth=0.
+- [ ] Aggregate thesis depth at exit (distribution and summary; confirm most exits occur near depth=0).
 - [ ] Sweep thesis depth max M in {3,5,8,13} with all other params fixed.
 - [x] Add a focused sanity run note or test case covering soft-veto hold behavior (recorded in `README.md`).
 - [x] Log thesis depth at exit and verify most exits occur near depth=0.

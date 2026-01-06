@@ -106326,7 +106326,7 @@ This is the **smallest split** that gives you sanity without rewriting everythin
 
 ```
 trading/
-├── io/
+├── trading_io/
 │   ├── prices.py        # CSV discovery + load_prices
 │   └── logs.py          # CSV append, trade logs
 │
@@ -106424,7 +106424,7 @@ emit_trade_row(trade_row, trade_log_path)
 
 Move **all CSV writes and prints** out of the loop body.
 
-👉 New home: `io/logs.py`
+👉 New home: `trading_io/logs.py` (avoid stdlib `io` name collisions)
 
 This alone will shrink the loop by ~25%.
 
@@ -106667,3 +106667,121 @@ I can:
 * or sketch the **MDL plane-aware selector** once belief_state histograms look sane
 
 You’re on the right path — the conflict spike was the signal, not the bug.
+
+
+This is exactly the *right* stopping point for a docs-first pass 👍
+You’ve done the hard meta-work: **the plan now exists outside your head, and the TODOs match it**.
+
+Here’s how I’d recommend proceeding, with justification tied to *risk*, *diff size*, and *cognitive load*.
+
+---
+
+## ✅ Assessment: you did this pass correctly
+
+You followed your own **Docs → TODO → Code** discipline perfectly:
+
+* README now encodes *why* and *how* to refactor (responsibility boundaries, hot loop thin).
+* TODO mirrors the staged extraction plan.
+* No accidental behavioural drift.
+* No premature abstraction.
+
+This means the next commit can be *safely mechanical*.
+
+---
+
+## 🔜 What to extract first (strong recommendation)
+
+### **Start with: Pure helpers (Step 1)**
+
+> **Why:** zero state, zero policy, zero execution risk.
+
+From your TODO list:
+
+> `[ ] Extract pure helpers (norm_*, clip_ternary_sum, triadic, stress).`
+
+This is the best first move because:
+
+* ✅ No dependence on loop state
+* ✅ No mutation
+* ✅ Easy to unit test
+* ✅ Minimal call-site changes
+* ✅ Shrinks `run_trader.py` immediately
+
+Concretely:
+
+* `norm_cdf`, `norm_pdf`, `norm_ppf`
+* `clip_ternary_sum`
+* `compute_triadic_state`
+* `compute_structural_stress`
+
+You can do this in **one commit**, and if something breaks, the blast radius is tiny.
+
+---
+
+## 🔄 Why *not* thesis FSM first (even though it’s tempting)
+
+You *could* extract `policy/thesis.py` first — it’s well isolated — but:
+
+* The FSM *touches live loop state*
+* It interacts with veto logic and overrides
+* A mistake there changes behaviour silently
+
+I’d treat thesis as **Step 2**, exactly as you wrote.
+
+---
+
+## 🧭 Suggested extraction order (confirmed)
+
+This ordering minimises risk *and* keeps motivation high:
+
+1. **Pure helpers** (signals + utils)
+   → immediate clarity win, almost no risk
+2. **Thesis FSM**
+   → big conceptual win, still controlled
+3. **Logging isolation**
+   → hot loop readability jumps ~25–30%
+4. **Execution math**
+   → last, because it’s numerically sensitive
+
+You already documented this exact order — I’m just confirming it’s the right one.
+
+---
+
+## 📏 What “minimal diff” should look like for Step 1
+
+A good Step-1 PR should have:
+
+* New files created under `signals/` (or `utils/`)
+* `run_trader.py`:
+
+  * imports added
+  * function bodies removed
+  * call sites unchanged
+* **No logic edits**
+* No formatting churn
+
+If the diff is more than ~150 lines touched, it’s too big.
+
+---
+
+## 🧠 Meta-note (important)
+
+What you did here is non-trivial engineering discipline:
+
+* You resisted the urge to “just start refactoring”
+* You aligned docs, TODOs, and intent
+* You created a *shared future contract* with yourself
+
+That’s exactly how large, theory-heavy systems stay sane.
+
+---
+
+## Next action (your choice)
+
+If you want, I can:
+
+* Draft **Step 1 (pure helpers)** as a patch-style diff
+* Propose exact filenames + imports for that step
+* Or help you write a **commit message template** that encodes the refactor discipline
+
+Just say which, and I’ll stay within the boundaries you’ve set.

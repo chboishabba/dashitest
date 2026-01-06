@@ -1,0 +1,23 @@
+Gray-Scott KRR benchmark
+grid=24 steps=120 burn_in=20 frames=8
+per_frame=128 seed=0 lam=0.01
+du=0.16 dv=0.08 f=0.06 k=0.062 dt=1.0
+temperature=4.0 spatial_ell=0.7 state_ell=0.5
+train_samples=819 test_samples=205
+MSE dashifine=0.001212
+MSE periodic_rbf=0.000008
+MSE rbf=0.000013
+Top eigs dashifine=[56.5055 54.5251 51.2371 50.237  41.8018 40.4148 37.958  37.5222 27.3655
+ 26.8723]
+Top eigs periodic_rbf=[73.492  53.8181 52.4167 50.4825 48.6076 40.8946 35.5442 34.8646 33.2167
+ 24.6908]
+Top eigs rbf=[102.683   81.1271  78.2483  65.9533  56.9171  49.6417  42.8182  40.614
+  30.9272  29.1618]
+rollout_steps=100
+rollout_snapshot_steps=1,5,10,20
+rollout_csv=outputs/grayscott_krr/rollout_metrics.csv
+rollout_plot=outputs/grayscott_krr/rollout_mse.png
+rollout_gif_steps=100
+rollout_gif_stride=1
+rollout_gif_fps=8
+rollout_gif=outputs/grayscott_krr/rollout.gif

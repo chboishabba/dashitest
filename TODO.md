@@ -9,6 +9,43 @@
   - Extend P/Q/N culling into a tile selector feeding the block-sparse kernel.
   - Keep it bitset-only; no lane compaction in the hot loop.
 
+- **Wave kernel benchmark follow-ups**
+  - Decide whether to include a DC bias term in the dashifine spectral kernel.
+  - Confirm the wave-domain periodicity handling vs Euclidean baselines.
+  - Add a projection stress test (mask or subsample the input domain).
+  - Interpret the top-10 eigenvalue printout against the temperature sweep.
+  - Compare RBF/periodic RBF eigenspectra against dashifine temperature sweeps.
+
+- **Generalised learner roadmap (kernel + wave task → broader suite)**
+  - Phase 0: lock in baselines, spectra, interpretation, domain assumptions,
+    reproducibility (seed flags), and documented outputs (text logs or plots).
+  - Phase 1: stress geometry with out-of-band frequencies, mixed spectra,
+    phase discontinuities, anisotropy, masked points, line sampling, and
+    structured noise.
+  - Phase 2: move to dynamics (e.g., reaction–diffusion, coupled oscillators),
+    one-step prediction, rollout stability, and projected observations.
+  - Phase 3: compare KRR vs `wave_kernel.py` on identical tasks, focusing on
+    sample efficiency, failure modes, and projection sensitivity.
+  - Phase 4: test non-Fourier invariants (CA with hidden parameters, procedural
+    noise pipelines, graph signals, modular arithmetic).
+  - Phase 5: study identifiability and grokking-style transitions by sweeping
+    training size and tracking learned spectra.
+  - Phase 6: formalize the hypothesis space, observation operator, spectral
+    bias, and minimal conditions for success/failure; capture in a theory note.
+  - Priority next: Phase 2 reaction–diffusion (Gray–Scott) one-step prediction,
+    with dashifine vs periodic RBF comparison and output logging/plots.
+  - Review Gray–Scott rollout curves and snapshot grids to compare U/V stability
+    across kernels using per-component MSE logs.
+  - Interpret conserved-quantity logs (mean U/V, total mass) to distinguish
+    global drift from structural failure.
+  - Add a primes/divisibility benchmark series:
+    - p-adic valuation (v_p) or divisibility indicator tasks.
+    - Sieve-step prediction on a bitmask state.
+  - Extend primes benchmark to sieve-step or primality classification once the
+    divisibility/v_p baselines are stable.
+  - Review valuation-level indicator results to confirm hierarchy-aligned loss
+    is behaving as expected.
+
 - **Packed backward passes**
   - MoE: histogram-based gradients directly from packed tokens (per expert, per lane counts), no unpacked view.
   - CA: histogram-weighted trainer is in place; add packed feature counting and (optionally) symbolic rule extractor.

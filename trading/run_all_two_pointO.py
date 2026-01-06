@@ -30,7 +30,9 @@ import matplotlib.pyplot as plt
 
 # local imports
 try:
-    from trading.run_trader import run_trading_loop, load_prices, compute_triadic_state
+    from trading.engine.loop import run_trading_loop
+    from trading.signals.triadic import compute_triadic_state
+    from trading.trading_io.prices import load_prices
     from trading.scripts.run_bars_btc import confidence_from_persistence
     from trading import run_all  # for discover_markets
     from trading.scripts import sweep_tau_conf
@@ -38,7 +40,9 @@ try:
     from trading.scripts.emit_news_windows import contiguous_windows
     from trading.scripts.news_slice import gdelt_fetch
 except ModuleNotFoundError:
-    from run_trader import run_trading_loop, load_prices, compute_triadic_state
+    from engine.loop import run_trading_loop
+    from signals.triadic import compute_triadic_state
+    from trading_io.prices import load_prices
     from scripts.run_bars_btc import confidence_from_persistence
     import run_all  # for discover_markets
     from scripts import sweep_tau_conf

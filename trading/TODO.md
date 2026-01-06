@@ -1,34 +1,45 @@
 # Trading TODO
 
-- [x] Add plane counters to trading logs (plane index + per-plane activation/rates).
-- [ ] Replace confidence thresholds with explicit ternary actions (intent/exec alignment).
-- [x] Define and log a "can trade" mask (trade eligibility separate from direction).
-- [x] Add MDL score panel to the training dashboard.
-- [x] Plot plane rates in the PG dashboard (with optional normalization/log scale).
-- [x] Add edge_ema metric + optional cap gate.
-- [x] Add bounded thesis memory (thesis_depth) to delay soft-veto exits.
-- [x] Add goal/MDL config to CLI (goal cash, deadline, tax rate, MDL params).
-- [ ] Add edge_ema panel (or overlay) to the PG dashboard.
-- [ ] Plot stress histogram pane in PG dashboard.
-- [x] Guard training_dashboard_pg.py against trade-log selection (auto-select per-step log or show clear error).
-- [ ] Implement explicit baseline simulation for regret (sell-all-at-t0 path).
-- [ ] Add realized-volatility regime feature (continuous + ternary regime flag) and log it.
-- [x] Implement minimal thesis-memory state machine (direction/strength/age/cooldown/invalidation) with logging.
-- [x] Add benchmark-regret reward option vs constant exposure (optional vol-adjusted penalty).
-- [x] Condition decision simplex on thesis state (split by thesis_d/thesis_s).
-- [x] Split UNKNOWN vs FLAT in belief logging (distinct belief_state).
-- [x] Add simplex split by thesis_s only.
-- [x] Log decision_kind (UNKNOWN vs FLAT vs LONG vs SHORT) without changing actions.
-- [x] Add belief FSM shadow logging (belief_plus/belief_minus + deltas + belief_state).
-- [x] Add simplex split by belief_state (UNK/FLAT/L1/L2/S1/S2/CONFLICT).
-- [x] Relax belief collapse rule to trigger only on beta == -1.
-- [x] Log belief alpha per side (belief_alpha_plus/belief_alpha_minus) for antisymmetry checks.
-- [x] Gate belief deltas by permission/beta/rho so only directional alpha moves beliefs.
-- [ ] Verify `(alpha_plus, alpha_minus)` counts from logs after a 5k tape run.
-- [ ] Decide: decay vs hold when plane_sign == 0 (belief-plane behavior in neutral geometry).
-- [ ] Enable plane-aware strategy selection (MDL selector over strategies), after belief-plane behavior is locked.
-- [ ] Refactor by responsibility boundaries (keep hot loop thin):
-- [ ] Extract pure helpers (norm_*, clip_ternary_sum, triadic, stress).
-- [ ] Extract thesis FSM into policy module.
-- [ ] Isolate logging into io/logs.py (emit_step_row, emit_trade_row).
-- [ ] Extract execution math (sizing, fills, fees, PnL).
+Legend: (EXEC) implementation, (DECISION) policy decision, (ANALYSIS) analysis/verification, (DASHBOARD) UI/visualization.
+
+- [x] (EXEC) Add plane counters to trading logs (plane index + per-plane activation/rates).
+- [ ] (EXEC) Replace confidence thresholds with explicit ternary actions (intent/exec alignment).
+- [x] (EXEC) Add losing-trade alignment script (closest profitable entry by input distance).
+- [x] (EXEC) Define and log a "can trade" mask (trade eligibility separate from direction).
+- [x] (EXEC) Fix `--max-trades` to count closed trades (not fills) and log `trade_closed` in per-step rows.
+- [x] (DASHBOARD) Add MDL score panel to the training dashboard.
+- [x] (DASHBOARD) Plot plane rates in the PG dashboard (with optional normalization/log scale).
+- [x] (EXEC) Add edge_ema metric + optional cap gate.
+- [x] (EXEC) Add bounded thesis memory (thesis_depth) to delay soft-veto exits.
+- [x] (EXEC) Add goal/MDL config to CLI (goal cash, deadline, tax rate, MDL params).
+- [ ] (DASHBOARD) Add edge_ema panel (or overlay) to the PG dashboard.
+- [ ] (DASHBOARD) Plot stress histogram pane in PG dashboard.
+- [x] (DASHBOARD) Guard training_dashboard_pg.py against trade-log selection (auto-select per-step log or show clear error).
+- [ ] (EXEC) Implement explicit baseline simulation for regret (sell-all-at-t0 path).
+- [ ] (EXEC) Add realized-volatility regime feature (continuous + ternary regime flag) and log it.
+- [x] (EXEC) Implement minimal thesis-memory state machine (direction/strength/age/cooldown/invalidation) with logging.
+- [x] (EXEC) Add benchmark-regret reward option vs constant exposure (optional vol-adjusted penalty).
+- [x] (ANALYSIS) Condition decision simplex on thesis state (split by thesis_d/thesis_s).
+- [x] (EXEC) Split UNKNOWN vs FLAT in belief logging (distinct belief_state).
+- [x] (ANALYSIS) Add simplex split by thesis_s only.
+- [x] (EXEC) Log decision_kind (UNKNOWN vs FLAT vs LONG vs SHORT) without changing actions.
+- [x] (EXEC) Add belief FSM shadow logging (belief_plus/belief_minus + deltas + belief_state).
+- [x] (ANALYSIS) Add simplex split by belief_state (UNK/FLAT/L1/L2/S1/S2/CONFLICT).
+- [x] (EXEC) Relax belief collapse rule to trigger only on beta == -1.
+- [x] (EXEC) Log belief alpha per side (belief_alpha_plus/belief_alpha_minus) for antisymmetry checks.
+- [x] (EXEC) Gate belief deltas by permission/beta/rho so only directional alpha moves beliefs.
+- [ ] (ANALYSIS) Verify `(alpha_plus, alpha_minus)` counts from logs after a 5k tape run.
+- [ ] (DECISION) Decide: decay vs hold when plane_sign == 0 (belief-plane behavior in neutral geometry).
+- [ ] (EXEC) Enable plane-aware strategy selection (MDL selector over strategies), after belief-plane behavior is locked.
+- [ ] (EXEC) Refactor by responsibility boundaries (keep hot loop thin):
+- [x] (EXEC) Update runners to use engine.loop/trading_io.prices directly (run_all.py, run_all_two_pointO.py).
+- [x] (EXEC) Extract run_trading_loop into engine/loop.py (thin hot loop remains in engine).
+- [x] (EXEC) Extract price discovery/loading into trading_io/prices.py (find_btc_csv, find_stooq_csv, list_price_csvs, load_prices).
+- [x] (EXEC) Extract pure helpers (norm_*, clip_ternary_sum, triadic, stress).
+- [x] (EXEC) Create `signals/triadic.py` + `signals/stress.py` + `utils/stats.py`.
+- [x] (EXEC) Move `clip_ternary_sum` into `ternary.py`.
+- [x] (EXEC) Extract thesis FSM into policy module.
+- [x] (EXEC) Isolate logging into trading_io/logs.py (emit_step_row, emit_trade_row, emit_run_summary).
+- [x] (EXEC) Extract execution math (sizing, fills, fees).
+- [x] (EXEC) Extract accounting (PnL, equity, drawdown) into execution/accounting.py.
+- [x] (EXEC) Add `compute_step_accounting` + `build_run_summary` helpers.

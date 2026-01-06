@@ -14,11 +14,13 @@ import numpy as np
 import pandas as pd
 
 try:
-    from trading import run_trader  # provides the trading loop
+    from trading.engine.loop import run_trading_loop
     from trading import training_dashboard as dash  # for live plotting
+    from trading.trading_io.prices import load_prices
 except ModuleNotFoundError:
-    import run_trader  # provides the trading loop
+    from engine.loop import run_trading_loop
     import training_dashboard as dash  # for live plotting
+    from trading_io.prices import load_prices
 
 
 def discover_markets():
@@ -31,7 +33,7 @@ def discover_markets():
     if root.exists():
         for f in sorted(root.glob("*.csv")):
             try:
-                price, volume, ts = run_trader.load_prices(f, return_time=True)
+                price, volume, ts = load_prices(f, return_time=True)
                 if len(price) < 10:
                     continue
                 markets.append({"name": f.stem, "path": f, "price": price, "volume": volume, "time": ts})
@@ -69,7 +71,7 @@ def run_market_live(market, log_path, refresh, pr_path=None, sleep_s=0.01, max_s
     log_path = pathlib.Path(log_path)
     pr_curve = dash.load_log(pathlib.Path(pr_path)) if pr_path else None
     th = threading.Thread(
-        target=run_trader.run_trading_loop,
+        target=run_trading_loop,
         kwargs={
             "price": market["price"],
             "volume": market["volume"],
@@ -142,7 +144,7 @@ if __name__ == "__main__":
                     "max_drawdown": None,
                 }
             else:
-                summary, _ = run_trader.run_trading_loop(
+                summary, _ = run_trading_loop(
                     price=m["price"],
                     volume=m["volume"],
                     source=name,
@@ -151,7 +153,7 @@ if __name__ == "__main__":
                     log_path=log_path,
                 )
         else:
-            summary, _ = run_trader.run_trading_loop(
+            summary, _ = run_trading_loop(
                 price=m["price"],
                 volume=m["volume"],
                 source=name,
