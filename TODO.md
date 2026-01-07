@@ -1,7 +1,9 @@
 # TODO
 
 - **Block-sparse int8/VNNI path**
-  - Build `active_tiles` from P/Q/N or gate masks (tile-level).
+  - Build `active_tiles` from gate masks (tile-level any-activation) in
+    `block_sparse_moe_train.py`.
+  - Priority rationale: see `CONTEXT.md#L2626`.
   - Call a real VNNI/dpwssd microkernel on active tiles; emit once per tile.
   - Reuse tiles for multiple fused ops to amortize packing/mask build.
 
@@ -23,6 +25,33 @@
     kill rates and leakage between RBF and tree kernels.
   - Add a symmetry-breaking tree diffusion variant (depth-varying diffusion or
     non-commuting observation map) to force model separation.
+  - Lock design choices for the next phase: local/adjacent band coupling (vs
+    global), static adversary (vs adaptive), coarse→fine vs fine→coarse bridge
+    direction, and relative pass/fail thresholds.
+  - Add an adversarial operator variant with nonlinear band coupling
+    (`x_{t+1} = A x_t + g(B(x_t))`) and a flag to toggle it.
+  - Add a bridge-task evaluation (infer `x_{T/2}` or band energies from `(x0, xT)`
+    and score in band-quotient space with leakage reporting).
+  - Implement the adversarial-operator toggle with local band coupling as the
+    default path once the design choices are locked.
+  - Implement the bridge-task evaluation (coarse↔fine) with relative thresholds
+    once the design choices are locked.
+  - Decide adversarial-operator specifics: resize method (nearest/bilinear/area),
+    kernel support, polynomial degree, and per-band eps_j schedule.
+  - Decide leakage measurement details: band norm, ablation replacement
+    strategy (zero vs noise), and delta stability constant.
+  - Define bridge-task acceptance thresholds relative to baseline, and confirm
+    the baseline implementations (upsample+proj vs downsample).
+  - Add core dashboard outputs (influence matrix, leakage summaries, bridge
+    asymmetry plots, leakage-vs-error scatter) and file naming.
+  - Add strongly recommended visuals (kill-rate/collapse-step plot and operator
+    strength sweep panel).
+  - Add nice-to-have sample visualizations (band images/energies pre/post
+    adversary plus bridge reconstructions).
+  - Define closure thresholds (baseline margin, NonLocalLeak factor, asymmetry
+    gap limit, correlation magnitude) and record them in the benchmark spec.
+  - Add a reproducibility checklist (>=2 seeds, stable separation, no new
+    failures) for final closure runs.
   - Add discriminator checks (kernel-matrix diff, distance-matrix correlation,
     sparse impulse initializations) for the tree diffusion benchmark.
   - Re-run the tree diffusion benchmark with the quotient-kernel tree model and

@@ -1,6 +1,24 @@
 # Changelog
 
 ## Unreleased
+- Block-sparse MoE training now derives tile masks from gate activity instead
+  of random tile sampling, keeping tile density aligned with the configured
+  target.
+- Added a benchmark closure criteria section to the tree diffusion spec,
+  defining design-freeze rules, required outputs, acceptance logic, and
+  reproducibility/stopping conditions.
+- Reframed the tree diffusion dashboard outputs as learner-centric diagnostics
+  and added a minimal learner-dashboard checklist to the benchmark spec.
+- Expanded the tree diffusion benchmark docs with recommended/nice-to-have
+  visual outputs and an explicit GIF/WebM consolidation note for bulk images.
+- Added detailed definitions and acceptance-test specs for the band-coupled
+  adversarial operator and bridge task in the tree diffusion benchmark docs,
+  plus required output plots and naming guidance.
+- Documented the next-phase design commitments for tree diffusion (operator
+  coupling scope, adversary type, bridge direction, and relative thresholds).
+- Documented the tree diffusion adversarial-operator and bridge-task extensions,
+  and queued the corresponding TODOs for band-coupled dynamics and two-sided
+  inference evaluation.
 - Documented that the triadic video codec benchmark is stats-only and queued
   plane-visualization output as a follow-up.
 - Tree diffusion benchmark now trains the tree kernel on quotient features

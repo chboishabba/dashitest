@@ -25,7 +25,7 @@
 - `acceptable1.png`: Generated plot asset (acceptable variant).
 - `accept_persistence.png`: Generated plot asset (accept persistence).
 - `balanced_pn_iter_bench.py`: Benchmark for balanced P/N iterative add loops.
-- `block_sparse_moe_train.py`: Training script for block-sparse MoE models.
+- `block_sparse_moe_train.py`: Training script for block-sparse MoE models with tile masks derived from gate activity.
 - `block_sparse_tile_driver.py`: Driver for block-sparse tile experiments.
 - `ca_Figure_1.png`: Generated CA figure asset.
 - `ca_vis_Figure_0.png`: Generated CA visualization asset.
