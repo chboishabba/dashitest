@@ -59,6 +59,27 @@ VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json \
 
 Expected output shows the first 10 elements incremented by 1.
 
+## Vulkan OperatorLearner
+
+1. Compile the operator shader:
+
+```bash
+glslangValidator -V vulkan_compute/shaders/operator_step.comp -o vulkan_compute/shaders/operator_step.spv
+```
+
+2. Run the Vulkan operator trainer against a canonical `E_seq.npy`:
+
+```bash
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json \
+  python vulkan_compute/operator_train.py --energy-seq outputs/codec_E_seq.npy --steps 200
+```
+
+3. Point the live sheet preview at `dashilearn/sheet_energy.npy` to monitor band energies:
+
+```bash
+python vulkan_compute/compute_image_preview.py --sheet --sheet-data dashilearn/sheet_energy.npy
+```
+
 ## Sheet Expand + Fade Shader (live sheet visual)
 
 This repo includes a drop-in compute shader for expanding a small "semantic

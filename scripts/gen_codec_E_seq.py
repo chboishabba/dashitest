@@ -13,11 +13,16 @@ import numpy as np
 
 def load_planes(path: Path) -> np.ndarray:
     data = np.load(path)
-    if "planes" not in data:
-        raise ValueError("NPZ must contain a 'planes' array")
-    planes = data["planes"]
+    if "planes" in data:
+        planes = data["planes"]
+        key = "planes"
+    elif "planes_i8" in data:
+        planes = data["planes_i8"]
+        key = "planes_i8"
+    else:
+        raise ValueError("NPZ must contain a 'planes' or 'planes_i8' array")
     if planes.ndim != 4:
-        raise ValueError("planes must have shape [T, B, H, W]")
+        raise ValueError(f"{key} must have shape [T, B, H, W]")
     return planes
 
 

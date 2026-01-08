@@ -17,6 +17,7 @@
 - Vulkan/JAX reference points (JAX is reference-only on this machine):
   - `vulkan/README.md`: Vulkan video bench path + dmabuf/VAAPI notes.
   - `vulkan_compute/README.md`: Vulkan compute prototypes (buffer/image/preview).
+  - `vulkan_compute/operator_train.py`: Vulkan-native OperatorLearner v0 driver that writes `dashilearn/sheet_energy.npy`.
   - `JAX/README.md`: JAX codec/motion/pipeline reference implementations.
   - `docs/vulkan_jax_parity.md`: Vulkan↔JAX parity map and recommended first Vulkan kernel (see `CONTEXT.md#L18786` and `CONTEXT.md#L18950`).
 

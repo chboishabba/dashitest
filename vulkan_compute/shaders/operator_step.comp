@@ -1,0 +1,102 @@
+#version 450
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+    int step;
+    int bands;
+    int seq_stride;
+    int sheet_stride;
+    float lr;
+    float alpha;
+} push;
+
+layout(std430, binding = 0) readonly buffer EnergySeq {
+    float data[];
+} energy_seq;
+
+layout(std430, binding = 1) buffer Weights {
+    float data[];
+} weights;
+
+layout(std430, binding = 2) buffer Bias {
+    float data[];
+} bias;
+
+layout(std430, binding = 3) buffer Metrics {
+    float data[];
+} metrics;
+
+layout(std430, binding = 4) buffer Sheet {
+    float data[];
+} sheet;
+
+const int MAX_BANDS = 256;
+
+float softplus(float x) {
+    // numerically stable softplus
+    if (x > 32.0) {
+        return x;
+    }
+    if (x < -32.0) {
+        return exp(x);
+    }
+    return log(exp(x) + 1.0);
+}
+
+float sigmoid(float x) {
+    return 1.0 / (1.0 + exp(-x));
+}
+
+void main() {
+    int B = push.bands;
+    if (B <= 0 || B > MAX_BANDS) {
+        return;
+    }
+    int base = push.step * push.seq_stride;
+    int target = (push.step + 1) * push.seq_stride;
+    float curr[MAX_BANDS];
+    float target_vals[MAX_BANDS];
+    for (int i = 0; i < B; ++i) {
+        curr[i] = energy_seq.data[base + i];
+        target_vals[i] = energy_seq.data[target + i];
+    }
+    float loss = 0.0;
+    float max_norm = 0.0;
+    float norm_sum = 0.0;
+    for (int i = 0; i < B; ++i) {
+        int row = i * B;
+        float dot = 0.0;
+        for (int j = 0; j < B; ++j) {
+            dot += weights.data[row + j] * curr[j];
+        }
+        float raw = dot + bias.data[i];
+        float pred = softplus(raw);
+        float deriv = sigmoid(raw);
+        float delta = 2.0 * (pred - target_vals[i]) * deriv;
+        float row_norm = 0.0;
+        for (int j = 0; j < B; ++j) {
+            float updated = weights.data[row + j] - delta * curr[j] * push.lr;
+            weights.data[row + j] = updated;
+            row_norm += updated * updated;
+        }
+        bias.data[i] -= delta * push.lr;
+        row_norm = sqrt(row_norm);
+        norm_sum += row_norm;
+        max_norm = max(max_norm, row_norm);
+        if (row_norm > push.alpha && row_norm > 0.0) {
+            float scale = push.alpha / row_norm;
+            for (int j = 0; j < B; ++j) {
+                weights.data[row + j] *= scale;
+            }
+            row_norm = push.alpha;
+        }
+        sheet.data[push.step * push.sheet_stride + i] = pred;
+        float resid = pred - target_vals[i];
+        loss += resid * resid;
+    }
+    metrics.data[0] = float(push.step);
+    metrics.data[1] = loss / float(B);
+    metrics.data[2] = max_norm;
+    metrics.data[3] = norm_sum / float(B);
+}

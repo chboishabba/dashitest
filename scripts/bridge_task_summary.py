@@ -17,6 +17,10 @@ FIGURE_SUFFIXES = [
     ("bridge_tree_band_quotient", "Bridge leakage (tree-band quotient)"),
     ("bridge_prediction", "Representative prediction vs truth"),
 ]
+OPERATOR_FIGURE_SUFFIXES = [
+    ("operator_one_step", "Operator one-step predictions (first band)"),
+    ("operator_rollout", "Operator rollout error norm"),
+]
 
 
 def parse_args() -> argparse.Namespace:
@@ -54,7 +58,9 @@ def load_metrics(json_path: Path) -> Mapping[str, float]:
         return json.load(fh)
 
 
-def format_value(value: float) -> str:
+def format_value(value: Optional[float]) -> str:
+    if value is None:
+        return "n/a"
     return f"{value:.3e}"
 
 
@@ -97,6 +103,27 @@ def build_summary(json_path: Path, metrics: Mapping[str, float], threshold: floa
         fig = base.with_name(f"{base.name}_{suffix}.png")
         exists_note = "" if fig.exists() else " (missing)"
         lines.append(f"- `{fig}`: {description}.{exists_note}")
+
+    op_one_step = metrics.get("operator_baseline_one_step_mse")
+    if op_one_step is not None:
+        op_rollout = metrics.get("operator_baseline_rollout_mse")
+        rollout_steps = metrics.get("operator_baseline_rollout_steps", 0)
+        alpha = metrics.get("operator_baseline_alpha")
+        spectral = metrics.get("operator_baseline_spectral_norm")
+        lines.append("")
+        lines.append("### Operator baseline")
+        lines.append(
+            f"- One-step MSE: {format_value(op_one_step)}; rollout ({rollout_steps} steps) MSE: "
+            f"{format_value(op_rollout)}."
+        )
+        if alpha is not None and spectral is not None:
+            lines.append(
+                f"- Contractivity: α={alpha:.2f}, spectral norm={format_value(spectral)}."
+            )
+        for suffix, description in OPERATOR_FIGURE_SUFFIXES:
+            fig = base.with_name(f"{base.name}_{suffix}.png")
+            exists_note = "" if fig.exists() else " (missing)"
+            lines.append(f"- `{fig}`: {description}.{exists_note}")
     return "\n".join(lines)
 
 
