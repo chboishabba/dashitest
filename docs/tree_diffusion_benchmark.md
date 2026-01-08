@@ -468,6 +468,14 @@ biased, but it is not a stress test. Introduce symmetry-breaking (depth-varying
 diffusion, non-commuting observation map, or valuation-conditioned updates) to
 force separation.
 
+The CLI now exposes `--obs-map-mode` (choose between `permute_depth` and
+`mix_depth`) together with `--obs-map-seed` (falls back to `--seed`) to build a
+single deterministic depth-aware observation map. This map is reused during
+dataset construction, rollout scoring, and the bridge task so the
+`observe_depth ∘ F ≠ F ∘ observe_depth` condition described in
+`CONTEXT.md#L23435-L23509` stays intact run after run, and we can credibly
+attribute separation to non-commuting projections instead of stochastic noise.
+
 ## Interpretation (control case)
 
 Identical one-step and rollout errors indicate the diffusion operator is
@@ -487,6 +495,17 @@ geometries:
   collapse onto a low-rank smooth manifold.
 
 ## Bridge task (two-sided inference)
+
+The bridge task now runs when `--bridge-task` is enabled and `--bridge-task-T`
+controls the horizon that determines `x_{T/2}`. Sliding windows of `(x0, x_T)`
+are passed through the same deterministic observation map, and both RBF and tree
+kernels are trained on the concatenated endpoints so they can infer the mid-step
+state. We report raw, quotient, and tree-band quotient mean-squared errors;
+the RBF tree-band error serves as the leakage proxy. These metrics are emitted
+as `rbf_bridge_*` and `tree_bridge_*` in the JSON dump and capture the global
+inference axis described in `CONTEXT.md#L23880-L23970`. Once the bridge task
+shows Tree ≫ RBF keep the benchmark closed—no more adversaries, sweeps, or
+visual additions beyond this context (`CONTEXT.md#L23924-L24020`).
 
 To connect the benchmark to two-sided inference (fill-in-the-middle/smoothing),
 add a bridge task: sample `x0`, roll to `xT`, hide intermediate steps, then ask

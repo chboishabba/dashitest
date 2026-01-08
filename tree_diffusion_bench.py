@@ -38,49 +38,142 @@ def tree_diffusion_step(x: np.ndarray, p: int, depth: int, alpha: float, decay: 
     return (1.0 - alpha) * x + alpha * mix
 
 
+def get_nl_fn(nl_str: str, threshold: float = 0.0):
+
+
+    if nl_str == "tanh":
+
+
+        return np.tanh
+
+
+    elif nl_str == "sigmoid":
+
+
+        return lambda z: 1 / (1 + np.exp(-z))
+
+
+    elif nl_str == "sign":
+
+
+        return np.sign
+
+
+    elif nl_str == "threshold":
+
+
+        return lambda z: np.where(np.abs(z) > threshold, z, 0.0)
+
+
+    else:
+
+
+        raise ValueError(f"unknown nonlinearity {nl_str}")
+
+
+
+
+
 def tree_diffusion_step_adversarial(
+
+
+
 
 
     x: np.ndarray,
 
 
+
+
+
     p: int,
+
+
+
 
 
     depth: int,
 
 
+
+
+
     alpha: float,
+
+
+
 
 
     decay: float,
 
 
+
+
+
     adv_op_strength: float,
+
+
+
 
 
     adv_op_nl: str,
 
 
+
+
+
+    adv_op_nl_threshold: float,
+
+
+
+
+
 ) -> np.ndarray:
 
 
-    """Diffusion with non-linear, state-dependent, depth-varying weights."""
 
 
-    # Get band energies (coarse to fine)
 
-
-    band_energies = tree_band_energy_vector(x, p, depth)
+    """Diffusion with non-linear, state-dependent, depth-varying weights AND explicit band coupling."""
 
 
 
 
 
-    # Get original linear diffusion weights
+
+
+
+
+
+
+    nl_fn = get_nl_fn(adv_op_nl, adv_op_nl_threshold)
+
+
+
+
+
+
+
+
+
+
+
+    # 1. Compute modified weights for diffusion part (depth-dependent and state-modulated)
+
+
+
+
+
+    band_energies = tree_band_energy_vector(x, p, depth)  # coarse to fine
+
+
+
 
 
     original_weights = build_weights(depth, decay)
+
+
+
 
 
     modified_weights = np.copy(original_weights)
@@ -89,52 +182,13 @@ def tree_diffusion_step_adversarial(
 
 
 
-    # Define nonlinearity
-
-
-    if adv_op_nl == "tanh":
-
-
-        nl_fn = np.tanh
-
-
-    elif adv_op_nl == "sigmoid":
-
-
-        nl_fn = lambda z: 1 / (1 + np.exp(-z))
-
-
-    elif adv_op_nl == "sign":
-
-
-        nl_fn = np.sign
-
-
-    else:
-
-
-        raise ValueError(f"unknown nonlinearity {adv_op_nl}")
-
-
-
-
-
-    # Modulate weights based on band energies in a non-linear, state-dependent way
-
-
     for level in range(depth + 1):
 
 
-        # The weight for 'level' is modulated by a non-linear function of its own band's energy.
-
-
-        # This makes the diffusion state-dependent and symmetry-breaking.
-
-
-        # Using 1.0 + modulation_factor allows weights to increase or decrease relative to original.
-
-
         modulation_factor = nl_fn(adv_op_strength * band_energies[level])
+
+
+        # Add 1.0 to ensure positive weight and keep original if modulation is 0.
 
 
         modified_weights[level] *= np.clip(1.0 + modulation_factor, 0.0, None)
@@ -143,25 +197,67 @@ def tree_diffusion_step_adversarial(
 
 
 
-    # Compute mix term using modified weights
+    # Compute adversarial mix using modified weights
 
 
     averages = subtree_averages(x, p, depth)
 
 
-    mix = np.zeros_like(x)
+    modified_mix = np.zeros_like(x)
 
 
     for level, avg in enumerate(averages):
 
 
-        mix += modified_weights[level] * expand_level(avg, p, depth, level)
+        modified_mix += modified_weights[level] * expand_level(avg, p, depth, level)
+
+
+    
+
+
+    # The base diffusion term with modified weights
+
+
+    x_diffusion_modified = (1.0 - alpha) * x + alpha * modified_mix
 
 
 
 
 
-    return (1.0 - alpha) * x + alpha * mix
+    # 2. Compute non-linear band-coupling term (additive)
+
+
+    bands = tree_detail_bands(x, p, depth)
+
+
+    coupling_bands = [np.zeros_like(b) for b in bands]
+
+
+    for l in range(1, depth + 1):
+
+
+        parent_band_interaction = nl_fn(bands[l - 1])  # Using adv_op_nl
+
+
+        parent_band_interaction_expanded = np.repeat(parent_band_interaction, p)
+
+
+        coupling_bands[l] = parent_band_interaction_expanded * bands[l]
+
+
+    
+
+
+    coupling_term = leaf_from_bands(coupling_bands, p)
+
+
+    
+
+
+    # The final combined operator: modified diffusion + explicit coupling term
+
+
+    return x_diffusion_modified + adv_op_strength * coupling_term
 
 
 
@@ -173,79 +269,244 @@ def tree_diffusion_step_adversarial(
 def rollout(
 
 
+
+
+
+
+
+
     x0: np.ndarray,
+
+
+
+
+
+
 
 
     steps: int,
 
 
+
+
+
+
+
+
     p: int,
+
+
+
+
+
+
 
 
     depth: int,
 
 
+
+
+
+
+
+
     alpha: float,
+
+
+
+
+
+
 
 
     decay: float,
 
 
+
+
+
+
+
+
     adv_op: bool,
+
+
+
+
+
+
 
 
     adv_op_strength: float,
 
 
+
+
+
+
+
+
     adv_op_nl: str,
+
+
+
+
+
+
+
+
+    adv_op_nl_threshold: float,
+
+
+
+
+
+
 
 
     dump_live_sheet_path: Path = None,
 
 
+
+
+
+
+
+
 ) -> list[np.ndarray]:
+
+
+
+
+
+
 
 
     traj = [x0]
 
 
+
+
+
+
+
+
     x = x0
+
+
+
+
+
+
 
 
     if dump_live_sheet_path:
 
 
+
+
+
+
+
+
         _save_live_sheet(x, p, depth, dump_live_sheet_path)  # Save initial state
+
+
+
+
+
+
 
 
     for _ in range(steps):
 
 
+
+
+
+
+
+
         if adv_op:
+
+
+
+
+
+
 
 
             x = tree_diffusion_step_adversarial(
 
 
-                x, p, depth, alpha, decay, adv_op_strength, adv_op_nl
+
+
+
+
+
+
+                x, p, depth, alpha, decay, adv_op_strength, adv_op_nl, adv_op_nl_threshold
+
+
+
+
+
+
 
 
             )
 
 
+
+
+
+
+
+
         else:
+
+
+
+
+
+
 
 
             x = tree_diffusion_step(x, p, depth, alpha, decay)
 
 
+
+
+
+
+
+
         traj.append(x)
+
+
+
+
+
+
 
 
         if dump_live_sheet_path:
 
 
+
+
+
+
+
+
             _save_live_sheet(x, p, depth, dump_live_sheet_path)
+
+
+
+
+
+
 
 
     return traj
@@ -363,6 +624,69 @@ def _save_live_sheet(x: np.ndarray, p: int, depth: int, path: Path) -> None:
     sheet_data = x.reshape((side, side))
     np.save(path, sheet_data.astype(np.float32))
 
+class ObservationMap:
+    def __init__(self, mode: str, p: int, depth: int, seed: int | None):
+        self.mode = mode
+        self.p = p
+        self.depth = depth
+        self.n_leaves = p ** depth
+        self.seed = seed
+        self._permute_levels: dict[int, np.ndarray] = {}
+        self._mix_shifts: dict[int, int] = {}
+        if mode == "permute_depth":
+            self._build_permutations()
+        elif mode == "mix_depth":
+            self._build_mix_shifts()
+        elif mode != "none":
+            raise ValueError(f"unknown observation mode {mode}")
+
+    def _build_permutations(self) -> None:
+        rng = np.random.default_rng(self.seed)
+        for level in range(self.depth + 1):
+            block_size = self.p ** (self.depth - level)
+            if block_size <= 1:
+                continue
+            self._permute_levels[level] = rng.permutation(block_size)
+
+    def _build_mix_shifts(self) -> None:
+        rng = np.random.default_rng(self.seed)
+        for level in range(self.depth + 1):
+            block_size = self.p ** (self.depth - level)
+            if block_size <= 1:
+                continue
+            self._mix_shifts[level] = int(rng.integers(1, block_size))
+
+    def apply(self, x: np.ndarray) -> np.ndarray:
+        if self.mode == "none":
+            return x
+        if x.size != self.n_leaves:
+            raise ValueError("observation map applied to unexpected shape")
+        if self.mode == "permute_depth":
+            return self._apply_permute(x)
+        if self.mode == "mix_depth":
+            return self._apply_mix(x)
+        raise ValueError(f"unsupported observation mode {self.mode}")
+
+    def _apply_permute(self, x: np.ndarray) -> np.ndarray:
+        result = x.copy()
+        for level, perm in self._permute_levels.items():
+            block_size = perm.size
+            for start in range(0, self.n_leaves, block_size):
+                block = result[start : start + block_size]
+                result[start : start + block_size] = block[perm]
+        return result
+
+    def _apply_mix(self, x: np.ndarray) -> np.ndarray:
+        result = x.copy()
+        for level, shift in self._mix_shifts.items():
+            block_size = self.p ** (self.depth - level)
+            if shift == 0:
+                continue
+            for start in range(0, self.n_leaves, block_size):
+                block = result[start : start + block_size]
+                result[start : start + block_size] = 0.5 * (block + np.roll(block, shift))
+        return result
+
 def _save_gray_png(path: Path, img_u8: np.ndarray) -> None:
     plt.imsave(path, img_u8, cmap="gray", vmin=0, vmax=255)
 
@@ -443,42 +767,149 @@ def krr_predict(model: dict, X: np.ndarray) -> np.ndarray:
     return K @ model["alpha"]
 
 
-def dataset_from_traj(traj: list[np.ndarray], perm: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def dataset_from_traj(
+    traj: list[np.ndarray],
+    perm: np.ndarray,
+    p: int,
+    depth: int,
+    obs_map: ObservationMap,
+) -> tuple[np.ndarray, np.ndarray]:
+
+
     X = []
+
+
     Y = []
+
+
     for t in range(len(traj) - 1):
-        X.append(traj[t][perm])
-        Y.append(traj[t + 1][perm])
+
+
+        x_observed = obs_map.apply(traj[t])
+
+
+        y_observed = obs_map.apply(traj[t + 1])
+
+
+        X.append(x_observed[perm])
+
+
+        Y.append(y_observed[perm])
+
+
     return np.asarray(X), np.asarray(Y)
 
 
-def score_rollout(model, x0, steps, perm, inv_perm, model_space: str):
+def build_bridge_dataset(
+    traj: list[np.ndarray],
+    perm: np.ndarray,
+    inv_perm: np.ndarray,
+    p: int,
+    depth: int,
+    obs_map: ObservationMap,
+    horizon: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    if horizon < 2:
+        raise ValueError("bridge-task horizon must be >= 2")
+    if len(traj) <= horizon:
+        raise ValueError("trajectory too short for the requested bridge horizon")
+    step = horizon // 2
+    if step < 1:
+        raise ValueError("bridge-task horizon produces empty midpoint")
+    windows = len(traj) - horizon
+
+    obs_features = []
+    tree_features = []
+    target_obs = []
+    target_lat = []
+    for start in range(windows):
+        x0_obs = obs_map.apply(traj[start])[perm]
+        xT_obs = obs_map.apply(traj[start + horizon])[perm]
+        x_mid_obs = obs_map.apply(traj[start + step])[perm]
+        x0_lat = x0_obs[inv_perm]
+        xT_lat = xT_obs[inv_perm]
+        obs_features.append(np.concatenate([x0_obs, xT_obs]))
+        tree_features.append(
+            np.concatenate(
+                [quotient_vector(x0_lat, p, depth), quotient_vector(xT_lat, p, depth)],
+                axis=0,
+            )
+        )
+        target_obs.append(x_mid_obs)
+        target_lat.append(x_mid_obs[inv_perm])
+
+    return (
+        np.stack(obs_features),
+        np.stack(tree_features),
+        np.stack(target_obs),
+        np.stack(target_lat),
+    )
+
+
+
+
+
+def score_rollout(
+    model,
+    x0: np.ndarray,
+    steps: int,
+    perm: np.ndarray,
+    inv_perm: np.ndarray,
+    p: int,
+    depth: int,
+    obs_map: ObservationMap,
+    model_space: str,
+):
     preds = []
     x_state = x0
     for _ in range(steps):
-        x_pred = krr_predict(model, x_state[None, :])[0]
-        preds.append(x_pred)
-        x_state = x_pred
+        x_pred_raw = krr_predict(model, x_state[None, :])[0]
+        preds.append(x_pred_raw) # Store raw predictions for rollout
+        x_state = x_pred_raw # Next state is the raw prediction
     preds = np.asarray(preds)
-    if model_space == "latent":
-        preds_latent = preds
-        preds_obs = preds[:, perm]
+
+    # Apply observation map to the entire rollout AFTER generation for scoring
+    if obs_map.mode != "none":
+        preds_observed = np.array([obs_map.apply(x_val) for x_val in preds])
     else:
-        preds_obs = preds
-        preds_latent = preds[:, inv_perm]
+        preds_observed = preds
+    
+    if model_space == "latent":
+        preds_latent = preds_observed
+        preds_obs = preds_observed[:, perm]
+    else:
+        preds_obs = preds_observed
+        preds_latent = preds_observed[:, inv_perm]
     return preds_obs, preds_latent
 
 
-def score_rollout_quotient(model, x0_lat, steps, p, depth, perm):
+def score_rollout_quotient(
+    model,
+    x0_lat: np.ndarray,
+    steps: int,
+    p: int,
+    depth: int,
+    perm: np.ndarray,
+    inv_perm: np.ndarray,
+    obs_map: ObservationMap,
+):
     preds_lat = []
     x_state = x0_lat
     for _ in range(steps):
         q_state = quotient_vector(x_state, p, depth)
-        x_pred = krr_predict(model, q_state[None, :])[0]
-        preds_lat.append(x_pred)
-        x_state = x_pred
+        x_pred_lat_raw = krr_predict(model, q_state[None, :])[0]
+        preds_lat.append(x_pred_lat_raw)
+        x_state = x_pred_lat_raw # Next state is the raw prediction in latent space
     preds_lat = np.asarray(preds_lat)
-    preds_obs = preds_lat[:, perm]
+
+    # Apply observation map to the entire rollout AFTER generation for scoring
+    if obs_map.mode != "none":
+        preds_lat_observed = np.array([obs_map.apply(x_val) for x_val in preds_lat])
+    else:
+        preds_lat_observed = preds_lat
+    
+    preds_obs = preds_lat_observed[:, perm]
+    preds_lat = preds_lat_observed
     return preds_obs, preds_lat
 
 
@@ -489,6 +920,8 @@ def mse(a: np.ndarray, b: np.ndarray) -> float:
 def run_benchmark(args):
     rng = np.random.default_rng(args.seed)
     adv_rng = np.random.default_rng(args.seed if args.adv_seed is None else args.adv_seed)
+    obs_map_seed = args.obs_map_seed if args.obs_map_seed is not None else args.seed
+    obs_map = ObservationMap(args.obs_map_mode, args.p, args.depth, obs_map_seed)
     n = args.p ** args.depth
     perm = rng.permutation(n)
     inv_perm = np.argsort(perm)
@@ -530,10 +963,13 @@ def run_benchmark(args):
         args.adv_op,
         args.adv_op_strength,
         args.adv_op_nl,
+        args.adv_op_nl_threshold,
         dump_live_sheet_path=Path(args.dump_live_sheet) if args.dump_live_sheet else None,
     )
 
-    X_obs, Y_obs = dataset_from_traj(traj, perm)
+    X_obs, Y_obs = dataset_from_traj(
+        traj, perm, args.p, args.depth, obs_map
+    )
     split = min(args.train, X_obs.shape[0])
     X_train, Y_train = X_obs[:split], Y_obs[:split]
     X_test, Y_test = X_obs[split:], Y_obs[split:]
@@ -587,10 +1023,12 @@ def run_benchmark(args):
     if X_test.shape[0] > 0:
         x0_obs = X_test[0]
         rbf_roll_obs, rbf_roll_lat = score_rollout(
-            rbf_model, x0_obs, args.rollout_steps, perm, inv_perm, "obs"
+            rbf_model, x0_obs, args.rollout_steps, perm, inv_perm,
+            args.p, args.depth, obs_map, "obs"
         )
         tree_roll_obs, tree_roll_lat = score_rollout_quotient(
-            tree_model, x0_obs[inv_perm], args.rollout_steps, args.p, args.depth, perm
+            tree_model, x0_obs[inv_perm], args.rollout_steps, args.p, args.depth, perm, inv_perm,
+            obs_map
         )
         true_roll = rollout(
             x0_obs[inv_perm],
@@ -602,6 +1040,7 @@ def run_benchmark(args):
             args.adv_op,
             args.adv_op_strength,
             args.adv_op_nl,
+            args.adv_op_nl_threshold,
             dump_live_sheet_path=None, # Don't dump true rollout to same file
         )
         true_roll_lat = np.asarray(true_roll[1:])
@@ -723,6 +1162,76 @@ def run_benchmark(args):
         rbf_roll_tree_band_q_curve = None
         tree_roll_tree_band_q_curve = None
 
+    bridge_metrics = {
+        "rbf_bridge_mse": np.nan,
+        "tree_bridge_mse": np.nan,
+        "rbf_bridge_q_mse": np.nan,
+        "tree_bridge_q_mse": np.nan,
+        "rbf_bridge_tree_band_q_mse": np.nan,
+        "tree_bridge_tree_band_q_mse": np.nan,
+        "bridge_windows": 0,
+        "bridge_train_samples": 0,
+        "bridge_test_samples": 0,
+    }
+    if args.bridge_task:
+        (
+            X_bridge_obs,
+            X_bridge_tree,
+            Y_bridge_obs,
+            Y_bridge_lat,
+        ) = build_bridge_dataset(
+            traj, perm, inv_perm, args.p, args.depth, obs_map, args.bridge_task_T
+        )
+        bridge_windows = X_bridge_obs.shape[0]
+        if bridge_windows < 2:
+            raise ValueError("bridge task needs at least two windows for train/test split")
+        bridge_train = max(1, min(args.train, bridge_windows - 1))
+        X_bridge_obs_train = X_bridge_obs[:bridge_train]
+        Y_bridge_obs_train = Y_bridge_obs[:bridge_train]
+        X_bridge_obs_test = X_bridge_obs[bridge_train:]
+        Y_bridge_obs_test = Y_bridge_obs[bridge_train:]
+        X_bridge_tree_train = X_bridge_tree[:bridge_train]
+        X_bridge_tree_test = X_bridge_tree[bridge_train:]
+        Y_bridge_lat_train = Y_bridge_lat[:bridge_train]
+        Y_bridge_lat_test = Y_bridge_lat[bridge_train:]
+        rbf_bridge_model = krr_fit(X_bridge_obs_train, Y_bridge_obs_train, args.rbf_ls, args.reg)
+        tree_bridge_model = krr_fit(X_bridge_tree_train, Y_bridge_lat_train, args.tree_ls, args.reg)
+        rbf_bridge_pred = krr_predict(rbf_bridge_model, X_bridge_obs_test)
+        tree_bridge_pred_lat = krr_predict(tree_bridge_model, X_bridge_tree_test)
+        tree_bridge_pred_obs = tree_bridge_pred_lat[:, perm]
+        rbf_bridge_pred_lat = rbf_bridge_pred[:, inv_perm]
+        true_bridge_lat = Y_bridge_lat_test
+
+        rbf_bridge_mse = mse(rbf_bridge_pred, Y_bridge_obs_test)
+        tree_bridge_mse = mse(tree_bridge_pred_obs, Y_bridge_obs_test)
+        rbf_bridge_q = mse(
+            np.stack([quotient_vector(pred, args.p, args.depth) for pred in rbf_bridge_pred_lat]),
+            np.stack([quotient_vector(target, args.p, args.depth) for target in true_bridge_lat]),
+        )
+        tree_bridge_q = mse(
+            np.stack([quotient_vector(pred, args.p, args.depth) for pred in tree_bridge_pred_lat]),
+            np.stack([quotient_vector(target, args.p, args.depth) for target in true_bridge_lat]),
+        )
+        rbf_bridge_tree_band_q = mse(
+            np.stack([tree_band_energy_vector(pred, args.p, args.depth) for pred in rbf_bridge_pred_lat]),
+            np.stack([tree_band_energy_vector(target, args.p, args.depth) for target in true_bridge_lat]),
+        )
+        tree_bridge_tree_band_q = mse(
+            np.stack([tree_band_energy_vector(pred, args.p, args.depth) for pred in tree_bridge_pred_lat]),
+            np.stack([tree_band_energy_vector(target, args.p, args.depth) for target in true_bridge_lat]),
+        )
+        bridge_metrics = {
+            "rbf_bridge_mse": rbf_bridge_mse,
+            "tree_bridge_mse": tree_bridge_mse,
+            "rbf_bridge_q_mse": rbf_bridge_q,
+            "tree_bridge_q_mse": tree_bridge_q,
+            "rbf_bridge_tree_band_q_mse": rbf_bridge_tree_band_q,
+            "tree_bridge_tree_band_q_mse": tree_bridge_tree_band_q,
+            "bridge_windows": bridge_windows,
+            "bridge_train_samples": bridge_train,
+            "bridge_test_samples": bridge_windows - bridge_train,
+        }
+
     metrics = {
         "rbf_one_step_mse": rbf_mse,
         "tree_one_step_mse": tree_mse,
@@ -744,6 +1253,7 @@ def run_benchmark(args):
         "train_samples": X_train.shape[0],
         "test_samples": X_test.shape[0],
     }
+    metrics.update(bridge_metrics)
     curves = {
         "rbf_roll_curve": rbf_roll_curve,
         "tree_roll_curve": tree_roll_curve,
@@ -846,26 +1356,21 @@ def main():
         "--adv-op-strength",
         type=float,
         default=0.1,
-        help="Strength of the adversarial operator.",
-    )
-    ap.add_argument(
-        "--adv-op-nl",
-        choices=["tanh", "sigmoid", "sign"],
-        default="tanh",
-        help="Nonlinearity for the adversarial operator.",
-    )
-    ap.add_argument(
-        "--adv-op-strength",
-        type=float,
-        default=0.1,
         help="Strength of the adversarial operator (non-linear modulation of weights).",
     )
     ap.add_argument(
         "--adv-op-nl",
-        choices=["tanh", "sigmoid", "sign"],
+        choices=["tanh", "sigmoid", "sign", "threshold"],
         default="tanh",
         help="Nonlinearity for the adversarial operator.",
     )
+    ap.add_argument(
+        "--adv-op-nl-threshold",
+        type=float,
+        default=0.1,
+        help="Threshold value for 'threshold' nonlinearity.",
+    )
+    ap.add_argument(
         "--adv-band",
         type=int,
         default=-1,
@@ -942,6 +1447,30 @@ def main():
         default=16,
         help="Max row height for energy-scaled band planes.",
     )
+    ap.add_argument(
+        "--bridge-task",
+        action="store_true",
+        help="Enable bridge-task evaluation (infer x_T/2 from x0, x_T).",
+    )
+    ap.add_argument(
+        "--bridge-task-T",
+        type=int,
+        default=50,
+        help="Total steps T for bridge task (x0 to x_T).",
+    )
+    ap.add_argument(
+        "--obs-map-mode",
+        choices=["none", "permute_depth", "mix_depth"],
+        default="none",
+        help="Mode for non-commuting depth-dependent observation map.",
+    )
+    ap.add_argument(
+        "--obs-map-seed",
+        type=int,
+        default=None,
+        help="RNG seed for observation map (defaults to --seed).",
+    )
+
     args = ap.parse_args()
 
     metrics, curves = run_benchmark(args)

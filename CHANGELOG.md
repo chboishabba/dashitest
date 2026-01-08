@@ -72,6 +72,24 @@
 - Added video output capability for the tree diffusion benchmark's live sheets,
   enabled via the `run_tree_live_sheet.sh` wrapper script, leveraging the
   existing `compute_image_preview.py` infrastructure.
+- Added non-commuting depth-dependent observation map (`--obs-map-mode`, `--obs-map-seed`)
+  to `tree_diffusion_bench.py` for testing kernel separation. This feature successfully
+  forced a significant separation between RBF and Tree kernels.
+- Added video output capability for the tree diffusion benchmark's live sheets,
+  enabled via the `run_tree_live_sheet.sh` wrapper script, leveraging the
+  existing `compute_image_preview.py` infrastructure.
+- Added non-commuting depth-dependent observation map (`--obs-map-mode`, `--obs-map-seed`)
+  to `tree_diffusion_bench.py` for testing kernel separation. This feature successfully
+  forced a significant separation between RBF and Tree kernels.
+- Made the depth-aware observation map deterministic so the same permutation/mixing
+  applies across dataset construction, rollouts, and the new bridge task; the
+  `permute_depth`/`mix_depth` modes now instantiate a fixed, non-commuting map per
+  run so separation is not attributed to random noise.
+- Added `--bridge-task`/`--bridge-task-T` to `tree_diffusion_bench.py`, training
+  bridge-specific KRR models on concatenated `(x0, x_T)` pairs to infer `x_{T/2}`
+  and emit raw/quotient/tree-band errors (`rbf_bridge_*`/`tree_bridge_*`), with the
+  RBF tree-band error serving as the leakage proxy—this is the final inference axis
+  before benchmark closure.
 - Documented a cleanup guideline to consolidate bulk PNG dumps into GIFs and
   remove the individual PNGs.
 - Documented the null-separation/control-case interpretation for tree diffusion

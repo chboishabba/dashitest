@@ -1,0 +1,21 @@
+{
+  "n_leaves": 729,
+  "rbf_one_step_mse": 2.2269999083802954e+81,
+  "rbf_one_step_q_mse": 2.2269966316193538e+81,
+  "rbf_one_step_tree_band_q_mse": 2.279696195190815e+163,
+  "rbf_one_step_tree_q_mse": 1.6001166469870472e+164,
+  "rbf_rollout_mse": 5.774013696780144e+67,
+  "rbf_rollout_q_mse": 5.773987381294781e+67,
+  "rbf_rollout_tree_band_q_mse": 7.611471023707513e+135,
+  "rbf_rollout_tree_q_mse": 5.372578771774523e+136,
+  "test_samples": 100,
+  "train_samples": 200,
+  "tree_one_step_mse": 2.2269999083802954e+81,
+  "tree_one_step_q_mse": 2.2269966316193538e+81,
+  "tree_one_step_tree_band_q_mse": 2.279696195190815e+163,
+  "tree_one_step_tree_q_mse": 1.6001166469870472e+164,
+  "tree_rollout_mse": 5.774013696780145e+67,
+  "tree_rollout_q_mse": 5.773987381294781e+67,
+  "tree_rollout_tree_band_q_mse": 7.611471023707513e+135,
+  "tree_rollout_tree_q_mse": 5.372578771774523e+136
+}

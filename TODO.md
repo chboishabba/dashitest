@@ -44,10 +44,10 @@
   - Sweep `--adv-band`/`--adv-style` (randphase/sparse/mix) to compare band
     kill rates and leakage between RBF and tree kernels.
   - Add a symmetry-breaking tree diffusion variant (depth-varying diffusion or
-    non-commuting observation map) to force model separation. [wip]
-    - Implemented a more aggressive adversarial operator: non-linear, state-dependent
-      modulation of diffusion weights based on band energies. This replaces the previous
-      separate adversarial term and depth-decay flags.
+    non-commuting observation map) to force model separation. [completed]
+    - Implemented a more aggressive adversarial operator: combines non-linear,
+      state-dependent modulation of diffusion weights with an explicit band-coupling term.
+    - Added non-commuting depth-dependent observation map (`--obs-map-mode`).
   - Lock design choices for the next phase: local/adjacent band coupling (vs
     global), static adversary (vs adaptive), coarse→fine vs fine→coarse bridge
     direction, and relative pass/fail thresholds.
@@ -55,12 +55,13 @@
     (`x_{t+1} = A x_t + g(B(x_t))`) and a flag to toggle it. [wip]
     - Implemented adjacent-band coupling (`d_l` modulated by `d_{l-1}`) with
       `--adv-op`, `--adv-op-strength`, and `--adv-op-nl` flags (tanh, sigmoid, sign).
-  - Add a bridge-task evaluation (infer `x_{T/2}` or band energies from `(x0, xT)`
-    and score in band-quotient space with leakage reporting).
+  - Implemented the bridge-task evaluation (infer `x_{T/2}` or band energies from
+    `(x0, xT)` via `--bridge-task`/`--bridge-task-T`), score raw/quotient/tree-band
+    mse, and surface leakage through `rbf_bridge_tree_band_q_mse`; this is the
+    final axis before formally closing the benchmark, so avoid additional
+    adversaries or sweeps once Tree ≫ RBF (`CONTEXT.md#L23880-L24020`).
   - Implement the adversarial-operator toggle with local band coupling as the
     default path once the design choices are locked.
-  - Implement the bridge-task evaluation (coarse↔fine) with relative thresholds
-    once the design choices are locked.
   - Decide adversarial-operator specifics: resize method (nearest/bilinear/area),
     kernel support, polynomial degree, and per-band eps_j schedule.
   - Decide leakage measurement details: band norm, ablation replacement
