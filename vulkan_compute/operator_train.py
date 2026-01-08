@@ -9,13 +9,18 @@ import argparse
 import datetime
 import json
 import struct
+import sys
 from pathlib import Path
 
 import numpy as np
 from vulkan import *
 from vulkan import ffi
 
-from vulkan_compute import compute_buffer
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+import compute_buffer
 
 
 def parse_args() -> argparse.Namespace:
@@ -59,7 +64,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument(
         "--spv",
         type=Path,
-        default=Path(__file__).with_name("shaders/operator_step.spv"),
+        default=Path(__file__).resolve().parent / "shaders/operator_step.spv",
         help="Compiled operator_step SPIR-V module.",
     )
     return ap.parse_args()
@@ -98,8 +103,7 @@ def _create_buffer(
 def _write_array(device: VkDevice, memory: VkDeviceMemory, array: np.ndarray) -> None:
     size = array.nbytes
     mapped = vkMapMemory(device, memory, 0, size, 0)
-    view = np.frombuffer(ffi.buffer(mapped, size), dtype=array.dtype, count=array.size)
-    view[:] = array.ravel()
+    ffi.memmove(mapped, array.tobytes(), size)
     vkUnmapMemory(device, memory)
 
 
@@ -137,8 +141,10 @@ def main() -> None:
     if not shader_path.exists():
         raise FileNotFoundError(f"{shader_path} not found; compile the shader with glslangValidator.")
 
+    required_extensions = [b"VK_KHR_portability_enumeration"]
     instance_info = VkInstanceCreateInfo(
         sType=VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+        flags=VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR,
         pApplicationInfo=VkApplicationInfo(
             sType=VK_STRUCTURE_TYPE_APPLICATION_INFO,
             pApplicationName="operator_train_vulkan",
@@ -147,6 +153,8 @@ def main() -> None:
             engineVersion=VK_MAKE_VERSION(1, 0, 0),
             apiVersion=VK_MAKE_VERSION(1, 0, 0),
         ),
+        enabledExtensionCount=len(required_extensions),
+        ppEnabledExtensionNames=required_extensions,
     )
     instance = vkCreateInstance(instance_info, None)
     physical_device = compute_buffer._select_physical_device(instance)
@@ -216,12 +224,13 @@ def main() -> None:
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
     )
 
+    spirv_bytes = shader_path.read_bytes()
     shader_module = vkCreateShaderModule(
         device,
         VkShaderModuleCreateInfo(
             sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-            codeSize=shader_path.stat().st_size,
-            pCode=np.frombuffer(shader_path.read_bytes(), dtype=np.uint32),
+            codeSize=len(spirv_bytes),
+            pCode=spirv_bytes,
         ),
         None,
     )
@@ -268,19 +277,19 @@ def main() -> None:
         VK_NULL_HANDLE,
         1,
         [
-            VkComputePipelineCreateInfo(
-                sType=VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-                layout=pipeline_layout,
-                stage=VkPipelineShaderStageCreateInfo(
-                    sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                    stage=VK_SHADER_STAGE_COMPUTE_BIT,
-                    module=shader_module,
-                    pName="main",
-                ),
-            )
-        ],
-        None,
-    )[0]
+                VkComputePipelineCreateInfo(
+                    sType=VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                    layout=pipeline_layout,
+                    stage=VkPipelineShaderStageCreateInfo(
+                        sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                        stage=VK_SHADER_STAGE_COMPUTE_BIT,
+                        module=shader_module,
+                        pName=b"main",
+                    ),
+                )
+            ],
+            None,
+        )[0]
 
     pool = vkCreateDescriptorPool(
         device,

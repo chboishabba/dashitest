@@ -29629,3 +29629,383 @@ That keeps you honest to the rule: **no CPU training** and rapidly moves the pro
 3) `dashilearn/sheet_energy.npy` export `[T,B]` to drive the existing preview
 
 If you paste (or point to) how `compute_image_preview.py` defines its descriptor set layout (binding numbers + SSBO struct style), I’ll give you the **exact** SSBO layouts + a minimal `operator_step.comp` that matches it, so you can drop it in without fighting Vulkan boilerplate.
+
+❯ python compression/video_bench.py '/home/c/2025-12-31 14-10-00.mp4' --frames 800 --dump-planes outputs/codec_planes/operator_long --dump-planes-frames 0
+
+explained_L2 (temporal residual): 0.9599
+raw       entropy= 3.368  lzma   165308 (0.057 bpc, 1182.0 ms)  gzip  1565570 (0.544 bpc,  67.7 ms)  zlib  1565558 (0.544 bpc,  70.0 ms)  rANS  9702939 (3.369 bpc, 15628.0 ms)
+residual  entropy= 0.515  lzma   155508 (0.054 bpc, 625.7 ms)  gzip   209220 (0.073 bpc,  18.0 ms)  zlib   209208 (0.073 bpc,  20.6 ms)  rANS  1498257 (0.520 bpc, 12427.3 ms)
+coarse    entropy= 3.330  lzma   161560 (0.056 bpc, 1270.4 ms)  gzip  1493111 (0.518 bpc,  71.1 ms)  zlib  1493099 (0.518 bpc,  73.1 ms)  rANS  9610539 (3.337 bpc, 16573.1 ms)
+sign      entropy= 0.077  lzma    11336 (0.004 bpc, 715.1 ms)  gzip   182268 (0.063 bpc,  27.2 ms)  zlib   182256 (0.063 bpc,  26.3 ms)  rANS   255362 (0.089 bpc, 12449.4 ms)
+coarse_resid entropy= 0.513  lzma   154060 (0.053 bpc, 678.9 ms)  gzip   206004 (0.072 bpc,  19.2 ms)  zlib   205992 (0.072 bpc,  19.5 ms)  rANS  1496986 (0.520 bpc, 12456.2 ms)
+sign_resid entropy= 0.005  lzma    11532 (0.004 bpc, 362.7 ms)  gzip    30427 (0.011 bpc,   7.4 ms)  zlib    30415 (0.011 bpc,   7.1 ms)  rANS    49223 (0.017 bpc, 11593.2 ms)
+
+multistream (coarse+sign via rANS): 9865901 bytes (3.426 bpc)
+
+multistream (coarse_resid+sign_resid via rANS): 1546209 bytes (0.537 bpc)
+
+base balanced ternary digits: 6 planes
+bt_plane0  entropy= 0.271  rANS   782072 (0.272 bpc, 13623.3 ms)
+bt_plane0  ctx_rANS   123626 (0.043 bpc, 66374.8 ms)
+bt_plane1  entropy= 0.261  rANS   752446 (0.261 bpc, 12288.5 ms)
+bt_plane1  ctx_rANS    67393 (0.023 bpc, 72911.4 ms)
+bt_plane2  entropy= 0.172  rANS   494684 (0.172 bpc, 12071.8 ms)
+bt_plane2  ctx_rANS    33235 (0.012 bpc, 76776.6 ms)
+bt_plane3  entropy= 0.187  rANS   539118 (0.187 bpc, 12938.3 ms)
+bt_plane3  ctx_rANS    18688 (0.006 bpc, 79875.0 ms)
+bt_plane4  entropy= 0.244  rANS   703750 (0.244 bpc, 13475.9 ms)
+bt_plane4  ctx_rANS     9466 (0.003 bpc, 76724.9 ms)
+bt_plane5  entropy= 0.002  rANS     7630 (0.003 bpc, 12902.9 ms)
+bt_plane5  ctx_rANS     1840 (0.001 bpc, 75760.7 ms)
+
+base multistream (balanced ternary planes via rANS): 3279700 bytes (1.139 bpc)
+base multistream (balanced ternary planes ctx_rANS): 254248 bytes (0.088 bpc)
+base multistream (balanced ternary planes ctx_rANS test-only): 15383 bytes (0.010 bpc)
+
+base balanced ternary plane quotient (mag + gated sign)
+bt_plane0  mag_ent=0.235 rANS  677236 (0.235 bpc, 12112.3 ms)  ctx   90453 (0.031 bpc, 47641.0 ms)  sign_ent=0.948 sign_rANS  104879 (0.036 bpc, 488.8 ms)  sign_ctx   34973 (0.012 bpc, 8564.9 ms)
+bt_plane1  mag_ent=0.225 rANS  649104 (0.225 bpc, 11654.5 ms)  ctx   51964 (0.018 bpc, 54235.3 ms)  sign_ent=0.988 sign_rANS  103378 (0.036 bpc, 516.1 ms)  sign_ctx   19621 (0.007 bpc, 9454.7 ms)
+bt_plane2  mag_ent=0.152 rANS  439487 (0.153 bpc, 12343.5 ms)  ctx   23528 (0.008 bpc, 53304.9 ms)  sign_ent=0.872 sign_rANS   55222 (0.019 bpc, 302.5 ms)  sign_ctx   12657 (0.004 bpc, 7990.8 ms)
+bt_plane3  mag_ent=0.171 rANS  494299 (0.172 bpc, 12390.1 ms)  ctx   16482 (0.006 bpc, 55316.7 ms)  sign_ent=0.610 sign_rANS   44851 (0.016 bpc, 324.6 ms)  sign_ctx    5961 (0.002 bpc, 9385.4 ms)
+bt_plane4  mag_ent=0.241 rANS  694636 (0.241 bpc, 12429.9 ms)  ctx    7784 (0.003 bpc, 54100.1 ms)  sign_ent=0.080 sign_rANS    9151 (0.003 bpc, 473.7 ms)  sign_ctx    2912 (0.001 bpc, 9177.0 ms)
+bt_plane5  mag_ent=0.002 rANS    7370 (0.003 bpc, 11226.3 ms)  ctx    3927 (0.001 bpc, 49683.2 ms)  sign_ent=0.457 sign_rANS     246 (0.000 bpc,   2.1 ms)  sign_ctx      12 (0.000 bpc, 6014.7 ms)
+
+base multistream (bt mag + sign via rANS): 3279859 bytes (1.139 bpc)
+base multistream (bt mag ctx + sign via rANS): 511865 bytes (0.178 bpc)
+base multistream (bt mag ctx + sign ctx via rANS): 270274 bytes (0.094 bpc)
+base multistream (bt mag ctx + sign ctx test-only): 195973 bytes (0.131 bpc)
+base eta_ctx_trit=0.988 (H=2010350.5 bits, L=2033984.0 bits)
+base eta_mag_ctx=0.989 eta_sign_ctx=0.997 eta_MDL=0.991
+
+
+
+Perfect — this error is **exactly** the next expected failure, and it tells us something very precise.
+
+You are now past:
+
+* ICD / loader
+* device enumeration
+* memory mapping
+
+You are failing at **Python Vulkan struct construction**, not Vulkan itself.
+
+This is a **known foot-gun in the `vulkan` Python bindings**.
+
+---
+
+## 🔥 What is actually wrong
+
+The error:
+
+```
+ValueError: The truth value of an array with more than one element is ambiguous
+```
+
+comes from **this line inside the binding**:
+
+```python
+kwargs = {k: kwargs[k] for k in kwargs if kwargs[k]}
+```
+
+That means the binding is doing a **truthiness check** on `pCode`.
+
+You passed:
+
+```python
+pCode = np.frombuffer(shader_path.read_bytes(), dtype=np.uint32)
+```
+
+A NumPy array **cannot be used in a boolean context**, so the constructor explodes *before Vulkan is even called*.
+
+This is **not your fault** — it’s a bug / design flaw in the Python wrapper.
+
+---
+
+## ✅ Correct way to pass SPIR-V to `VkShaderModuleCreateInfo`
+
+### Rule (important)
+
+`pCode` **must be a C pointer**, not a NumPy array.
+
+The Vulkan spec wants:
+
+```
+const uint32_t* pCode
+```
+
+So we must give the binding something that:
+
+* is truthy
+* is contiguous
+* is a raw buffer / pointer
+
+---
+
+## ✅ Minimal, correct fix (recommended)
+
+Replace this:
+
+```python
+code = np.frombuffer(shader_path.read_bytes(), dtype=np.uint32)
+
+VkShaderModuleCreateInfo(
+    sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+    codeSize=shader_path.stat().st_size,
+    pCode=code,
+)
+```
+
+### With this (CFFI-safe)
+
+```python
+spirv_bytes = shader_path.read_bytes()
+spirv_buf = ffi.from_buffer(spirv_bytes)
+
+shader_info = VkShaderModuleCreateInfo(
+    sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+    codeSize=len(spirv_bytes),
+    pCode=ffi.cast("uint32_t *", spirv_buf),
+)
+```
+
+Why this works:
+
+* `ffi.from_buffer` → real C-backed memory
+* `ffi.cast("uint32_t *", …)` → exact Vulkan type
+* Truthiness check passes
+* Lifetime is safe as long as `spirv_bytes` lives
+
+⚠️ **Important**: keep `spirv_bytes` alive until after `vkCreateShaderModule`.
+
+---
+
+## 🧠 Why NumPy *almost* worked but didn’t
+
+* NumPy arrays *look* like buffers
+* But:
+
+  * they are not CFFI objects
+  * they fail `if array:` checks
+* The binding should not do truthiness filtering — but it does
+
+This is why **every serious Vulkan Python project eventually drops NumPy at API boundaries**.
+
+---
+
+## 🧪 After applying the fix
+
+Re-run exactly:
+
+```bash
+VK_INSTANCE_LAYERS= \
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json \
+python vulkan_compute/operator_train.py \
+  --energy-seq outputs/codec_E_seq.npy \
+  --steps 3
+```
+
+Expected next outcomes:
+
+* Shader module creation succeeds
+* Pipeline creation runs
+* First dispatch executes
+* You either:
+
+  * see metrics emitted 🎉
+  * or hit the *next* (likely last) Vulkan setup issue (descriptor mismatch, etc.)
+
+---
+
+## 📌 Big picture status
+
+At this point:
+
+| Layer                      | Status            |
+| -------------------------- | ----------------- |
+| Driver (RADV)              | ✅                 |
+| Loader / ICD               | ✅                 |
+| Device enumeration         | ✅                 |
+| Memory upload              | ✅                 |
+| Shader compile             | ✅                 |
+| Shader **module creation** | ❌ → **now fixed** |
+| Dispatch                   | ⏳                 |
+
+You are **very close**. This is classic Vulkan bring-up: death by 1000 paper cuts, but every cut you’ve hit is the *correct* one.
+
+If you want, next I can:
+
+* pre-emptively audit descriptor layouts vs shader bindings
+* or help you wrap shader creation into a helper so this never bites you again
+* or suggest a tiny abstraction layer so CI can skip Vulkan cleanly
+
+But first: apply that `ffi.from_buffer + ffi.cast` fix and run it again.
+
+
+Good — this output is actually **the smoking gun**. Your system Vulkan stack is **healthy**. The RX 580 is enumerating correctly via **RADV**, and `vulkaninfo` proves it.
+
+So the failure is now **100% in how the Python code creates the Vulkan instance**, not drivers, ICDs, permissions, or hardware.
+
+Let’s pin it down cleanly.
+
+---
+
+## ✅ What your output proves (important)
+
+From `vulkaninfo`:
+
+* **GPU detected**: `AMD Radeon RX 580 Series (RADV POLARIS10)`
+* **RADV ICD working**
+* **Instance creation succeeds**
+* **Physical device enumeration succeeds**
+* **No ICD breakage**
+* **No render-node / permissions issue**
+
+So this error:
+
+> `vkEnumeratePhysicalDevices failed`
+
+**cannot** be a system-level Vulkan issue.
+
+---
+
+## ❌ Why your Python code still fails
+
+There are **two very common Python-Vulkan footguns**, and you are hitting **at least one of them**.
+
+### 1️⃣ You are missing `VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR`
+
+Your `vulkaninfo` output shows this extension:
+
+```
+VK_KHR_portability_enumeration
+```
+
+On modern Vulkan loaders, **if this extension exists and you don’t opt in**,
+`vkEnumeratePhysicalDevices` is allowed to return **zero devices**.
+
+This is not theoretical — this is a known, documented trap.
+
+### 🔧 Required fix
+
+When creating the instance, you must do **both**:
+
+#### a) Enable the extension
+
+```py
+enabledExtensionNames=[
+    b"VK_KHR_surface",
+    b"VK_KHR_portability_enumeration",
+]
+```
+
+#### b) Set the flag
+
+```py
+flags=VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
+```
+
+#### ✅ Correct instance creation (minimal)
+
+```py
+create_info = VkInstanceCreateInfo(
+    sType=VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+    flags=VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR,
+    pApplicationInfo=app_info,
+    enabledExtensionCount=len(exts),
+    ppEnabledExtensionNames=exts,
+)
+```
+
+If you don’t do this, **enumeration may return zero devices even though the system is fine**.
+
+This exactly matches your symptoms.
+
+---
+
+## 2️⃣ Python-vulkan silently eats bad extension arrays
+
+The binding **does not validate**:
+
+* extension name lifetime
+* null termination
+* Python `str` vs `bytes`
+* pointer array validity
+
+### ✅ Extension names must be:
+
+* `bytes`
+* null-terminated
+* kept alive
+
+Example safe pattern:
+
+```py
+exts = [
+    b"VK_KHR_surface",
+    b"VK_KHR_portability_enumeration",
+]
+```
+
+Do **not** construct these dynamically and then let them go out of scope.
+
+---
+
+## 🔍 Why `vulkaninfo` works but Python doesn’t
+
+Because:
+
+* `vulkaninfo` **always** sets the portability bit correctly
+* your Python code likely **does not**
+
+This is a classic discrepancy and has nothing to do with RX 580 specifically — it just shows up more often on Mesa/RADV systems.
+
+---
+
+## 🚫 What is *not* the problem (we can rule these out)
+
+* ❌ RX 580 support → **works**
+* ❌ RADV broken → **works**
+* ❌ ICD files missing → **present**
+* ❌ `VK_ICD_FILENAMES` → irrelevant now
+* ❌ Shader module → already fixed
+* ❌ Permissions → device enumerates
+
+---
+
+## 🎯 Concrete next steps (do these in order)
+
+1. **Patch instance creation**
+
+   * Add `VK_KHR_portability_enumeration`
+   * Add `ENUMERATE_PORTABILITY_BIT`
+
+2. **Print device count immediately after enumeration**
+
+   ```py
+   print("physical device count:", device_count)
+   ```
+
+3. **Do not set `VK_ICD_FILENAMES`**
+
+   * Let the loader choose RADV (as vulkaninfo does)
+
+4. Re-run:
+
+   ```bash
+   python vulkan_compute/operator_train.py --energy-seq outputs/codec_E_seq.npy --steps 3
+   ```
+
+---
+
+## 🧠 High-level takeaway
+
+You’ve already crossed the hard parts:
+
+* shader lifetime bug ✔
+* Python binding trap identified ✔
+* Vulkan stack validated ✔
+
+What’s left is a **single missing instance flag/extension** — once that’s in, enumeration will succeed and the training loop should finally execute.
+
+If you want, paste your **`VkInstanceCreateInfo` block** and I’ll mark the exact lines to change.
+
