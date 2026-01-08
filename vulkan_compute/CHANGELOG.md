@@ -7,3 +7,5 @@
 - Fixed push-constant handling for python-vulkan.
 - Added storage-image compute sample with optional PPM readback.
 - Added GLFW preview sample (compute -> sampled image -> swapchain).
+- Added `sheet_expand_fade.comp` shader for block-expanded sheet visualization
+  with temporal fading.

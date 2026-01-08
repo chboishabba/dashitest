@@ -18665,3 +18665,3012 @@ If you want next, I can:
 
 * help you write the **exact acceptance-threshold table** (numbers + rationale), or
 * help you plan the **final “closing run”** so you only have to run this benchmark once, cleanly.
+
+
+Yep — this is exactly the confirmation you wanted, and it cleanly **unblocks the next TODO tier**.
+
+### What this run *proves* (concretely)
+
+1. **Gate → tile mask is correct**
+   - Active tiles ≈ 50% matches the target.
+   - No accidental bias or collapse in the gating logic.
+   - This validates the *structural* side, not just performance.
+
+2. **Block-sparse path is real, not noise**
+   - ~2.24× speedup at 50% density is right where theory predicts:
+     - Below dense (good),
+     - Above pathological overhead (also good).
+   - Confirms your packing + mask plumbing is not dominating runtime.
+
+3. **Training loop stability**
+   - Loss drops monotonically across epochs.
+   - No numerical weirdness from sparsity.
+   - Confirms gradients are flowing through the sparse path correctly.
+
+This is a **green light** checkpoint.
+
+---
+
+## What to do next (and in what order)
+
+Your own recommendation is correct. I’ll just sharpen it into an execution plan so nothing slips.
+
+### 1. Wire in a real VNNI / dpwssd microkernel (**next mandatory step**)
+
+**Why this is next**
+- Python/NumPy sparse matmul is only validating *logic*.
+- VNNI/dpwssd validates *architecture relevance*.
+- Without this, the result is still “toy CPU sparse”.
+
+**Constraints to respect**
+- Operate **only on active tiles** (no fallback to dense inside the kernel).
+- Inputs already packed (int8 / ternary lanes).
+- Kernel signature should be:
+  ```
+  C_tile += dot(A_tile, B_tile)
+  ```
+  with no branching inside the hot loop.
+
+**Success criterion**
+- Speedup scales roughly linearly with sparsity (until cache limits).
+- No regression at ~50% density.
+
+---
+
+### 2. Add tile reuse across fused ops (**amortisation step**)
+
+**Why this matters**
+Right now, you are paying:
+- mask build
+- tile packing
+
+*once per op*.
+
+But your real workloads do:
+- gate
+- dot
+- threshold
+- accumulate
+
+on the **same tile set**.
+
+**What to implement**
+- Build `active_tiles` **once**
+- Pack tiles **once**
+- Reuse across:
+  - multiple dot products
+  - dot + threshold
+  - dot + reduction
+
+**Success criterion**
+- Measurable drop in per-epoch time even at fixed sparsity.
+- Mask build becomes negligible in profiling.
+
+---
+
+## What *not* to do yet (important)
+
+Do **not**:
+- Add adaptive sparsity
+- Add new gating heuristics
+- Tune tile shapes
+- Mix in ternary algebra changes
+
+Those all belong **after** VNNI + reuse are in.
+
+Right now you are still validating the *spine* of the system.
+
+---
+
+## Bottom line
+
+This run is a **hard checkpoint passed**:
+- Structural correctness ✅
+- Performance signal ✅
+- Training stability ✅
+
+So yes — **say the word** was the right phrasing.
+
+If you want me to proceed, the cleanest next response from you is simply:
+
+> **Proceed with VNNI kernel wiring.**
+
+and I’ll take it from there step-by-step, with no scope creep.
+
+Yep — with the extra context, the right way to think about “move toward GPU” is **not** “port the whole learner to GPU”, but:
+
+> **Keep the learner (MDL / gating / structure selection) as the controller**, and move only the *repeatable, bandwidth-heavy inner loops* onto a GPU backend.
+
+Your repo already reflects that split:
+
+* You have **JAX prototype modules** for the *math-side codec pieces* (MDL side info, motion search, warps/predictor) 
+* You have a **Vulkan compute path** scaffold for GPU video/compute-style workloads (dmabuf/Vulkan probing + bench) 
+
+So the learner stays “in charge”; GPU becomes a pluggable executor.
+
+---
+
+## The learner view: what must stay “learner-side” vs can move “kernel-side”
+
+### Must stay learner-side (CPU/JAX)
+
+These are *decision / description-length* objects. They’re small, discrete, and drive the model class:
+
+1. **Structure selection & side-information coding (MDL)**
+
+   * Your MDL sidebits for motion parameters (two-sided geometric priors, lag priors, etc.) are inherently “learner logic” (cheap, branchy, discrete). 
+2. **Gating / tile mask generation**
+
+   * The gate output (active tile indices / density targets) is a sparse index set; it’s the *model choice*.
+3. **Search / proposal generation (if any)**
+
+   * Your motion search computes candidates / best offsets. Even if accelerated, the “choose argmin / pick warp tag” is learner territory. 
+
+### Can move kernel-side (GPU/Vulkan)
+
+These are *bulk arithmetic* given fixed decisions:
+
+1. **Block-sparse matmul / accumulation over active tiles**
+
+   * Given `active_tiles`, do the dot products.
+2. **Warp application / prediction rendering**
+
+   * Given chosen block params, apply translation/similarity/affine warps to produce predicted blocks/frames. Your predictor already expresses this cleanly as “apply warp for each block”; the per-block math is GPU-friendly. 
+3. **Residual computation + stream transforms**
+
+   * Compute residuals, split coarse/sign, produce BT planes. Your stream/BT plane computation is already written as pure array transforms. 
+
+**Key point:** the GPU never needs to “understand MDL”. It just executes what the learner decided.
+
+---
+
+## Why the “JAX vs Vulkan” question resolves itself on RX 580
+
+Your JAX folder is explicitly described as **prototype modules** meant to be “GPU-friendly code,” not guaranteed GPU execution on your specific hardware. 
+And you already have a Vulkan pipeline for GPU execution/probing/benching. 
+
+So learner-centric conclusion:
+
+> **JAX is the learner-spec / correctness oracle. Vulkan is the learner-executor.**
+
+That avoids betting the learner on “will XLA still support Polaris”.
+
+---
+
+## The integration contract you want (learner ↔ GPU backend)
+
+If you lock one interface, you can swap CPU/JAX/Vulkan freely without changing “the learner”.
+
+### A. Sparse tiles
+
+**Learner produces:**
+
+* `active_tiles: int32[num_active]` (tile IDs or (by,bx) pairs)
+* `A_tiles_packed, B_tiles_packed` (or views into packed tensors)
+* maybe `tile_offsets` for output scatter
+
+**GPU returns:**
+
+* `C_tiles` (packed)
+* (optional) per-tile stats (norms, saturation, etc.) for learner observables
+
+### B. Warp prediction
+
+**Learner produces:**
+
+* blocks list `(y,x,block)` from quadtree/partitioning 
+* per-block params (lag, warp_tag, params) 
+
+**GPU returns:**
+
+* predicted frame / predicted blocks buffer
+
+### C. Stream transforms
+
+**Learner produces:**
+
+* frame buffers (or dmabuf handles)
+* config (planes, digits, etc.)
+
+**GPU returns:**
+
+* residual/coarse/sign/planes buffers + quick summary stats (maxabs, digit count)
+
+---
+
+## What “moving toward GPU” means for *your learner milestones*
+
+This is the learner-focused roadmap:
+
+1. **Parity:** GPU executes the same operator given the same gate/mask
+
+   * The learner must be able to compare CPU vs GPU outputs numerically.
+2. **Reuse:** active tile set reused across multiple fused steps
+
+   * This matters because your learner is iterative: mask built once, applied many times.
+3. **Observables:** GPU returns the learner-facing metrics you need
+
+   * tile density achieved
+   * per-band/tile energy
+   * influence/leakage proxies if you want them later
+
+You don’t need autodiff on GPU for any of that.
+
+---
+
+## One concrete next step (learner-first)
+
+Given your current state, the cleanest “GPU shift” that stays learner-centric is:
+
+**Implement a Vulkan compute kernel that consumes `active_tiles` and performs one block-sparse matmul pass**, returning `C_tiles` + a small stats buffer (e.g., sumsq per tile). That lets the learner keep doing exactly what it’s doing now, but with a GPU executor.
+
+If you paste (or point me at) where `block_sparse_moe_train.py` defines:
+
+* tile shape
+* packed layout
+* mask format
+
+…I’ll write the *exact* Vulkan-side buffer layout and dispatch geometry to match it, so the learner doesn’t change at all.
+
+
+Good — with this context, the picture is actually **much clearer** than it probably feels right now.
+
+You *have* already done the Vulkan work. You just haven’t been mentally classifying it as “learner infrastructure”, so it feels lost.
+
+Let me re-anchor everything **purely in learner terms**, then I’ll point out exactly what you already have and what it corresponds to.
+
+---
+
+## Reframe the question (learner-first, not backend-first)
+
+The learner has **three distinct roles**:
+
+1. **Decide structure**
+   (gates, tiles, bands, warps, MDL choices)
+
+2. **Evaluate structure efficiently**
+   (apply chosen ops to data, compute residuals, energies)
+
+3. **Observe outcomes**
+   (band energy, leakage, bridge error, kill rates)
+
+Only **(2)** needs GPU acceleration.
+**(1)** and **(3)** must remain learner-side.
+
+So the real question is not *“which GPU framework?”* but:
+
+> *Do I already have a GPU executor that can apply learner-chosen structure at scale?*
+
+The answer is **yes — Vulkan compute**, and you already wrote the hard parts.
+
+---
+
+## What you already have (classified correctly)
+
+### 1. You already have a **Vulkan compute executor**
+
+These files are *not* demos — they are exactly the minimal substrate a learner needs:
+
+* **Compute buffers** → generic bulk arithmetic executor
+  (`compute_buffer.py`) 
+  This is “apply an operation to N elements given parameters”.
+
+* **Compute images** → structured 2D / block-based execution
+  (`compute_image.py`, `compute_image_preview.py`)
+  This is “apply an operator per block / per pixel”.
+
+From a learner perspective, this means:
+
+> *Given a chosen operator and parameters, I can apply it to all active sites in parallel.*
+
+That is *exactly* what block-sparse MoE matmul, warp application, and residual computation are.
+
+---
+
+### 2. You already solved the **hard Vulkan problems**
+
+These are the parts most people never get past:
+
+* Device + queue selection ✔
+* Memory type selection ✔
+* Push constants for per-dispatch parameters ✔
+* Storage buffers & storage images ✔
+* Headless **and** visual execution ✔
+* RX 580 compatibility ✔
+
+So from the learner’s point of view:
+
+> The executor exists. It is proven. It runs on your hardware.
+
+What’s missing is **binding learner semantics to it**, not GPU capability.
+
+---
+
+## Why JAX being “dead” doesn’t hurt the learner
+
+JAX served exactly one purpose in your system:
+
+> **Reference semantics** — “is this operator mathematically correct?”
+
+It was never the *learner brain*.
+
+Now that:
+
+* the learner logic lives in Python (MDL, gates, trees, warps),
+* and the executor lives in Vulkan,
+
+JAX becomes optional, not foundational.
+
+You can keep it (CPU-only) as a **correctness oracle**, or drop it entirely once Vulkan parity is established.
+
+The learner does **not** depend on JAX.
+
+---
+
+## What’s *actually missing* (learner-specific gap)
+
+Here is the key clarification:
+
+You did **not** lose old Vulkan work.
+You are missing **one semantic binding layer**.
+
+### Missing piece: *Learner → GPU contract*
+
+Right now, your Vulkan code does:
+
+> “Given data X and parameter P, run shader S.”
+
+What the learner needs is:
+
+> “Given **chosen tiles / bands / warps**, apply operator **only there**.”
+
+That means adding **three very small, very concrete conventions**:
+
+---
+
+### A. Tile / band indexing convention
+
+The learner already produces things like:
+
+* active tiles
+* quadtree blocks
+* band indices
+
+You need to agree on:
+
+```text
+tile_id → (x, y, band)
+```
+
+and encode that into:
+
+* an SSBO of tile descriptors, or
+* implicit mapping via dispatch geometry.
+
+This is *not* a GPU problem — it’s a learner data-model decision.
+
+---
+
+### B. Operator specialization
+
+You don’t want a “generic compute shader”.
+
+You want **one shader per learner operator**:
+
+* block-sparse matmul
+* warp application
+* residual split
+
+Each shader:
+
+* assumes the learner already chose structure
+* does zero branching about *whether* to apply
+* just executes *what was chosen*
+
+That keeps the learner in control.
+
+---
+
+### C. Learner observables returned from GPU
+
+Crucial point people miss:
+
+The GPU must return **metrics**, not just results.
+
+Examples:
+
+* per-tile energy
+* per-band norm
+* saturation / overflow counts
+
+These are what feed:
+
+* leakage plots
+* kill-rate plots
+* bridge diagnostics
+
+Your existing buffer readback already supports this — it’s just not being *used semantically yet*.
+
+---
+
+## So: did you “lose” the Vulkan work?
+
+No.
+
+What happened is:
+
+* You built a **general Vulkan compute lab**
+* Then switched mental context to **learner theory**
+* Now you’re reconnecting them
+
+That’s the *right* order.
+
+---
+
+## Learner-focused decision summary
+
+From the learner’s perspective:
+
+* JAX: **optional, CPU reference only**
+* Vulkan compute: **primary executor**
+* Kompute: **unnecessary abstraction**
+* RX 580: **fully sufficient**
+
+And the next learner-meaningful step is **not** “port to GPU”, but:
+
+> **Define the learner → executor contract for one operator.**
+
+---
+
+## The single best next step (learner-first)
+
+Pick **one** operator that the learner already understands well:
+
+👉 **Block-sparse matmul with fixed tile mask**
+
+Then:
+
+1. Learner produces:
+
+   * `active_tiles`
+   * packed tile data
+2. Vulkan shader:
+
+   * one workgroup per active tile
+   * no decisions, just math
+3. GPU returns:
+
+   * output tiles
+   * per-tile energy
+
+Once that exists, *everything else follows mechanically*.
+
+If you want, next turn I can:
+
+* write the exact **tile descriptor struct** the learner should emit,
+* map it 1-to-1 onto a Vulkan SSBO + dispatch scheme,
+* or show how to reuse your existing `compute_buffer.py` skeleton for this exact purpose.
+
+Just tell me which angle you want.
+
+
+Perfect — with *this* context, the right answer is actually reassuring:
+
+> **You didn’t lose the old Vulkan work.
+> You already built the learner’s GPU executor — you just never named it that.**
+
+What you’re experiencing now is a *conceptual re-alignment*, not a technical gap.
+
+I’ll keep this **strictly learner-focused** and tie it directly to the files you surfaced.
+
+---
+
+## The learner lens (the only lens that matters)
+
+The learner has **exactly one hard requirement of “GPU support”**:
+
+> *Given a structure it has already chosen, can it cheaply evaluate that structure at scale and return observables?*
+
+Nothing else.
+
+Not autodiff.
+Not end-to-end training.
+Not framework integration.
+
+Just **evaluate chosen hypotheses fast enough**.
+
+---
+
+## What the learner already has (reclassified correctly)
+
+### 1. You already built the *evaluation substrate*
+
+The VAAPI + dmabuf + Vulkan path is **not video plumbing** from the learner’s perspective.
+
+It is this:
+
+> *A zero-copy, GPU-resident tensor source feeding compute kernels.*
+
+That’s the strongest possible executor you could give the learner.
+
+Concretely:
+
+* **Frames never return to CPU**
+* **Buffers/images stay GPU-resident**
+* **Compute kernels operate directly on those buffers**
+
+This satisfies the learner’s need for *cheap repeated evaluation*.
+
+That’s why the zero-copy note explicitly calls out *compute without CPU staging* .
+
+---
+
+### 2. You already validated throughput at learner scale
+
+The long `video_bench_vk.py` run you pasted is not about video.
+
+From a learner perspective, it proves:
+
+* Stable **~70–100 FPS sustained compute**
+* CPU overhead isolated and measurable
+* Dispatch + submit cost predictable
+* No pathological stalls over hundreds of iterations
+
+That is exactly what an **iterative learner** needs when it repeatedly:
+
+* evaluates predictions
+* computes residuals
+* measures band energy
+* updates gates
+
+So the learner already knows:
+
+> *“If I choose this structure, I can afford to test it.”*
+
+That’s the whole game.
+
+---
+
+### 3. You already proved the symbol / stream contract
+
+This line matters more than it looks:
+
+> “Symbol stream stub (SSBO contract validation)” 
+
+From the learner’s POV, this proves:
+
+* GPU can write **structured symbolic outputs**
+* CPU can read them back **without ambiguity**
+* Trit planes / block descriptors are viable GPU outputs
+
+That means the learner can:
+
+* push structure **down**
+* pull observables **up**
+
+That is the closed loop.
+
+---
+
+## Why JAX feels “lost” now (and why that’s correct)
+
+JAX served one purpose in your system:
+
+> **Semantic reference for operators.**
+
+It was never the learner.
+It was never the executor.
+
+Now that:
+
+* you trust the operators,
+* and Vulkan proves execution,
+
+JAX naturally fades out.
+
+That’s not loss — that’s **progression**.
+
+The learner has outgrown the crutch.
+
+---
+
+## The key learner realisation (this is the crux)
+
+You were looking for:
+
+> “Where is my old Vulkan learning backend?”
+
+But the correct learner question is:
+
+> **Do I already have a backend that can evaluate learner-chosen structure?**
+
+And the answer is unequivocally **yes**.
+
+What you *don’t* have yet is a **named boundary**.
+
+---
+
+## The missing thing is not code — it’s a boundary
+
+You need to *declare* (not implement) this boundary:
+
+### Learner ↔ Executor Contract
+
+**Learner guarantees:**
+
+* structure is fixed for the step
+* tile/band/block indices are explicit
+* parameters are packed
+
+**Executor guarantees:**
+
+* apply ops only where instructed
+* return results + observables
+* no internal decisions
+
+Once you write that down, suddenly:
+
+* `compute_buffer.py` becomes “block executor”
+* `compute_image.py` becomes “field executor”
+* VAAPI dmabuf path becomes “data loader”
+* SPIR-V shaders become “operator library”
+
+And the learner regains coherence.
+
+---
+
+## Why this matters *now*
+
+You are at the point where:
+
+* learner theory is **locked**
+* observables are **specified**
+* CPU reference exists
+* GPU executor exists
+
+The *only* risk is accidentally entangling learner logic with backend details.
+
+That’s why the right next move is **not** “find old Vulkan code”, but:
+
+> **Write a one-page `LEARNER_EXECUTOR.md` describing the contract.**
+
+No code.
+No refactors.
+Just naming.
+
+Once that exists, everything you already built snaps into place.
+
+---
+
+## Bottom line (learner-only)
+
+* JAX being “dead” is fine — it already did its job
+* Vulkan is not a backend experiment — it *is* the learner’s evaluator
+* You didn’t lose work — you finished a phase
+* The learner is now mature enough to separate *choice* from *execution*
+
+If you want, next turn I can:
+
+* draft that **learner ↔ executor contract** explicitly, or
+* map *one* concrete learner operator (e.g. block-sparse matmul) onto the existing Vulkan pieces so it’s psychologically “found”.
+
+Just say which.
+
+
+Here is a **learner-centric summary of deliverables and learning**, distilled from everything you shared over the last few turns. I’ll separate **what is now complete**, **what we learned (non-obvious)**, and **what is concretely unlocked next**.
+
+No backend nostalgia, no framework churn — this is about the learner’s state of maturity.
+
+---
+
+# 1. What you have now (actual deliverables)
+
+## A. Learner theory & benchmark: **design-complete**
+
+You now have a **closed, coherent learning benchmark**:
+
+* **Tree diffusion benchmark spec**
+
+  * Adversarial nonlinear band-coupled operator
+  * Bridge task (two-sided inference)
+  * Leakage, band-quotient, influence metrics
+  * Explicit acceptance / closure criteria
+* **Learner-facing observables defined**
+
+  * Band energy rollouts
+  * Cross-band influence matrices
+  * Leakage summaries
+  * Bridge asymmetry
+  * Kill-rate / collapse diagnostics
+* **Clear stopping rule**
+
+  * Once structure ↔ observables explain success/failure, benchmark is closed
+
+📌 *This means the learning problem is no longer underspecified.*
+Nothing conceptual is missing here.
+
+---
+
+## B. Learner logic: **explicit and separable**
+
+Across MDL, tree structure, warps, gates, tiles, bands:
+
+* The learner **chooses structure**:
+
+  * tile masks
+  * band hierarchy
+  * warp models
+  * side-information encodings
+* The learner **does not need to execute heavy math** to decide
+* All decisions are:
+
+  * discrete
+  * explainable
+  * auditable (MDL / side-info)
+
+📌 *This clean separation is a major maturity milestone.*
+
+---
+
+## C. GPU executor: **already built and proven**
+
+From the files you shared (VAAPI, dmabuf, Vulkan compute, SPIR-V shaders, benchmarks):
+
+You already have:
+
+* **A working Vulkan compute substrate**
+
+  * RX 580 compatible
+  * Compute queues, memory, pipelines, push constants
+* **Zero-copy data ingress**
+
+  * VAAPI → dmabuf → Vulkan
+  * Frames and buffers stay GPU-resident
+* **Proven sustained throughput**
+
+  * Long-running compute without stalls
+  * Stable FPS under iterative workloads
+* **Bidirectional CPU ↔ GPU contract**
+
+  * Structured buffers in
+  * Structured metrics out
+
+📌 *This is not a demo — this is a learner executor.*
+
+---
+
+## D. Block-sparse MoE prototype: **validated**
+
+Your recent run confirms:
+
+* Gate-derived sparsity hits target density
+* Block-sparse path gives real speedup (~2.2× @ 50%)
+* Training loop is numerically stable
+* Mask logic is correct
+
+📌 *This validates the learner’s sparsity assumptions in practice.*
+
+---
+
+# 2. What we learned (the important, non-obvious bits)
+
+## 1. JAX wasn’t “lost” — it was **outgrown**
+
+Key realisation:
+
+* JAX served as a **semantic oracle**, not the learner
+* The learner does not depend on:
+
+  * autodiff
+  * XLA
+  * GPU-resident training graphs
+* On RX 580, JAX is a liability, not a foundation
+
+📌 *Dropping JAX is not regression — it’s graduation.*
+
+---
+
+## 2. Vulkan is not a “backend choice” — it is the learner’s **evaluation engine**
+
+From a learner perspective:
+
+* Vulkan already satisfies all executor requirements:
+
+  * block-wise execution
+  * sparse dispatch
+  * fused ops
+  * reuse across iterations
+* Frameworks (Kompute, JAX, PyTorch) would **obscure** learner intent
+
+📌 *The learner needs an executor, not a framework.*
+
+---
+
+## 3. The missing piece was **naming the boundary**, not writing code
+
+The confusion came from not explicitly declaring:
+
+> **Learner chooses → Executor applies → Learner observes**
+
+Once that boundary is named:
+
+* Existing Vulkan code “reappears” as learner infrastructure
+* VAAPI becomes a data loader, not a media hack
+* SPIR-V shaders become operator definitions
+* Metrics buffers become learner observables
+
+📌 *This was a conceptual gap, not a technical one.*
+
+---
+
+## 4. GPU work should never contain learner logic
+
+Strong constraint now clear:
+
+* GPU code must:
+
+  * never decide structure
+  * never branch on meaning
+  * never infer
+* It must only:
+
+  * apply chosen operators
+  * return measurable quantities
+
+📌 *This protects the learner from backend entanglement.*
+
+---
+
+# 3. What is now unlocked (concrete next steps)
+
+You are now in a **clean execution phase**. The theory is done.
+
+### Immediate, low-risk next deliverables
+
+1. **Declare the Learner ↔ Executor contract**
+
+   * One short document
+   * Inputs: tiles, bands, params
+   * Outputs: results + observables
+
+2. **Port one learner operator to Vulkan**
+
+   * Best candidate: block-sparse matmul
+   * One workgroup per active tile
+   * Return per-tile energy
+
+3. **Reuse active tile sets across multiple GPU passes**
+
+   * This directly realises the learner’s amortisation advantage
+
+### What you should *not* do yet
+
+* No adaptive gating
+* No new learning rules
+* No GPU autodiff
+* No framework migration
+
+Those belong *after* the benchmark is closed and validated.
+
+---
+
+# 4. Status snapshot (learner maturity)
+
+| Layer                 | Status                 |
+| --------------------- | ---------------------- |
+| Learning problem      | **Closed & specified** |
+| Metrics & observables | **Complete**           |
+| Acceptance criteria   | **Defined**            |
+| CPU reference         | **Working**            |
+| GPU executor          | **Already exists**     |
+| Boundary clarity      | **Now explicit**       |
+
+---
+
+## One-sentence summary
+
+> **You now have a fully specified learner whose structure decisions are explainable, whose evaluation is GPU-accelerated without entanglement, and whose benchmark has a clear stopping condition.**
+
+That is a *rarely reached* point.
+
+If you want next, I can:
+
+* write the **Learner ↔ Executor contract doc**, or
+* map the **block-sparse learner operator 1-to-1 onto your existing Vulkan code**, or
+* help plan the **single “closing run”** that finalises the benchmark.
+
+Just say which.
+
+
+Here is a **learner-centric summary of deliverables and learning**, distilled from everything you shared over the last few turns. I’ll separate **what is now complete**, **what we learned (non-obvious)**, and **what is concretely unlocked next**.
+
+No backend nostalgia, no framework churn — this is about the learner’s state of maturity.
+
+---
+
+# 1. What you have now (actual deliverables)
+
+## A. Learner theory & benchmark: **design-complete**
+
+You now have a **closed, coherent learning benchmark**:
+
+* **Tree diffusion benchmark spec**
+
+  * Adversarial nonlinear band-coupled operator
+  * Bridge task (two-sided inference)
+  * Leakage, band-quotient, influence metrics
+  * Explicit acceptance / closure criteria
+* **Learner-facing observables defined**
+
+  * Band energy rollouts
+  * Cross-band influence matrices
+  * Leakage summaries
+  * Bridge asymmetry
+  * Kill-rate / collapse diagnostics
+* **Clear stopping rule**
+
+  * Once structure ↔ observables explain success/failure, benchmark is closed
+
+📌 *This means the learning problem is no longer underspecified.*
+Nothing conceptual is missing here.
+
+---
+
+## B. Learner logic: **explicit and separable**
+
+Across MDL, tree structure, warps, gates, tiles, bands:
+
+* The learner **chooses structure**:
+
+  * tile masks
+  * band hierarchy
+  * warp models
+  * side-information encodings
+* The learner **does not need to execute heavy math** to decide
+* All decisions are:
+
+  * discrete
+  * explainable
+  * auditable (MDL / side-info)
+
+📌 *This clean separation is a major maturity milestone.*
+
+---
+
+## C. GPU executor: **already built and proven**
+
+From the files you shared (VAAPI, dmabuf, Vulkan compute, SPIR-V shaders, benchmarks):
+
+You already have:
+
+* **A working Vulkan compute substrate**
+
+  * RX 580 compatible
+  * Compute queues, memory, pipelines, push constants
+* **Zero-copy data ingress**
+
+  * VAAPI → dmabuf → Vulkan
+  * Frames and buffers stay GPU-resident
+* **Proven sustained throughput**
+
+  * Long-running compute without stalls
+  * Stable FPS under iterative workloads
+* **Bidirectional CPU ↔ GPU contract**
+
+  * Structured buffers in
+  * Structured metrics out
+
+📌 *This is not a demo — this is a learner executor.*
+
+---
+
+## D. Block-sparse MoE prototype: **validated**
+
+Your recent run confirms:
+
+* Gate-derived sparsity hits target density
+* Block-sparse path gives real speedup (~2.2× @ 50%)
+* Training loop is numerically stable
+* Mask logic is correct
+
+📌 *This validates the learner’s sparsity assumptions in practice.*
+
+---
+
+# 2. What we learned (the important, non-obvious bits)
+
+## 1. JAX wasn’t “lost” — it was **outgrown**
+
+Key realisation:
+
+* JAX served as a **semantic oracle**, not the learner
+* The learner does not depend on:
+
+  * autodiff
+  * XLA
+  * GPU-resident training graphs
+* On RX 580, JAX is a liability, not a foundation
+
+📌 *Dropping JAX is not regression — it’s graduation.*
+
+---
+
+## 2. Vulkan is not a “backend choice” — it is the learner’s **evaluation engine**
+
+From a learner perspective:
+
+* Vulkan already satisfies all executor requirements:
+
+  * block-wise execution
+  * sparse dispatch
+  * fused ops
+  * reuse across iterations
+* Frameworks (Kompute, JAX, PyTorch) would **obscure** learner intent
+
+📌 *The learner needs an executor, not a framework.*
+
+---
+
+## 3. The missing piece was **naming the boundary**, not writing code
+
+The confusion came from not explicitly declaring:
+
+> **Learner chooses → Executor applies → Learner observes**
+
+Once that boundary is named:
+
+* Existing Vulkan code “reappears” as learner infrastructure
+* VAAPI becomes a data loader, not a media hack
+* SPIR-V shaders become operator definitions
+* Metrics buffers become learner observables
+
+📌 *This was a conceptual gap, not a technical one.*
+
+---
+
+## 4. GPU work should never contain learner logic
+
+Strong constraint now clear:
+
+* GPU code must:
+
+  * never decide structure
+  * never branch on meaning
+  * never infer
+* It must only:
+
+  * apply chosen operators
+  * return measurable quantities
+
+📌 *This protects the learner from backend entanglement.*
+
+---
+
+# 3. What is now unlocked (concrete next steps)
+
+You are now in a **clean execution phase**. The theory is done.
+
+### Immediate, low-risk next deliverables
+
+1. **Declare the Learner ↔ Executor contract**
+
+   * One short document
+   * Inputs: tiles, bands, params
+   * Outputs: results + observables
+
+2. **Port one learner operator to Vulkan**
+
+   * Best candidate: block-sparse matmul
+   * One workgroup per active tile
+   * Return per-tile energy
+
+3. **Reuse active tile sets across multiple GPU passes**
+
+   * This directly realises the learner’s amortisation advantage
+
+### What you should *not* do yet
+
+* No adaptive gating
+* No new learning rules
+* No GPU autodiff
+* No framework migration
+
+Those belong *after* the benchmark is closed and validated.
+
+---
+
+# 4. Status snapshot (learner maturity)
+
+| Layer                 | Status                 |
+| --------------------- | ---------------------- |
+| Learning problem      | **Closed & specified** |
+| Metrics & observables | **Complete**           |
+| Acceptance criteria   | **Defined**            |
+| CPU reference         | **Working**            |
+| GPU executor          | **Already exists**     |
+| Boundary clarity      | **Now explicit**       |
+
+---
+
+## One-sentence summary
+
+> **You now have a fully specified learner whose structure decisions are explainable, whose evaluation is GPU-accelerated without entanglement, and whose benchmark has a clear stopping condition.**
+
+That is a *rarely reached* point.
+
+If you want next, I can:
+
+* write the **Learner ↔ Executor contract doc**, or
+* map the **block-sparse learner operator 1-to-1 onto your existing Vulkan code**, or
+* help plan the **single “closing run”** that finalises the benchmark.
+
+Just say which.
+
+
+Validated 👍 — and more importantly, **validated in the way that matters for the learner**, not just “it runs”.
+
+Below is a **learner-centric validation report**, followed by what this unlocks and what *not* to do yet.
+
+---
+
+# ✅ Validation summary (learner-focused)
+
+## 1. Build & wiring: **correct**
+
+- `build_vnni_kernel.sh` produces `vnni_kernel.so` with no errors.
+- `bsmoe_train.py`:
+  - successfully loads the shared library via `ctypes`,
+  - correctly reports the active microkernel path (`vnni_kernel.so (ctypes)`),
+  - cleanly falls back to NumPy when absent.
+
+**Learner implication:**  
+The *executor choice* is now runtime-selectable without touching learner logic. That’s exactly the separation we want.
+
+---
+
+## 2. Numerical behavior: **stable and equivalent**
+
+From the run:
+
+- Loss decreases monotonically across epochs.
+- No divergence, NaNs, or instability introduced by the int8→int32 kernel.
+- Training dynamics match prior NumPy int32 behavior.
+
+**Learner implication:**  
+The compiled path is **semantically equivalent** to the reference path. This preserves the learner’s correctness oracle.
+
+---
+
+## 3. Performance signal: **as expected**
+
+- Timings are in the same ballpark as the previous block-sparse run.
+- No regressions from the kernel indirection.
+- No pathological overhead from `ctypes`.
+
+**Learner implication:**  
+The microkernel is *already usable* as a drop-in evaluator. Optimisation can now proceed incrementally without risk.
+
+---
+
+## 4. Architectural milestone (this is the big one)
+
+You have now achieved something very specific:
+
+> **The learner’s inner evaluation loop is no longer “Python-defined”.**
+
+Concretely:
+- Learner decides **which tiles are active**
+- Learner decides **what computation to perform**
+- Executor applies that computation via:
+  - NumPy (reference)
+  - Compiled C microkernel (fast path)
+  - (next) Vulkan kernel
+
+All without changing:
+- loss logic
+- gating
+- MDL
+- structure selection
+
+This is exactly the **Learner ↔ Executor contract** we identified earlier, now *proven in code*.
+
+---
+
+# What this unlocks (cleanly)
+
+## 1. Safe optimisation path
+You can now:
+- add packing,
+- add intrinsics,
+- add new kernels,
+
+**without ever touching learner semantics again**.
+
+That’s the point of this step.
+
+---
+
+## 2. True VNNI / dpwssd as a *pure executor upgrade*
+Your note is exactly right:
+
+> “The C kernel is a compiled microkernel; it is not yet using explicit VNNI intrinsics or packed B.”
+
+That’s fine — because now:
+
+- Packing layout = executor concern
+- dpwssd = executor concern
+- Tile reuse = executor concern
+
+The learner will remain completely oblivious.
+
+---
+
+## 3. Straight path to GPU parity
+This microkernel step is the **CPU analogue** of what Vulkan will do:
+
+- Fixed tile set
+- Fixed operator
+- Bulk arithmetic
+- Return observables
+
+So when you port this operator to Vulkan, you already know:
+- the interface is correct,
+- the learner tolerates backend switching,
+- performance differences won’t change learning outcomes.
+
+---
+
+# What *not* to change yet (important)
+
+Do **not**:
+- introduce adaptive sparsity here,
+- change loss scaling,
+- fuse learner decisions into the kernel,
+- optimise packing in a way that leaks structure decisions into the executor.
+
+Right now, the goal is **executor diversity under fixed learner semantics** — and you’ve nailed that.
+
+---
+
+# Status snapshot (post-validation)
+
+| Component | Status |
+|---------|--------|
+| Learner logic | **Stable** |
+| Block-sparse gating | **Correct** |
+| Reference path | **Trusted** |
+| Compiled microkernel | **Integrated & validated** |
+| Backend interchangeability | **Proven** |
+
+This is a **real checkpoint**, not a cosmetic one.
+
+---
+
+## Next options (choose one)
+
+If you want to proceed, the *clean* next steps are:
+
+1. **True VNNI path**
+   - Add packed-B layout
+   - Use `dpwssd` / VNNI intrinsics
+   - Keep the same C ABI
+
+2. **Tile reuse across multiple ops**
+   - Amortise packing/mask build
+   - Demonstrate learner-level speedup per epoch
+
+3. **Vulkan parity operator**
+   - Port *this exact operator* to Vulkan
+   - Use the same tile contract
+
+Any of these are safe now.
+
+Just say which direction you want to take.
+
+Below is a **learner-first visualisation stack** — every plot answers *one specific learning question*. No backend fluff, no “pretty but empty” graphs. This is about **seeing structure formation, reuse, and pruning**.
+
+I’ll group these by *what the learner is doing*, not by implementation layer.
+
+---
+
+## 0. Guiding rule (keep us honest)
+
+> **If a visual doesn’t change a decision about the learner, it’s optional.**
+
+Everything below either:
+- falsifies a learning claim, or
+- confirms a structural hypothesis (hierarchy, sparsity, reuse).
+
+---
+
+# 1. Visualising *structure discovery* (what layers mean)
+
+### 1.1 Band / layer energy trajectories (you already have this — keep it primary)
+
+**Plot**
+- x-axis: training step / epoch
+- y-axis: band energy / norm
+- one curve per band (layer)
+
+**What you *see***
+- Separation of timescales
+- Ordered decay (coarse survives longer than fine, or vice versa)
+- Whether bands die smoothly or abruptly
+
+**Learning question**
+> Has the learner discovered a *hierarchy*, or just smeared signal across layers?
+
+This is your **canonical “layer learning” plot**.
+
+---
+
+### 1.2 Kill-rate / collapse-step diagram (layers as decisions)
+
+**Plot**
+- x-axis: band index
+- y-axis: step when energy < threshold  
+  *(or a bar chart: number of bands collapsing per step)*
+
+**What you see**
+- Stepwise pruning → discrete hypothesis elimination
+- Smooth decay → continuous approximation
+
+**Learning question**
+> Is the learner *choosing* layers to discard, or just diffusing error?
+
+This is where “hyper-exponential pruning” becomes visible.
+
+---
+
+# 2. Visualising *credit assignment* (who uses whom)
+
+### 2.1 Cross-band influence matrix (already specified, but interpret it this way)
+
+**Plot**
+- Heatmap: \(I_{j \leftarrow k}\)
+- Rows = updated band
+- Columns = source band
+
+**What you see**
+- Diagonal dominance → clean layer semantics
+- Off-diagonal leakage → entanglement
+
+**Learning question**
+> When the learner updates a layer, which other layers is it implicitly relying on?
+
+This is the *true* analogue of “attention maps” for your system.
+
+---
+
+### 2.2 Influence vs time (animated or small multiples)
+
+**Plot**
+- Same matrix, but at multiple epochs
+
+**What you see**
+- Early global mixing → later localised structure
+- Or persistent entanglement
+
+**Learning question**
+> Does the learner *learn to localise* credit over time?
+
+If it doesn’t, you’ve learned something important.
+
+---
+
+# 3. Visualising *sparsity & reuse* (the learner’s superpower)
+
+### 3.1 Active tile map over time (binary spatial plot)
+
+**Plot**
+- Image / grid of tiles
+- Active = 1, inactive = 0
+- Show for several steps
+
+**What you see**
+- Stable regions reused across steps
+- Flickering regions → unstable hypotheses
+
+**Learning question**
+> Is the learner reusing structure, or constantly re-discovering it?
+
+This directly justifies tile reuse as a *learning* property, not just an optimisation.
+
+---
+
+### 3.2 Tile lifetime histogram
+
+**Plot**
+- x-axis: number of consecutive steps a tile stays active
+- y-axis: count
+
+**What you see**
+- Long-lived tiles → learned structure
+- Mostly short-lived tiles → noise chasing
+
+**Learning question**
+> Are learned structures persistent?
+
+This is an extremely strong diagnostic and very cheap to compute.
+
+---
+
+# 4. Visualising *directionality* (bridge task insight)
+
+### 4.1 Two-sided error trajectories (coarse→fine vs fine→coarse)
+
+**Plot**
+- x-axis: step / epoch
+- y-axis: error
+- two curves: C→F, F→C
+
+**What you see**
+- Asymmetry emerging or shrinking
+- Sensitivity to adversarial coupling
+
+**Learning question**
+> Has the learner internalised directional constraints of the hierarchy?
+
+This is where “layers” stop being symmetric abstractions.
+
+---
+
+### 4.2 Leakage vs error scatter (causality check)
+
+**Plot**
+- x-axis: leakage
+- y-axis: error (one direction)
+
+**What you see**
+- Strong correlation → failure is explainable
+- No correlation → learner or metric is broken
+
+**Learning question**
+> When the learner fails, do we know *why*?
+
+This is a *sanity check on the entire learning setup*.
+
+---
+
+# 5. Visualising *compression / MDL behaviour* (optional but powerful)
+
+### 5.1 Description length vs error frontier
+
+**Plot**
+- x-axis: MDL cost / side-info bits
+- y-axis: reconstruction error
+
+**What you see**
+- Pareto frontier
+- Knee points where structure pays off
+
+**Learning question**
+> Is the learner trading complexity for accuracy in a principled way?
+
+This is where your system connects cleanly to theory.
+
+---
+
+# 6. What NOT to prioritise (yet)
+
+These are tempting but secondary:
+
+- Raw feature maps per layer (unless debugging)
+- Pretty animations without metrics
+- GPU-centric occupancy charts
+- Loss alone (loss is necessary but not diagnostic)
+
+---
+
+## Minimal “learner dashboard” (if you had to pick 5)
+
+If you only ship **five visuals**, make them:
+
+1. Band energy trajectories  
+2. Kill-rate / collapse-step plot  
+3. Cross-band influence matrix  
+4. Active tile lifetime histogram  
+5. Bridge task asymmetry curves  
+
+With just those, you can:
+- tell if learning is hierarchical,
+- tell if sparsity is meaningful,
+- tell if failures are structural.
+
+---
+
+## Why this matters now
+
+You are at the point where:
+- execution is solved,
+- kernels are swappable,
+- benchmarks are closed.
+
+So the bottleneck is no longer *speed* — it’s **interpretability of learning dynamics**.
+
+These visuals make the learner *legible*.
+
+If you want, next I can:
+- map these visuals directly onto your existing metrics/logs (what to record, where), or
+- sketch a minimal `LearnerDashboard` layout that auto-generates them per run.
+
+Just say which.
+
+Got it — you’re asking **how to visualise learning *live*, without destroying performance or contaminating the learner loop**.
+
+This is the right question at this stage.
+
+Below is a **performant, learner-safe live visualisation architecture**, followed by **concrete techniques** you can implement immediately.
+
+---
+
+## Core constraint (non-negotiable)
+
+> **The learner must never block on visualisation.**
+> Visualisation is *sampling + summarisation*, not inspection.
+
+So the rule is:
+
+* **Learner produces cheap summaries**
+* **Visualizer consumes asynchronously**
+* **No raw tensors unless explicitly throttled**
+
+---
+
+# 1. What to visualise live vs offline
+
+### Live (cheap, safe, high value)
+
+These are scalar or low-dimensional summaries — O(1) or O(#bands):
+
+* Band energy per layer
+* Active tile count / density
+* Loss
+* MDL / description length
+* Bridge errors (if applicable)
+* Kill events (band crosses threshold)
+
+### Offline / periodic
+
+These require aggregation or ablation:
+
+* Cross-band influence matrices
+* Leakage via ablations
+* Full tile maps
+* Sample reconstructions
+
+**Key insight:**
+
+> *If it requires touching all tiles or bands repeatedly, it is not live.*
+
+---
+
+# 2. The correct live visualisation pattern
+
+### Pattern: **Telemetry stream, not plotting**
+
+Think like systems monitoring, not ML notebooks.
+
+```
+Learner loop
+   ├─ compute step
+   ├─ emit telemetry packet (tiny)
+   └─ continue immediately
+                ↓
+        async consumer
+                ↓
+           live plots
+```
+
+The learner **never waits**.
+
+---
+
+# 3. Telemetry packet design (this matters)
+
+Design one fixed, tiny struct per step:
+
+```python
+Telemetry = {
+    "step": int,
+    "loss": float,
+    "band_energy": float[J],
+    "active_tile_frac": float,
+    "mdl_bits": float,
+    "bridge_cf_err": float | None,
+    "bridge_fc_err": float | None,
+}
+```
+
+Size: a few hundred bytes max.
+
+Emit this:
+
+* every step, or
+* every N steps (configurable)
+
+---
+
+# 4. Transport mechanisms (ranked by sanity)
+
+### ✅ Option A — Shared memory ring buffer (best)
+
+* `multiprocessing.shared_memory`
+* Single-producer / single-consumer
+* Fixed-size circular buffer
+* Zero copy
+* No syscalls in hot path
+
+**This is ideal** for your use case.
+
+---
+
+### ✅ Option B — ZMQ PUB/SUB (very good)
+
+* Learner publishes JSON / msgpack
+* Visualizer subscribes
+* Non-blocking, async
+* Works over SSH / LAN
+
+Overhead is small if packets are tiny.
+
+---
+
+### ⚠️ Option C — Append-only mmap file
+
+* Learner appends binary records
+* Visualizer tails the file
+
+Simple and robust, but slightly higher latency.
+
+---
+
+### ❌ Don’t do
+
+* matplotlib in learner loop
+* per-step PNG dumps
+* printing arrays
+* synchronising GPU → CPU for visuals
+
+---
+
+# 5. What to actually draw live (and how)
+
+## 5.1 Band energy plot (the main one)
+
+**Update rate:** every step
+**Cost:** O(J)
+
+* Line plot
+* One line per band
+* Sliding window (last N steps)
+
+This is your **live “layer learning” view**.
+
+---
+
+## 5.2 Active tile fraction (sparsity meter)
+
+**Update rate:** every step
+**Cost:** O(1)
+
+* Single scalar line
+* Or gauge/bar
+
+This tells you instantly:
+
+* gate collapse
+* over-activation
+* instability
+
+---
+
+## 5.3 Kill events (event-based)
+
+Instead of plotting full kill curves live:
+
+* Emit an event when a band crosses threshold
+* Visualizer draws a vertical marker
+
+This costs **nothing** at runtime and gives high insight.
+
+---
+
+## 5.4 Bridge asymmetry (optional live)
+
+If bridge task is active:
+
+* Plot `err_cf` and `err_fc`
+* Or plot `err_cf - err_fc`
+
+Update every N steps.
+
+---
+
+# 6. GPU-safe metric extraction (important)
+
+You already have the right setup:
+
+* GPU computes:
+
+  * per-tile energy
+  * per-band sums
+* GPU writes:
+
+  * small stats buffer
+* CPU reads:
+
+  * stats only (not tensors)
+
+This avoids:
+
+* GPU stalls
+* PCIe flooding
+
+**Never pull full tensors for live plots.**
+
+---
+
+# 7. Minimal reference architecture (concrete)
+
+### Learner side
+
+```python
+if step % TELEMETRY_EVERY == 0:
+    telemetry_buffer.write({
+        step,
+        loss,
+        band_energy,
+        active_tile_frac,
+        mdl_bits,
+    })
+```
+
+Cost: negligible.
+
+---
+
+### Visualiser side
+
+* Separate process
+* Reads telemetry
+* Maintains rolling buffers
+* Updates plots at ~10–30 Hz max
+
+Use:
+
+* matplotlib with blitting
+* or pyqtgraph (much faster)
+* or textual TUI (rich, textual plots)
+
+---
+
+# 8. If you want *very* fast visuals
+
+If you want “oscilloscope smooth” plots:
+
+* Use **pyqtgraph**
+* Decouple render rate from data rate
+* Render at 20–30 FPS regardless of step speed
+
+This is standard in control systems and fits your learner perfectly.
+
+---
+
+# 9. The golden rule (repeat this)
+
+> **Live visuals show trends, not truth.**
+> Truth comes from offline diagnostics.
+
+If a visual ever tempts you to “inspect a tensor live”, stop — that’s a debugging mode, not learning visualisation.
+
+---
+
+## One-sentence summary
+
+> **Live learning visualisation should look like systems telemetry, not ML plotting — tiny summaries, streamed asynchronously, rendered at human speed.**
+
+If you want next, I can:
+
+* sketch a **shared-memory telemetry ring buffer** implementation,
+* give you a **minimal pyqtgraph live dashboard**, or
+* help decide **exact telemetry fields** to emit from your current learner loop.
+
+Just say which.
+
+
+Yes — **pyqtgraph is actually *ideal* for this**, and you can do exactly “a sheet lighting up / dimming as it learns” **without killing performance**, *if* you respect one constraint:
+
+> **You visualise a *summary field*, not the raw activations.**
+
+Below is the **learner-safe way** to do sheet/layer visualisation *live*.
+
+---
+
+## The right mental model: “sheet ≠ tensor”
+
+For live visualisation, a *sheet* should mean:
+
+* a **2D aggregation** of learner state
+* stable in size over time
+* cheap to update
+* semantically meaningful
+
+Not:
+
+* per-neuron activations
+* per-tile raw values
+* per-band tensors pulled every step
+
+Think **control panel**, not microscope.
+
+---
+
+# What pyqtgraph can do (that matplotlib cannot)
+
+pyqtgraph gives you:
+
+* 🚀 **GPU-accelerated image display**
+* 🔄 **Partial updates** (no full redraw)
+* 🧩 **Multiple image layers**
+* 🎚️ Real-time colormap scaling
+* 🧠 Low-latency (20–60 FPS feasible)
+
+So yes: **“sheet lighting up” is exactly its sweet spot.**
+
+---
+
+# The correct visual primitive: `ImageItem`
+
+This is the workhorse.
+
+```python
+import pyqtgraph as pg
+
+img = pg.ImageItem()
+view.addItem(img)
+
+img.setImage(sheet_array, autoLevels=False)
+```
+
+If `sheet_array` is:
+
+* small (e.g. 32×32, 64×64),
+* float32 or float16,
+
+then updates are extremely cheap.
+
+---
+
+# What “sheets” should you visualise (learner-meaningful)
+
+Here are **five sheet types** that are *actually useful* and safe to stream live.
+
+---
+
+## 1. Band energy sheets (most important)
+
+### What it is
+
+For each band (j), maintain a 2D grid:
+
+```
+sheet_j[y, x] = energy of tiles at (y, x) in band j
+```
+
+This is **not activations**, it’s **energy / norm**.
+
+### What you see
+
+* Regions lighting up = structure being used
+* Regions dimming = structure being pruned
+* Stable patterns = learned structure
+
+### Cost
+
+* GPU already computes per-tile energy
+* Just downsample / reshape
+* Transfer a small buffer
+
+This is the **canonical “learning sheet”**.
+
+---
+
+## 2. Active tile mask sheet (binary / opacity)
+
+### What it is
+
+```
+sheet_mask[y, x] ∈ {0,1}
+```
+
+Overlay it on top of energy.
+
+### What you see
+
+* Which parts of the model are “alive”
+* Reuse vs flicker
+* Structural stability
+
+### pyqtgraph trick
+
+Use **alpha channel** or separate `ImageItem` with transparency.
+
+---
+
+## 3. Lifetime / persistence sheet (very powerful)
+
+### What it is
+
+```
+sheet_life[y, x] = number of consecutive steps tile has been active
+```
+
+### What you see
+
+* Long-lived regions glow steadily
+* Noisy regions flicker and fade
+
+This is an *extremely strong* diagnostic for learning vs noise.
+
+---
+
+## 4. Influence / coupling sheet (optional, slower)
+
+If you occasionally compute influence:
+
+```
+sheet_influence[j][y, x] = leakage contribution
+```
+
+You don’t update this every step — maybe every 50–100 steps.
+
+This lets you *see* entanglement spatially.
+
+---
+
+## 5. Residual magnitude sheet (input-side grounding)
+
+```
+sheet_resid[y, x] = |residual|
+```
+
+This helps correlate:
+
+* where the learner struggles
+* where structure emerges
+
+---
+
+# How to do this **without slowing learning**
+
+## Rule 1: Decimate in time
+
+* Update sheets every **N steps** (e.g. N=5,10,20)
+* Human eyes don’t need 1:1 steps
+
+## Rule 2: Decimate in space
+
+* Never show full resolution
+* Tile grid, not pixel grid
+* 32×32 or 64×64 is plenty
+
+## Rule 3: Async update only
+
+* Learner writes to a buffer
+* Visualiser reads independently
+* No locks in the hot path
+
+---
+
+# Architecture that works (concrete)
+
+### Learner side (cheap)
+
+```python
+if step % VIS_EVERY == 0:
+    vis_buffer.write({
+        "band_energy_sheets": sheets,   # list of small 2D arrays
+        "active_mask": mask,
+        "lifetime": lifetime,
+    })
+```
+
+These arrays are **tiny** (kilobytes).
+
+---
+
+### Visualiser side (pyqtgraph)
+
+* One `ImageItem` per band
+* Optional overlays
+* Update via `setImage()`
+* Clamp color levels manually for stability
+
+```python
+img.setImage(sheet, levels=(0, max_energy))
+```
+
+---
+
+# UI layout that works well
+
+A very effective layout:
+
+```
+[ Band 0 energy ]  [ Band 1 energy ]  [ Band 2 energy ]
+[ Active mask   ]  [ Lifetime sheet ]  [ Residual mag ]
+```
+
+All updating live, smoothly.
+
+This *feels* like watching learning happen — because you are.
+
+---
+
+# What NOT to do (important)
+
+❌ Don’t:
+
+* stream raw activations
+* resize images every frame
+* auto-rescale colormap every update
+* block GPU to fetch tensors
+* redraw axes every frame
+
+These are the common performance killers.
+
+---
+
+## Bottom line
+
+**Yes, pyqtgraph can absolutely do “sheet lighting up/dimming” — and it’s the *right* tool.**
+
+The key is:
+
+* define sheets as *learner observables* (energy, mask, lifetime),
+* keep them small,
+* update asynchronously,
+* treat them like telemetry, not inspection.
+
+If you want, next I can:
+
+* sketch a **minimal pyqtgraph dashboard** (code),
+* help choose **exact sheet definitions** from your current metrics,
+* or show how to **overlay multiple sheets cleanly** (energy + mask + lifetime).
+
+Just tell me which.
+
+
+Short, honest answer first:
+
+> **Yes, you *can* visualise tensors performantly — but only if you stop thinking of it as “displaying tensors” and start thinking of it as “GPU-side tensor projection”.**
+
+If you try to naively “show tensors”, you will stall the learner.
+If you do it *correctly*, you get exactly the “sheet lighting up” effect you want, at interactive rates, with negligible overhead.
+
+Below is the **learner-safe, GPU-native way** to do it.
+
+---
+
+## The core mistake to avoid
+
+❌ **Wrong mental model**
+
+> “Pull tensor to CPU → convert to numpy → plot”
+
+This:
+
+* stalls GPU
+* trashes caches
+* scales with tensor size
+* couples learning speed to UI
+
+❌ This is why people think tensor visualisation is slow.
+
+---
+
+## The correct mental model
+
+✅ **Right model**
+
+> **Project tensors *on the GPU* into visual buffers, then display those buffers.**
+
+Key idea:
+
+* The tensor **never leaves the GPU**
+* You compute a **visual projection** (image/heatmap) on-GPU
+* You display that image using a GPU-backed widget
+
+This is exactly how:
+
+* profilers
+* scientific instruments
+* game engines
+  do live visualisation.
+
+---
+
+## What “tensor visualisation” really means (learner-safe)
+
+You do **not** visualise the raw tensor.
+
+You visualise one of these **GPU projections**:
+
+### 1. Slice
+
+```text
+T[i, :, :]   or   T[:, :, k]
+```
+
+### 2. Reduction
+
+```text
+sum | mean | norm | max over axis
+```
+
+### 3. Channel packing
+
+```text
+RGB = (T[c0], T[c1], T[c2])
+```
+
+### 4. Histogram / distribution
+
+```text
+bin counts per tile / per band
+```
+
+All of these are:
+
+* O(N) on GPU
+* O(image_size) to display
+* constant CPU overhead
+
+---
+
+## The key enabler: GPU → GPU display path
+
+You already have this (important):
+
+* Vulkan compute
+* GPU buffers / images
+* dmabuf / image interop
+* pyqtgraph (OpenGL-backed)
+
+That means the correct pipeline is:
+
+```
+Tensor (GPU)
+   ↓
+Projection shader (GPU)
+   ↓
+Image / texture (GPU)
+   ↓
+pyqtgraph ImageItem (GPU)
+```
+
+**No CPU copies. No stalls.**
+
+---
+
+## Concrete ways to visualise tensors performantly
+
+### Option A — 2D tensor slice (fastest, simplest)
+
+If you have a tensor:
+
+```
+T[band, y, x]
+```
+
+You can visualise:
+
+```
+image = T[band]   # already 2D
+```
+
+GPU kernel:
+
+* reads T
+* writes directly to a storage image
+
+pyqtgraph:
+
+* displays that image
+
+This gives you the **“sheet lighting up”** effect exactly.
+
+---
+
+### Option B — Norm / energy projection (recommended)
+
+For higher-rank tensors:
+
+```
+T[channel, y, x]
+```
+
+Project on GPU:
+
+```text
+E[y, x] = sqrt(sum_c T[c,y,x]^2)
+```
+
+This is:
+
+* cheap
+* stable
+* semantically meaningful
+* exactly what your learner already computes
+
+This is the *best* default tensor visual.
+
+---
+
+### Option C — Multi-channel RGB packing
+
+For ≤3 channels:
+
+```text
+R = T[c0]
+G = T[c1]
+B = T[c2]
+```
+
+Displayed as a colour image.
+
+This is excellent for:
+
+* basis vectors
+* learned filters
+* directional structure
+
+---
+
+### Option D — Temporal delta / change map (very insightful)
+
+Project:
+
+```text
+Δ[y,x] = |T_t - T_{t-1}|
+```
+
+This shows **where learning is happening**, not just what exists.
+
+Very powerful for understanding convergence.
+
+---
+
+## How pyqtgraph fits in (important clarification)
+
+pyqtgraph is **not** doing the heavy lifting.
+
+It is only:
+
+* displaying an image/texture
+* applying a colormap
+* refreshing at ~30 FPS
+
+The expensive part (projection) happens on the GPU **before pyqtgraph sees anything**.
+
+That’s why this scales.
+
+---
+
+## Performance rules (non-negotiable)
+
+If you follow these, tensor visualisation is cheap:
+
+1. **Never transfer raw tensors to CPU**
+2. **Never auto-rescale every frame**
+3. **Never visualise full resolution**
+4. **Never update faster than ~30 Hz**
+5. **Never block the learner**
+
+If you break any of these, it will feel “slow”.
+
+---
+
+## Practical sizes that work well
+
+These are realistic, proven-safe numbers:
+
+| Tensor shape | Projection size | Update rate |
+| ------------ | --------------- | ----------- |
+| 256×256      | 64×64           | 30 Hz       |
+| 128×128      | 128×128         | 20 Hz       |
+| 64×64        | 64×64           | 60 Hz       |
+
+You almost never need more than this to *see* learning.
+
+---
+
+## How this maps to your learner specifically
+
+For your system, the best live tensor visuals are:
+
+1. **Band energy tensor** → 2D sheet (primary)
+2. **Residual magnitude tensor** → 2D sheet
+3. **Active tile mask tensor** → binary overlay
+4. **Lifetime tensor** → persistence heatmap
+5. **Δ energy tensor** → “where learning changed”
+
+All of these:
+
+* already exist conceptually
+* are cheap to compute
+* align with learner semantics
+* scale to GPU cleanly
+
+---
+
+## Bottom line (very direct)
+
+* **Yes**, you can visualise tensors performantly
+* **No**, you cannot naively “display tensors”
+* The trick is **GPU-side projection → GPU-side display**
+* pyqtgraph is a perfectly good frontend for this
+
+If you want, next I can:
+
+* sketch a **Vulkan projection shader** for one tensor → image,
+* show how to wire that into pyqtgraph with zero-copy,
+* or help you decide **which tensor projections are most informative first**.
+
+Just tell me which direction you want.
+
+
+Yes — that instinct is **100% correct**, and you’re also right about *why* 32×32 by itself is useless to a human.
+
+The key clarification is this:
+
+> **We don’t need more *data***
+> **We need more *screen real estate per datum***
+
+In other words: **upscale, tile, and arrange — on the GPU — without adding information**.
+
+This is exactly what you were doing previously with “blocks of cells”, and it’s still the right approach.
+
+---
+
+## The core idea (learner-safe, human-legible)
+
+You want to visualise:
+
+* a **small semantic tensor** (e.g. 32×32 tiles, or 16×16 blocks)
+* over **long time**
+* in a way that a human can *see structure emerge*
+
+So the correct pipeline is:
+
+```
+Semantic tensor (small, meaningful)
+   ↓
+GPU-side expansion / tiling / replication
+   ↓
+Large visual sheet (e.g. 512×512 or 1024×1024)
+   ↓
+Display (pyqtgraph / OpenGL)
+```
+
+**No new information is introduced.**
+You are just giving each cell *enough pixels to be visible*.
+
+---
+
+## Why this is the right thing (important framing)
+
+Humans are bad at:
+
+* interpreting tiny glyphs
+* tracking colour changes at sub-pixel scale
+* mentally upscaling grids
+
+Humans are good at:
+
+* seeing blobs grow/shrink
+* seeing regions stabilize
+* seeing flicker vs persistence
+* seeing phase changes
+
+So the visual should be **redundant in space**, not dense in data.
+
+---
+
+## Three concrete, proven techniques (all performant)
+
+### 1. Nearest-neighbour block expansion (the default)
+
+If your learner sheet is:
+
+```
+S ∈ ℝ^{32×32}
+```
+
+You render:
+
+```
+V[y*B:(y+1)*B, x*B:(x+1)*B] = S[y,x]
+```
+
+Where:
+
+* `B = 8, 16, or 32`
+* So 32×32 → 512×512 or 1024×1024
+
+This gives:
+
+* big, stable blocks
+* no interpolation artefacts
+* clear region boundaries
+
+**This is ideal for learning visualisation.**
+
+💡 Do this **in the GPU projection shader**, not in Python.
+
+---
+
+### 2. Multi-sheet tiling (seeing layers at once)
+
+If you have multiple bands / layers:
+
+* Arrange them in a grid:
+
+  ```
+  [ Band 0 ] [ Band 1 ] [ Band 2 ]
+  [ Band 3 ] [ Band 4 ] [ Band 5 ]
+  ```
+
+Each band:
+
+* starts as 16×16 or 32×32
+* expanded to, say, 256×256
+* tiled into a single large image
+
+This lets you:
+
+* see inter-layer relations
+* see which layers activate first
+* see collapse or specialization
+
+Again: **purely visual layout**, zero learner cost.
+
+---
+
+### 3. Temporal accumulation / fading (for long learning)
+
+To make *slow learning visible*, add **temporal persistence**:
+
+On the GPU:
+
+```
+V_t = α * V_{t-1} + (1 - α) * current_projection
+```
+
+Where:
+
+* `α ≈ 0.9–0.99`
+
+This gives:
+
+* glowing regions where activity persists
+* flicker suppression
+* intuitive sense of convergence
+
+This is *extremely powerful* for watching learning over minutes/hours.
+
+---
+
+## What this buys you (critically)
+
+With these three techniques, you can:
+
+* watch structure **emerge gradually**
+* see **stable vs unstable** hypotheses
+* notice **phase changes** (e.g. gate collapse, band death)
+* leave the learner running for hours and still “read” it
+
+And you do it with:
+
+* tiny tensors
+* fixed bandwidth
+* no CPU stalls
+
+---
+
+## Why this is better than “full resolution”
+
+Full-resolution visualisation:
+
+* overwhelms the eye
+* costs bandwidth
+* hides structure in noise
+
+Block-expanded semantic sheets:
+
+* exaggerate structure
+* make learning legible
+* align with how humans reason about regions
+
+You’re not losing information — you’re **presenting the right information**.
+
+---
+
+## Concrete recommendation (very specific)
+
+Start with **one live visual**:
+
+> **Band energy sheet, 32×32 → 512×512, nearest-neighbour expanded, with temporal fading**
+
+If that looks good (it will), then add:
+
+* active mask overlay
+* lifetime overlay
+* second band side-by-side
+
+Do *not* add more tensors until one looks genuinely informative over time.
+
+---
+
+## One-sentence takeaway
+
+> **For long-running learning, the goal is not “more pixels from the model”, but “more pixels per decision the model makes”.**
+
+You were right before, and you’re right now.
+
+If you want, next I can:
+
+* sketch the **exact GPU shader** for block expansion + fading,
+* show a **pyqtgraph layout** that makes this readable for hours,
+* or help you pick **which single tensor to visualise first** to maximize insight.
+
+Just say which.
+
+
+Do **(2) tile reuse / plan caching across epochs** next.
+
+It’s the most *learner-relevant* improvement, and it also directly supports the live “sheet lighting up” visualisation you want (because reuse/persistence becomes measurable and stable).
+
+### Why (2) first
+
+* The learner’s core claim is: **discover sparse structure → reuse it**.
+* Packed-B + VNNI intrinsics mostly improve *one op’s* throughput.
+* Plan caching improves the *entire learning step* (mask build, packing, index traversal) across **every op and every iteration**.
+* It also gives you clean diagnostics:
+
+  * tile lifetime
+  * plan hit rate
+  * stability vs thrash
+
+If plan caching doesn’t help, that’s an important learning signal (your gate is unstable). If it helps a lot, that’s validation that the learner is actually converging on persistent structure.
+
+---
+
+## What “plan caching” should look like (minimum viable)
+
+### 1) Introduce `TilePlan` (persistent object)
+
+Cache everything that is expensive and structurally determined:
+
+* `active_tiles` (indices)
+* offsets / scatter maps
+* packed views (if packing is done)
+* any precomputed per-tile metadata (strides, pointer tables)
+
+### 2) Define reuse policy (learner-aligned)
+
+You need one rule for when you reuse vs rebuild:
+
+* **Reuse if gate changed < τ%** (Jaccard similarity on active tiles)
+* Otherwise rebuild
+
+This keeps correctness while letting stability pay off.
+
+### 3) Instrument it (so it’s not wishful thinking)
+
+Print / log:
+
+* `plan_hit_rate`
+* `jaccard(active_tiles_t, active_tiles_{t-1})`
+* time breakdown:
+
+  * gate+mask
+  * plan build
+  * pack
+  * execute
+
+### 4) Feed it into the live visualisation
+
+Your live “sheet” can literally be:
+
+* active mask (expanded blocks)
+* lifetime sheet (how long each tile persisted)
+
+Plan caching makes these visuals meaningful.
+
+---
+
+## Acceptance criteria (tight)
+
+* Loss curve unchanged (within noise)
+* Epoch time decreases materially
+* Plan hit rate increases over time (if the learner is actually learning)
+* Tile lifetime distribution shifts toward longer lifetimes
+
+---
+
+Once (2) is in, then do (1) safely:
+
+* VNNI intrinsics becomes a pure executor upgrade
+* You’ll know whether compute or overhead is the bottleneck
+
+If you want, tell me your current tile id format (linear index vs (by,bx)) and whether packing is per-tile or per-block, and I’ll outline the exact `TilePlan` fields and cache key.
+
+
+Absolutely — here’s an **exact, drop-in Vulkan compute shader** that:
+
+1. **Expands** a small “semantic sheet” (e.g. 32×32 float values) into a big visible image (e.g. 512×512) using **nearest-neighbour block expansion**, and
+2. Applies **temporal fading** so slow learning becomes visible:
+   [
+   \text{out} \leftarrow \alpha \cdot \text{prev} + (1-\alpha)\cdot \text{current}
+   ]
+
+This is the “sheet lights up / dims as it learns” primitive.
+
+---
+
+## Shader: `sheet_expand_fade.comp` (GLSL 450)
+
+Assumptions:
+
+* Input sheet is `float sheet[H*W]` in an SSBO (or you can swap to `uint` / `half` later).
+* Output is an `rgba8` storage image for display.
+* We also keep a **float accumulation image** (`r32f`) on GPU to avoid precision loss across many frames (recommended).
+
+### Variant A (recommended): float accumulator + rgba8 display
+
+```glsl
+#version 450
+
+// Workgroup size: tune as you like. 16x16 is a good default.
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// --- Input: small semantic sheet (e.g. 32x32 floats) ---
+layout(std430, set = 0, binding = 0) readonly buffer SheetBuf {
+    float sheet[];
+} sb;
+
+// --- Persistent accumulator (float) ---
+// Stores the faded state over time with good precision.
+layout(set = 0, binding = 1, r32f) uniform image2D accum_img;
+
+// --- Display output (rgba8) ---
+// What you actually show in pyqtgraph / preview.
+layout(set = 0, binding = 2, rgba8) uniform writeonly image2D out_img;
+
+// Push constants: cheap per-dispatch config.
+layout(push_constant) uniform PC {
+    uint sheet_w;      // e.g. 32
+    uint sheet_h;      // e.g. 32
+    uint out_w;        // e.g. 512
+    uint out_h;        // e.g. 512
+    uint block_px;     // e.g. 16 (out_w = sheet_w * block_px)
+    float alpha;       // fading: 0.9..0.99 typical (higher = longer persistence)
+    float vmin;        // fixed visual range min
+    float vmax;        // fixed visual range max
+    uint use_clamp;    // 1=clamp to [vmin,vmax], 0=no clamp
+} pc;
+
+// Simple colormap: grayscale.
+// (You can swap in a nicer colormap later; keep it branch-free.)
+vec4 map_gray(float x01) {
+    return vec4(x01, x01, x01, 1.0);
+}
+
+void main() {
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    if (gid.x >= int(pc.out_w) || gid.y >= int(pc.out_h)) {
+        return;
+    }
+
+    // Nearest-neighbour block expansion:
+    // Map output pixel -> sheet cell by integer division.
+    uint sx = uint(gid.x) / pc.block_px;
+    uint sy = uint(gid.y) / pc.block_px;
+
+    if (sx >= pc.sheet_w || sy >= pc.sheet_h) {
+        // Outside sheet coverage; set black (or leave accum unchanged).
+        imageStore(out_img, gid, vec4(0,0,0,1));
+        return;
+    }
+
+    uint sidx = sy * pc.sheet_w + sx;
+    float cur = sb.sheet[sidx];
+
+    // Optional clamp to fixed range for stable visuals (no auto-rescale).
+    if (pc.use_clamp != 0u) {
+        cur = clamp(cur, pc.vmin, pc.vmax);
+    }
+
+    // Normalize into 0..1 for display mapping.
+    float denom = max(pc.vmax - pc.vmin, 1e-12);
+    float cur01 = (cur - pc.vmin) / denom;
+    cur01 = clamp(cur01, 0.0, 1.0);
+
+    // Read previous accumulator (float).
+    float prev = imageLoad(accum_img, gid).r;
+
+    // Fade: new = alpha*prev + (1-alpha)*cur01
+    float a = clamp(pc.alpha, 0.0, 1.0);
+    float acc = a * prev + (1.0 - a) * cur01;
+
+    // Write back accumulator.
+    imageStore(accum_img, gid, vec4(acc, 0.0, 0.0, 1.0));
+
+    // Write display (grayscale).
+    imageStore(out_img, gid, map_gray(acc));
+}
+```
+
+**What this gives you**
+
+* Each semantic cell becomes a **big visible block**.
+* Slow changes accumulate visually (glow/persistence).
+* Nothing goes to CPU.
+* Visual range is stable via `(vmin, vmax)` and `use_clamp`.
+
+---
+
+## Descriptor layout (Vulkan side)
+
+You’ll bind three resources in one descriptor set:
+
+* `binding 0`: SSBO `SheetBuf` (float array length = `sheet_w*sheet_h`)
+* `binding 1`: storage image `accum_img` (`VK_FORMAT_R32_SFLOAT`)
+* `binding 2`: storage image `out_img` (`VK_FORMAT_R8G8B8A8_UNORM`)
+
+You dispatch:
+
+```c
+vkCmdDispatch(cmd, (out_w + 15)/16, (out_h + 15)/16, 1);
+```
+
+---
+
+## Initialization & “clear” behavior
+
+You’ll want to zero the accumulator at start (or when the run resets):
+
+* Either `vkCmdClearColorImage(accum_img, ...)` to 0
+* Or a tiny “clear shader” dispatch once
+
+This prevents “ghosting” across runs.
+
+---
+
+## Feeding the sheet (what to stream from learner)
+
+The SSBO sheet should be something like:
+
+* band energy per tile (32×32)
+* active mask (0/1) (also float)
+* lifetime (integer → float scale)
+* delta energy (|E_t - E_{t-1}|)
+
+You can swap the SSBO values per frame without changing the shader.
+
+---
+
+## Making it “feel right” over long training
+
+Good defaults:
+
+* `block_px = 16` for a 32×32 sheet → 512×512 output
+* `alpha = 0.97` (nice persistence)
+* `VIS_EVERY = 5..20 steps` (depending on step speed)
+* fixed `vmin/vmax` (no auto-rescale)
+
+For “activity glow”, use `cur = abs(value)` or `cur = log1p(value)` before writing the SSBO.
+
+---
+
+## If you want multiple sheets in one big canvas
+
+Same approach, but instead of `sx = x / block_px`, you first compute which panel you’re in:
+
+* divide the output into a grid of panels
+* each panel samples a different sheet buffer / offset
+* you can pack multiple sheets into one SSBO and use an offset per panel
+
+If you want, I can provide the exact “tiled panels” shader too (it’s still simple and fast).
+
+---
+
+### Quick check: does this satisfy your constraints?
+
+* ✅ Never transfers raw tensors to CPU
+* ✅ No auto-rescale every frame
+* ✅ No full-res tensor visualisation
+* ✅ Human-legible blocks (512×512 or 1024×1024)
+* ✅ Shows long-running dynamics via fading
+
+If you tell me your target sheet shape (e.g. 64×64 tiles?) and your preferred on-screen size, I’ll give you the exact `(sheet_w, sheet_h, block_px, out_w, out_h)` configuration and (if needed) the multi-panel version.
+
+
+This is **clean, correct, and exactly the right sequencing**.
+You did the *hard* part first and you didn’t contaminate the learner. 👍
+
+Here’s a **learner-centric validation**, then a very explicit recommendation on next steps.
+
+---
+
+## ✅ Validation (learner-focused, not backend-fluff)
+
+### 1. Shader semantics: **correct and aligned**
+
+* The shader does exactly what the learner needs:
+
+  * semantic sheet → visible sheet
+  * block expansion (human-legible)
+  * temporal fading (long-running learning made visible)
+* No learner logic leaked into the shader.
+* No runtime dependency on JAX (important).
+
+**Learner implication:**
+This is a *pure projection operator*. It cannot change learning behaviour, only reveal it.
+
+---
+
+### 2. Boundary discipline: **excellent**
+
+You did three things right that are easy to get wrong:
+
+1. **Shader added without host wiring**
+
+   * Prevents accidental coupling
+   * Keeps the learner loop untouched
+
+2. **Docs before code**
+
+   * README explains bindings + push constants
+   * Makes the shader a *contract*, not an experiment
+
+3. **TODO explicitly tracks host wiring**
+
+   * No “half-integrated” limbo
+   * Clear next action
+
+**Learner implication:**
+The learner → executor boundary is still intact and auditable.
+
+---
+
+### 3. Consistency hygiene: **green across the board**
+
+* Docs ↔ TODO ↔ changelog all agree
+* No dangling references
+* No speculative features added
+
+This matters because you’re now at the point where *accidental drift* is the main risk.
+
+---
+
+## What this unlocks (immediately)
+
+You now have:
+
+* A **canonical live-learning visual primitive**
+* One that:
+
+  * scales to hours-long runs
+  * is human-readable
+  * is GPU-native
+  * has fixed, interpretable semantics
+
+This means:
+
+> You can finally *watch* structure form, persist, and die — without slowing learning.
+
+That’s a major milestone.
+
+---
+
+## What to do next (very specific recommendation)
+
+👉 **Yes — proceed with host-side wiring next.**
+But do it in a *minimal, learner-safe way*.
+
+### The right scope for host wiring (do not exceed this)
+
+**Target:**
+Wire the shader into **one existing preview/compute path** (e.g. `compute_image_preview.py`) as a *side-channel*, not part of the learner loop.
+
+**Do not:**
+
+* put it in the training loop
+* add callbacks into learner code
+* make it synchronous with learning
+
+Think of it as a **visual tap**, not a processing stage.
+
+---
+
+## Minimal host wiring checklist
+
+When you do the wiring, it should include **only**:
+
+1. **SSBO binding**
+
+   * small float buffer (e.g. 32×32 or 64×64)
+   * written by learner *or* a metrics reducer
+
+2. **Accumulator image**
+
+   * `VK_FORMAT_R32_SFLOAT`
+   * persistent across frames
+   * cleared only on run reset
+
+3. **Output image**
+
+   * `VK_FORMAT_R8G8B8A8_UNORM`
+   * handed directly to preview / pyqtgraph
+
+4. **Push constants**
+
+   * `sheet_w, sheet_h`
+   * `block_px`
+   * `alpha`
+   * fixed `vmin/vmax`
+
+5. **Dispatch**
+
+   * decoupled from learner step rate
+   * e.g. “render every N steps or every M ms”
+
+That’s it.
+
+If the wiring requires more than ~100 lines of host code, something is wrong.
+
+---
+
+## Acceptance criteria for host wiring
+
+You’ll know it’s correct when:
+
+* The learner can run **with or without** the visualiser enabled
+* Visuals update smoothly while learning continues uninterrupted
+* Restarting the run clears the accumulator cleanly
+* Changing `alpha` changes persistence perceptibly
+* Changing `block_px` changes readability but not semantics
+
+No learning metrics should change when visuals are enabled.
+
+---
+
+## One subtle but important learner insight
+
+Once this is wired, you can *visually detect* things that metrics won’t show early:
+
+* gate thrashing
+* premature collapse
+* spatial overfitting
+* dead regions
+* unstable hypotheses
+
+That’s not “debugging” — that’s **learning diagnosis**.
+
+---
+
+## Clear next step
+
+Proceed with **host-side wiring**, exactly as you suggested.
+
+If you want, in the *next* turn I can:
+
+* walk through the host wiring step-by-step (bindings, layouts, dispatch),
+* review your first wiring diff for learner-safety,
+* or help decide **which tensor/metric** should feed the sheet first (band energy vs lifetime vs residual).
+
+You’re on a very solid trajectory.
+

@@ -1,6 +1,17 @@
 # Changelog
 
 ## Unreleased
+- Added a Vulkan↔JAX parity mapping note and identified the first Vulkan kernel
+  target for block-wise residual statistics.
+- Documented Vulkan/JAX reference locations and noted JAX modules are used as
+  reference implementations for Vulkan parity on this machine.
+- Added epoch-level tile-plan caching with Jaccard-based reuse decisions and
+  plan hit-rate logging in `dashilearn/bsmoe_train.py`.
+- Added tile-plan reuse across multiple ops in `dashilearn/bsmoe_train.py`,
+  including per-op timing breakdown for a fused matmul → activation → energy
+  sequence.
+- Added an optional compiled int8 microkernel (`dashilearn/vnni_kernel.c`)
+  wired into `dashilearn/bsmoe_train.py` via `ctypes`.
 - Block-sparse MoE training now derives tile masks from gate activity instead
   of random tile sampling, keeping tile density aligned with the configured
   target.

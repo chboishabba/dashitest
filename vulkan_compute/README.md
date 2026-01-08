@@ -58,3 +58,29 @@ VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json \
 ```
 
 Expected output shows the first 10 elements incremented by 1.
+
+## Sheet Expand + Fade Shader (live sheet visual)
+
+This repo includes a drop-in compute shader for expanding a small "semantic
+sheet" into a large visible image with temporal fading, intended for live
+"sheet lighting up" visualizations. It follows the learner/executor guidance
+in `CONTEXT.md#L21313`.
+
+Shader: `vulkan_compute/shaders/sheet_expand_fade.comp`
+
+Compile:
+```bash
+glslc vulkan_compute/shaders/sheet_expand_fade.comp -o vulkan_compute/shaders/sheet_expand_fade.spv
+```
+
+Descriptor layout (set 0):
+- binding 0: SSBO `float sheet[]` (size = `sheet_w*sheet_h`)
+- binding 1: `r32f` storage image (accumulator)
+- binding 2: `rgba8` storage image (display)
+
+Push constants:
+`sheet_w`, `sheet_h`, `out_w`, `out_h`, `block_px`, `alpha`, `vmin`, `vmax`, `use_clamp`.
+
+Note: host wiring for this shader is not yet in `vulkan_compute/`; add a
+compute pass that binds the above resources and dispatches over the output
+image.

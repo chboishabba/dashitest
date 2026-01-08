@@ -2,10 +2,26 @@
 
 - **Block-sparse int8/VNNI path**
   - Build `active_tiles` from gate masks (tile-level any-activation) in
-    `block_sparse_moe_train.py`.
+    `dashilearn/bsmoe_train.py`.
   - Priority rationale: see `CONTEXT.md#L2626`.
-  - Call a real VNNI/dpwssd microkernel on active tiles; emit once per tile.
-  - Reuse tiles for multiple fused ops to amortize packing/mask build.
+  - Call a compiled int8 microkernel on active tiles (via
+    `dashilearn/vnni_kernel.so`); emit once per tile.
+  - Reuse tiles for multiple fused ops via a `TilePlan` (active tile offsets,
+    optional packed buffers) and benchmark a fused sequence with per-op timing
+    breakdown.
+  - Add plan caching across epochs: reuse prior TilePlan when Jaccard(tile set)
+    >= threshold; log hit rate, similarity, and timing breakdown.
+
+- **Vulkan/JAX parity map**
+  - Inventory Vulkan entry points (`vulkan/`, `vulkan_compute/`) and map
+    corresponding JAX reference modules (`JAX/`) to clarify what can be ported
+    without relying on JAX at runtime.
+  - First Vulkan kernel: block-wise residual/diff with per-block stats (SAD or
+    energy) as a parity target for `JAX/motion_search.py`.
+- **Vulkan sheet visual shader**
+  - Wire `vulkan_compute/shaders/sheet_expand_fade.comp` into a small host
+    driver (e.g., `compute_image_preview.py`) with SSBO + accumulator + output
+    image bindings, plus push-constant controls.
 
 - **Order-ternary P/Q/N pipeline**
   - Extend P/Q/N culling into a tile selector feeding the block-sparse kernel.

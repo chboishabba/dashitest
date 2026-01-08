@@ -1,0 +1,59 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer SheetBuf {
+    float sheet[];
+} sb;
+
+layout(set = 0, binding = 1, r32f) uniform image2D accum_img;
+layout(set = 0, binding = 2, rgba8) uniform writeonly image2D out_img;
+
+layout(push_constant) uniform PC {
+    uint sheet_w;
+    uint sheet_h;
+    uint out_w;
+    uint out_h;
+    uint block_px;
+    float alpha;
+    float vmin;
+    float vmax;
+    uint use_clamp;
+} pc;
+
+vec4 map_gray(float x01) {
+    return vec4(x01, x01, x01, 1.0);
+}
+
+void main() {
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    if (gid.x >= int(pc.out_w) || gid.y >= int(pc.out_h)) {
+        return;
+    }
+
+    uint sx = uint(gid.x) / pc.block_px;
+    uint sy = uint(gid.y) / pc.block_px;
+
+    if (sx >= pc.sheet_w || sy >= pc.sheet_h) {
+        imageStore(out_img, gid, vec4(0, 0, 0, 1));
+        return;
+    }
+
+    uint sidx = sy * pc.sheet_w + sx;
+    float cur = sb.sheet[sidx];
+
+    if (pc.use_clamp != 0u) {
+        cur = clamp(cur, pc.vmin, pc.vmax);
+    }
+
+    float denom = max(pc.vmax - pc.vmin, 1e-12);
+    float cur01 = (cur - pc.vmin) / denom;
+    cur01 = clamp(cur01, 0.0, 1.0);
+
+    float prev = imageLoad(accum_img, gid).r;
+    float a = clamp(pc.alpha, 0.0, 1.0);
+    float acc = a * prev + (1.0 - a) * cur01;
+
+    imageStore(accum_img, gid, vec4(acc, 0.0, 0.0, 1.0));
+    imageStore(out_img, gid, map_gray(acc));
+}
