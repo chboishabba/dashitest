@@ -3,6 +3,19 @@
 ## Unreleased
 - Added a Vulkan↔JAX parity mapping note and identified the first Vulkan kernel
   target for block-wise residual statistics.
+- Added `scripts/bridge_task.py` and `scripts/bridge_task_summary.py` so codec/DNA
+  Task B runs share the same harness, plus documented the E_seq contract,
+  JSON keys, and leakage-ratio acceptance rule in `docs/tree_diffusion_benchmark.md`.
+- Added `scripts/gen_codec_E_seq.py` and `scripts/gen_dna_E_seq.py` so both domains
+  can produce the required `[T,B]` band-energy sequences for Task B (balanced
+  ternary planes and Haar windows respectively) with frozen normalization.
+- Recorded that `docs/tree_diffusion_benchmark.md` now frames Task B as the
+  epistemic firewall for future learners and calls out the `E_seq` geometry constraint
+  (`CONTEXT.md#L26230`–`CONTEXT.md#L26699`), so the benchmark-to-learner narrative is explicit.
+- Documented the Codec Task A (band-energy) reference run from 2026-01-08 in
+  `docs/tree_diffusion_benchmark.md`, pointing to
+  `outputs/tree_diffusion_metrics_20260108T055548Z.json` and the rollout figure
+  set (`*_rollout_{mse,quotient,tree_quotient,tree_band_quotient}.png`).
 - Documented Vulkan/JAX reference locations and noted JAX modules are used as
   reference implementations for Vulkan parity on this machine.
 - Added epoch-level tile-plan caching with Jaccard-based reuse decisions and

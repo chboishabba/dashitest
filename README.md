@@ -59,7 +59,13 @@
 - `dir_legit.png`: Generated plot asset (direction legitimacy).
 - `docs/bad_day.md`: Bad-day detection concept write-up.
 - `docs/compression_bench.md`: Compression benchmark notes.
-- `docs/tree_diffusion_benchmark.md`: Tree diffusion benchmark spec (ultrametric transport).
+- `docs/tree_diffusion_benchmark.md`: Tree diffusion benchmark spec (ultrametric transport) plus the Codec Task A reference-run summary and its JSON/rollout assets.
+- `scripts/codec_task_a_summary.py`: Generate Markdown summaries from a `tree_diffusion_metrics_*.json` run plus the matching rollout figures.
+- `scripts/bridge_task.py`: Universal Task B bridge runner for codec/DNA `E_seq.npy` sequences.
+- `scripts/bridge_task_summary.py`: Print the Task B bridge run summary, leakage ratio, and figure list.
+- `scripts/gen_codec_E_seq.py`: Dump codec `E_seq.npy` from balanced-ternary plane npz.
+- `scripts/gen_dna_E_seq.py`: Compute DNA `E_seq.npy` from sliding Haar windows over a FASTA.
+- `docs/tree_diffusion_benchmark.md`: Now also documents Task B as the epistemic guardrail so learners must respect the `E_seq` geometry before moving on (see `CONTEXT.md#L26230`–`CONTEXT.md#L26699`).
 - `docs/valuation_primes_plan.md`: Valuation-only primes benchmark plan.
 - `docs/energy_landscape_vis.md`: Energy landscape visualization notes for dashifine outputs.
 - `first_exit.png`: Generated plot asset (first-exit heatmap).

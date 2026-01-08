@@ -87,6 +87,8 @@
 - **Compression / codec follow-ups**
   - Re-run the tree diffusion benchmark with `--dump-band-planes` and review
     per-band rollout sheets (optionally stitch GIFs).
+- **Learner roadmap (Task B foundation)**
+  - Define the minimal operator learner that consumes `E_seq` and learns the next-step / rollout while still obeying leakage invariants (`CONTEXT.md#L26230`–`CONTEXT.md#L26699`); document training protocol (losses, regularization) in our notes before coding.
 
 - **Generalised learner roadmap (kernel + wave task → broader suite)**
   - Phase 0: lock in baselines, spectra, interpretation, domain assumptions,

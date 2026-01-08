@@ -383,6 +383,98 @@ The tree diffusion benchmark is closed once learner behavior under adversarial
 band coupling is fully explained by band-local influence, quantified leakage,
 and directional bridge-task performance, with clear separation from baselines.
 
+## Codec Task A reference run
+
+This log documents the Codec Task A (band-energy prediction) reference run
+(`CONTEXT.md#L25532` and the full Task A rationale in
+`CONTEXT.md#L25740`). Timestamp `20260108T055548Z` produced the metrics JSON
+`outputs/tree_diffusion_metrics_20260108T055548Z.json` plus the rollout figure
+set described below.
+
+### Key metrics
+
+- Raw rollout MSE: `tree_rollout_mse` = 4.246e-06 vs `rbf_rollout_mse` =
+  2.156e-05 (≈5× drop). Quotient and tree-band errors stay around ~10⁻¹⁰,
+  confirming the tree kernel keeps energy local.
+- Bridge errors: `tree_bridge_mse` = 2.479e-08 vs `rbf_bridge_mse` =
+  2.150e-08, with the leakage proxy `tree_bridge_tree_band_q_mse` =
+  2.80e-11 vs 2.16e-11. One-step metrics (`tree_one_step_*` vs `rbf_one_step_*`)
+  follow the same ordering.
+- Sample counts: 200 training rows, 100 test rows, and 51 bridge samples
+  across 251 windows (all reported in the JSON).
+
+### Figures (required rollout diagnostics)
+
+- `outputs/tree_diffusion_metrics_20260108T055548Z_rollout_mse.png`: raw rollout
+  MSE curves for RBF vs Tree.
+- `outputs/tree_diffusion_metrics_20260108T055548Z_rollout_quotient.png`: subtree
+  quotient MSE over rollout time.
+- `outputs/tree_diffusion_metrics_20260108T055548Z_rollout_tree_quotient.png`:
+  tree-level quotient separation (depth-wise energy preservation).
+- `outputs/tree_diffusion_metrics_20260108T055548Z_rollout_tree_band_quotient.png`:
+  per-band quotient energy (leakage vs depth).
+
+These assets complete the required diagnostics for the learner-based closure run,
+and the JSON file is the authoritative numeric summary referenced by downstream
+notes/figures.
+
+Regenerate this section after future runs with:
+
+```
+python scripts/codec_task_a_summary.py --json outputs/tree_diffusion_metrics_<TIMESTAMP>.json
+```
+The script auto-discovers the matching rollout figures and produces the markdown
+snippet shown above (use `--out` to overwrite the doc in place if desired).
+
+## Task B (Bridge inference)
+
+Produce an `E_seq.npy` shaped `[T_total, B]` where each row is the band-energy
+vector for a single time window (codec: ternary plane energies, DNA: motif
+bands). Normalize per band once (mean/std, L1, etc.) before saving. Use the
+universal bridge harness:
+
+```
+python scripts/bridge_task.py \
+  --energy-seq outputs/E_seq.npy \
+  --bridge-task-T 50 \
+  --train 200 \
+  --test 100 \
+  --rbf-ls 1.0 \
+  --tree-ls 1.0 \
+  --reg 1e-3 \
+  --quotient-fn <module>:quotient_vector \
+  --leakage-fn <module>:tree_band_energy_vector \
+  --out outputs/bridge_metrics.json \
+  --plots
+```
+
+The run emits `outputs/bridge_metrics_<timestamp>.json` and four figures
+(`*_bridge_mse.png`, `*_bridge_quotient.png`, `*_bridge_tree_band_quotient.png`,
+`*_bridge_prediction.png`). The JSON *must* include the keys listed below:
+
+- `rbf_bridge_mse`, `tree_bridge_mse`
+- `rbf_bridge_q_mse`, `tree_bridge_q_mse`
+- `rbf_bridge_tree_band_q_mse`, `tree_bridge_tree_band_q_mse`
+- `bridge_windows`, `bridge_train_samples`, `bridge_test_samples`
+
+Task B is considered closed once the leakage ratio
+`rbf_bridge_tree_band_q_mse / tree_bridge_tree_band_q_mse ≥ 2×` across 3+ seeds
+(no NaNs or explosions). After each run regenerate the markdown snippet with:
+
+```
+python scripts/bridge_task_summary.py --json outputs/bridge_metrics_<timestamp>.json
+```
+
+and drop the resulting paragraph beside the Task A summary so docs stay aligned.
+
+The conceptual payoff is that Task B now isolates the *geometry* you want the
+learner to learn (see `CONTEXT.md#L26230`–`CONTEXT.md#L26699`). Any subsequent model
+must stay within the admissible hypothesis class defined by `E_seq` and the bridge
+leakage ratio; nothing that merely memorizes cumulative planes or cheats the
+normalization can win. This is the guardrail that lets the *actual learner* (i.e.,
+an operator learning to update band energies) be evaluated without violating the
+benchmark constraints.
+
 ## Lemma: gauge-equivalence collapse (quotient + band)
 
 If both learners only depend on the quotient of tree-Haar detail bands, then
