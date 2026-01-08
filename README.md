@@ -30,7 +30,8 @@
 - `acceptable1.png`: Generated plot asset (acceptable variant).
 - `accept_persistence.png`: Generated plot asset (accept persistence).
 - `balanced_pn_iter_bench.py`: Benchmark for balanced P/N iterative add loops.
-- `dashilearn/bsmoe_train.py`: Training script for block-sparse MoE models with gate masks, tile-plan reuse across fused ops and plan caching across epochs (see `CONTEXT.md#L18720` and `CONTEXT.md#L21231`).
+- `dashilearn/bsmoe_train.py`: Training script for block-sparse MoE models with gate masks, tile-plan reuse across fused ops, plan caching across epochs, and band-energy exports to `dashilearn/sheet_energy.npy` for the visualiser; supports `--epochs` and `--stay-open` so you can keep the run alive for the preview (see `CONTEXT.md#L18720`, `CONTEXT.md#L21231`, and `CONTEXT.md#L20482`).
+- `dashilearn/run_live_sheet.sh`: Helpers to launch the learner + Vulkan preview with recording so the sheet data gets produced and consumed automatically.
 - `block_sparse_tile_driver.py`: Driver for block-sparse tile experiments.
 - `ca_Figure_1.png`: Generated CA figure asset.
 - `ca_vis_Figure_0.png`: Generated CA visualization asset.

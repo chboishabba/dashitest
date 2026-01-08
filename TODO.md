@@ -19,9 +19,13 @@
   - First Vulkan kernel: block-wise residual/diff with per-block stats (SAD or
     energy) as a parity target for `JAX/motion_search.py`.
 - **Vulkan sheet visual shader**
-  - Wire `vulkan_compute/shaders/sheet_expand_fade.comp` into a small host
-    driver (e.g., `compute_image_preview.py`) with SSBO + accumulator + output
-    image bindings, plus push-constant controls.
+  - Feed real learner sheet data into the `compute_image_preview.py --sheet`
+    path (replace the demo fill with live metrics).
+  - Add zero-copy recording (Vulkan image → dmabuf → VAAPI encoder) to replace
+    the current CPU readback pipe.
+-  - Publish `dashilearn/sheet_energy.npy` per epoch (band energy) and have
+    `compute_image_preview.py --sheet --sheet-data dashilearn/sheet_energy.npy`
+    reload it so live visuals track the learner.
 
 - **Order-ternary P/Q/N pipeline**
   - Extend P/Q/N culling into a tile selector feeding the block-sparse kernel.
@@ -40,12 +44,17 @@
   - Sweep `--adv-band`/`--adv-style` (randphase/sparse/mix) to compare band
     kill rates and leakage between RBF and tree kernels.
   - Add a symmetry-breaking tree diffusion variant (depth-varying diffusion or
-    non-commuting observation map) to force model separation.
+    non-commuting observation map) to force model separation. [wip]
+    - Implemented a more aggressive adversarial operator: non-linear, state-dependent
+      modulation of diffusion weights based on band energies. This replaces the previous
+      separate adversarial term and depth-decay flags.
   - Lock design choices for the next phase: local/adjacent band coupling (vs
     global), static adversary (vs adaptive), coarse→fine vs fine→coarse bridge
     direction, and relative pass/fail thresholds.
   - Add an adversarial operator variant with nonlinear band coupling
-    (`x_{t+1} = A x_t + g(B(x_t))`) and a flag to toggle it.
+    (`x_{t+1} = A x_t + g(B(x_t))`) and a flag to toggle it. [wip]
+    - Implemented adjacent-band coupling (`d_l` modulated by `d_{l-1}`) with
+      `--adv-op`, `--adv-op-strength`, and `--adv-op-nl` flags (tanh, sigmoid, sign).
   - Add a bridge-task evaluation (infer `x_{T/2}` or band energies from `(x0, xT)`
     and score in band-quotient space with leakage reporting).
   - Implement the adversarial-operator toggle with local band coupling as the
@@ -72,6 +81,7 @@
     sparse impulse initializations) for the tree diffusion benchmark.
   - Re-run the tree diffusion benchmark with the quotient-kernel tree model and
     record whether rollout/quotient separation appears.
+  - Implement video output for tree diffusion benchmark live sheets.
 
 - **Compression / codec follow-ups**
   - Re-run the tree diffusion benchmark with `--dump-band-planes` and review

@@ -38,13 +38,220 @@ def tree_diffusion_step(x: np.ndarray, p: int, depth: int, alpha: float, decay: 
     return (1.0 - alpha) * x + alpha * mix
 
 
-def rollout(x0: np.ndarray, steps: int, p: int, depth: int, alpha: float, decay: float) -> list[np.ndarray]:
+def tree_diffusion_step_adversarial(
+
+
+    x: np.ndarray,
+
+
+    p: int,
+
+
+    depth: int,
+
+
+    alpha: float,
+
+
+    decay: float,
+
+
+    adv_op_strength: float,
+
+
+    adv_op_nl: str,
+
+
+) -> np.ndarray:
+
+
+    """Diffusion with non-linear, state-dependent, depth-varying weights."""
+
+
+    # Get band energies (coarse to fine)
+
+
+    band_energies = tree_band_energy_vector(x, p, depth)
+
+
+
+
+
+    # Get original linear diffusion weights
+
+
+    original_weights = build_weights(depth, decay)
+
+
+    modified_weights = np.copy(original_weights)
+
+
+
+
+
+    # Define nonlinearity
+
+
+    if adv_op_nl == "tanh":
+
+
+        nl_fn = np.tanh
+
+
+    elif adv_op_nl == "sigmoid":
+
+
+        nl_fn = lambda z: 1 / (1 + np.exp(-z))
+
+
+    elif adv_op_nl == "sign":
+
+
+        nl_fn = np.sign
+
+
+    else:
+
+
+        raise ValueError(f"unknown nonlinearity {adv_op_nl}")
+
+
+
+
+
+    # Modulate weights based on band energies in a non-linear, state-dependent way
+
+
+    for level in range(depth + 1):
+
+
+        # The weight for 'level' is modulated by a non-linear function of its own band's energy.
+
+
+        # This makes the diffusion state-dependent and symmetry-breaking.
+
+
+        # Using 1.0 + modulation_factor allows weights to increase or decrease relative to original.
+
+
+        modulation_factor = nl_fn(adv_op_strength * band_energies[level])
+
+
+        modified_weights[level] *= np.clip(1.0 + modulation_factor, 0.0, None)
+
+
+
+
+
+    # Compute mix term using modified weights
+
+
+    averages = subtree_averages(x, p, depth)
+
+
+    mix = np.zeros_like(x)
+
+
+    for level, avg in enumerate(averages):
+
+
+        mix += modified_weights[level] * expand_level(avg, p, depth, level)
+
+
+
+
+
+    return (1.0 - alpha) * x + alpha * mix
+
+
+
+
+
+
+
+
+def rollout(
+
+
+    x0: np.ndarray,
+
+
+    steps: int,
+
+
+    p: int,
+
+
+    depth: int,
+
+
+    alpha: float,
+
+
+    decay: float,
+
+
+    adv_op: bool,
+
+
+    adv_op_strength: float,
+
+
+    adv_op_nl: str,
+
+
+    dump_live_sheet_path: Path = None,
+
+
+) -> list[np.ndarray]:
+
+
     traj = [x0]
+
+
     x = x0
+
+
+    if dump_live_sheet_path:
+
+
+        _save_live_sheet(x, p, depth, dump_live_sheet_path)  # Save initial state
+
+
     for _ in range(steps):
-        x = tree_diffusion_step(x, p, depth, alpha, decay)
+
+
+        if adv_op:
+
+
+            x = tree_diffusion_step_adversarial(
+
+
+                x, p, depth, alpha, decay, adv_op_strength, adv_op_nl
+
+
+            )
+
+
+        else:
+
+
+            x = tree_diffusion_step(x, p, depth, alpha, decay)
+
+
         traj.append(x)
+
+
+        if dump_live_sheet_path:
+
+
+            _save_live_sheet(x, p, depth, dump_live_sheet_path)
+
+
     return traj
+
+
+
 
 
 def quotient_vector(x: np.ndarray, p: int, depth: int) -> np.ndarray:
@@ -142,6 +349,19 @@ def make_adv_init(
             raise ValueError("adv_mix_band must be in [0, depth] for mix style")
         bands[mix_band] += mix_eps * _build_band_detail(p, mix_band, rng, "randphase", sparse_m)
     return leaf_from_bands(bands, p)
+
+import math
+def _save_live_sheet(x: np.ndarray, p: int, depth: int, path: Path) -> None:
+    n_leaves = p ** depth
+    side = int(math.sqrt(n_leaves))
+    if side * side != n_leaves:
+        # Fallback to a 1D representation or pad if not a perfect square
+        # For now, let's assume it's a perfect square for simplicity or warn
+        print(f"warning: n_leaves {n_leaves} is not a perfect square, can't reshape to 2D for live sheet.", file=sys.stderr)
+        return
+
+    sheet_data = x.reshape((side, side))
+    np.save(path, sheet_data.astype(np.float32))
 
 def _save_gray_png(path: Path, img_u8: np.ndarray) -> None:
     plt.imsave(path, img_u8, cmap="gray", vmin=0, vmax=255)
@@ -300,7 +520,18 @@ def run_benchmark(args):
         x0 = x0 * args.init_band_scale
     else:
         x0 = rng.normal(size=n)
-    traj = rollout(x0, args.steps, args.p, args.depth, args.alpha, args.decay)
+    traj = rollout(
+        x0,
+        args.steps,
+        args.p,
+        args.depth,
+        args.alpha,
+        args.decay,
+        args.adv_op,
+        args.adv_op_strength,
+        args.adv_op_nl,
+        dump_live_sheet_path=Path(args.dump_live_sheet) if args.dump_live_sheet else None,
+    )
 
     X_obs, Y_obs = dataset_from_traj(traj, perm)
     split = min(args.train, X_obs.shape[0])
@@ -361,7 +592,18 @@ def run_benchmark(args):
         tree_roll_obs, tree_roll_lat = score_rollout_quotient(
             tree_model, x0_obs[inv_perm], args.rollout_steps, args.p, args.depth, perm
         )
-        true_roll = rollout(x0_obs[inv_perm], args.rollout_steps, args.p, args.depth, args.alpha, args.decay)
+        true_roll = rollout(
+            x0_obs[inv_perm],
+            args.rollout_steps,
+            args.p,
+            args.depth,
+            args.alpha,
+            args.decay,
+            args.adv_op,
+            args.adv_op_strength,
+            args.adv_op_nl,
+            dump_live_sheet_path=None, # Don't dump true rollout to same file
+        )
         true_roll_lat = np.asarray(true_roll[1:])
         true_roll_obs = true_roll_lat[:, perm]
 
@@ -596,6 +838,34 @@ def main():
         help="Scale for init-band signals after unit-variance normalization.",
     )
     ap.add_argument(
+        "--adv-op",
+        action="store_true",
+        help="Enable adversarial nonlinear band-coupling operator in dynamics.",
+    )
+    ap.add_argument(
+        "--adv-op-strength",
+        type=float,
+        default=0.1,
+        help="Strength of the adversarial operator.",
+    )
+    ap.add_argument(
+        "--adv-op-nl",
+        choices=["tanh", "sigmoid", "sign"],
+        default="tanh",
+        help="Nonlinearity for the adversarial operator.",
+    )
+    ap.add_argument(
+        "--adv-op-strength",
+        type=float,
+        default=0.1,
+        help="Strength of the adversarial operator (non-linear modulation of weights).",
+    )
+    ap.add_argument(
+        "--adv-op-nl",
+        choices=["tanh", "sigmoid", "sign"],
+        default="tanh",
+        help="Nonlinearity for the adversarial operator.",
+    )
         "--adv-band",
         type=int,
         default=-1,
@@ -630,6 +900,12 @@ def main():
         type=int,
         default=None,
         help="RNG seed override for adversarial init (defaults to --seed).",
+    )
+    ap.add_argument(
+        "--dump-live-sheet",
+        type=str,
+        default=None,
+        help="Path to dump a 2D representation of the tree state for live preview.",
     )
     ap.add_argument(
         "--dump-band-planes",

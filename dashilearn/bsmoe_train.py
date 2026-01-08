@@ -8,10 +8,12 @@ Block-sparse MoE training demo:
   - Emit once per block
 """
 
+import argparse
 import time
 import os
 import ctypes
 from dataclasses import dataclass
+from pathlib import Path
 import numpy as np
 
 
@@ -32,6 +34,30 @@ def tiles_from_gate_mask(gate_mask, tile=32):
             i1, j1 = min(i0 + tile, M), min(j0 + tile, N)
             tiles[ti, tj] = np.any(gate_mask[i0:i1, j0:j1])
     return tiles
+
+
+SHEET_OUT_PATH = Path(__file__).with_name("sheet_energy.npy")
+
+
+def tile_energy_map(C, plan):
+    energy = np.zeros(plan.tile_grid_shape, dtype=np.float32)
+    for idx in range(plan.count):
+        i0 = int(plan.i0[idx])
+        j0 = int(plan.j0[idx])
+        i1 = int(plan.i1[idx])
+        j1 = int(plan.j1[idx])
+        row = i0 // plan.tile
+        col = j0 // plan.tile
+        block = C[i0:i1, j0:j1].astype(np.float32)
+        energy[row, col] = float(np.sum(block * block))
+    return energy
+
+
+def dump_sheet_energy(energy, path=SHEET_OUT_PATH):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp.npy")
+    np.save(tmp, energy)
+    tmp.replace(path)
 
 
 def make_data(M=256, K=256, N=256, tiles_active=0.5, tile=32, seed=0):
@@ -243,7 +269,7 @@ def train_epoch(X, W, plan, lr=1e-3, microkernel=vnni_microkernel):
         gradW[:, j0:j1] += X_blk.T @ err_blk
     W = W - lr * gradW.astype(W.dtype)
     loss = float((err ** 2).mean())
-    return W, loss
+    return W, loss, C
 
 
 def bench(fn, *args, reps=3, **kwargs):
@@ -259,10 +285,21 @@ def bench(fn, *args, reps=3, **kwargs):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="dashilearn block-sparse demo")
+    parser.add_argument("--epochs", type=int, default=3, help="Number of epochs")
+    parser.add_argument(
+        "--stay-open",
+        type=float,
+        default=0.0,
+        help="Seconds to keep running after training finishes (writes the last sheet each second)",
+    )
+    parser.add_argument("--stay-interval", type=float, default=1.0, help="Seconds between sheet refresh while staying open")
+    args = parser.parse_args()
+
     M = N = K = 256
     tile_active = 0.5
     tile = 32
-    epochs = 3
+    epochs = args.epochs
     gate_flip = 0.01
     jaccard_thresh = 0.9
     rng = np.random.default_rng(0)
@@ -286,6 +323,7 @@ def main():
     t_act = bench(lambda: activation_plan(C_ref.copy(), plan, clamp_min=0))
     t_energy = bench(lambda: energy_plan(C_ref, plan))
     t_fused = bench(lambda: fused_sequence(X, W, plan, microkernel=vnni_microkernel))
+    dump_sheet_energy(tile_energy_map(C_ref, plan))
 
     active_frac = float(tiles.mean()) if tiles.size else 0.0
     print("Block-sparse MoE-style matmul")
@@ -305,6 +343,7 @@ def main():
     print(f"exec fused total  : {t_fused:6.2f} ms")
 
     # Tiny training loop (for illustration)
+    sheet_energy = np.zeros(plan.tile_grid_shape, dtype=np.float32)
     plan_hits = 0
     for e in range(epochs):
         t_gate0 = time.perf_counter()
@@ -318,13 +357,22 @@ def main():
             plan = next_plan
         plan_hits += int(reuse)
         t0 = time.perf_counter()
-        W, loss = train_epoch(X, W, plan, lr=1e-5, microkernel=vnni_microkernel)
+        W, loss, C = train_epoch(X, W, plan, lr=1e-5, microkernel=vnni_microkernel)
         t1 = time.perf_counter()
         print(
             f"epoch {e+1}: loss={loss:8.2e}  time={(t1-t0)*1e3:6.2f} ms  "
             f"jaccard={jacc:5.2f}  plan_hit={int(reuse)}  gate_time={t_gate:5.2f} ms"
         )
+        sheet_energy = tile_energy_map(C, plan)
+        dump_sheet_energy(sheet_energy)
     print(f"plan_hit_rate     : {plan_hits}/{epochs}")
+    if args.stay_open > 0:
+        stay_interval = max(0.01, args.stay_interval)
+        end_time = time.time() + args.stay_open
+        print(f"staying open for {args.stay_open:.1f}s (refresh every {stay_interval:.2f}s)")
+        while time.time() < end_time:
+            dump_sheet_energy(sheet_energy)
+            time.sleep(stay_interval)
 
 
 if __name__ == "__main__":

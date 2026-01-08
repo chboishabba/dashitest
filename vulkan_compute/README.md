@@ -81,6 +81,29 @@ Descriptor layout (set 0):
 Push constants:
 `sheet_w`, `sheet_h`, `out_w`, `out_h`, `block_px`, `alpha`, `vmin`, `vmax`, `use_clamp`.
 
-Note: host wiring for this shader is not yet in `vulkan_compute/`; add a
-compute pass that binds the above resources and dispatches over the output
-image.
+Note: host wiring is provided in `compute_image_preview.py` behind the `--sheet`
+flag; it binds the SSBO + accumulator + output image and dispatches over the
+output image.
+
+Preview wiring (optional):
+```bash
+glslc vulkan_compute/shaders/sheet_expand_fade.comp -o vulkan_compute/shaders/sheet_expand_fade.spv
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json \
+  python vulkan_compute/compute_image_preview.py --sheet --sheet-w 32 --sheet-h 32 --block-px 16 --alpha 0.97
+```
+
+Recording (preview side-channel, no learner coupling; see `CONTEXT.md#L20482`):
+```bash
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json \
+  python vulkan_compute/compute_image_preview.py --sheet --record-video --record-fps 60 --record-out sheet.mp4
+```
+- Notes:
+- Uses a CPU readback into an ffmpeg rawvideo pipe (no dmabuf export yet).
+- ffmpeg must be installed; recording does not affect the learner loop.
+- Outputs are auto-timestamped to avoid overwrites.
+
+Sheet data:
+```bash
+python vulkan_compute/compute_image_preview.py --sheet --sheet-data dashilearn/sheet_energy.npy
+```
+`--sheet-data` reloads `dashilearn/sheet_energy.npy` while running so you can watch the band-energy sheet that `dashilearn/bsmoe_train.py` exports each epoch.

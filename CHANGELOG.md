@@ -10,6 +10,14 @@
 - Added tile-plan reuse across multiple ops in `dashilearn/bsmoe_train.py`,
   including per-op timing breakdown for a fused matmul → activation → energy
   sequence.
+- `dashilearn/bsmoe_train.py` now exports per-tile band energies to
+  `dashilearn/sheet_energy.npy` so the Vulkan preview can load real learner data.
+- `dashilearn/bsmoe_train.py` gained `--epochs`, `--stay-open`, and `--stay-interval`
+  so you can keep the run alive (topping up the sheet export) while the preview
+  runs.
+- Added `dashilearn/run_live_sheet.sh` to start the trainer and Vulkan preview
+  together (records + sheet reload) so you can capture a movie without juggling
+  shells.
 - Added an optional compiled int8 microkernel (`dashilearn/vnni_kernel.c`)
   wired into `dashilearn/bsmoe_train.py` via `ctypes`.
 - Block-sparse MoE training now derives tile masks from gate activity instead
@@ -61,6 +69,9 @@
   band for depth-killing separation tests.
 - Added adversarial band init flags (`--adv-band`, `--adv-style`, `--adv-sparse-m`,
   `--adv-mix-band`, `--adv-mix-eps`, `--adv-seed`) to stress depth-killing.
+- Added video output capability for the tree diffusion benchmark's live sheets,
+  enabled via the `run_tree_live_sheet.sh` wrapper script, leveraging the
+  existing `compute_image_preview.py` infrastructure.
 - Documented a cleanup guideline to consolidate bulk PNG dumps into GIFs and
   remove the individual PNGs.
 - Documented the null-separation/control-case interpretation for tree diffusion

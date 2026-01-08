@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import argparse
 import glob
+import math
 import os
 import sys
 import time
+import struct
+import subprocess
+import shutil
+import datetime
+import re
 from pathlib import Path
 
 import numpy as np
@@ -107,6 +113,42 @@ def _read_spirv(path: Path) -> bytes:
     return path.read_bytes()
 
 
+_TS_RE = re.compile(r".*_[0-9]{8}T[0-9]{6}Z$")
+
+
+def _timestamped_path(path: Path) -> Path:
+    if _TS_RE.match(path.stem):
+        return path
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    if path.suffix:
+        return path.with_name(f"{path.stem}_{ts}{path.suffix}")
+    return path.with_name(f"{path.name}_{ts}")
+
+
+def _mapped_buffer(mapped: object, size: int, dtype: np.dtype) -> np.ndarray:
+    try:
+        return np.frombuffer(mapped, dtype=dtype, count=size // np.dtype(dtype).itemsize)
+    except (TypeError, ValueError):
+        try:
+            buf = ffi.buffer(mapped, size)
+        except (TypeError, ValueError) as exc:
+            raise TypeError(f"Unsupported mapped buffer type: {type(mapped)}") from exc
+        return np.frombuffer(buf, dtype=dtype, count=size // np.dtype(dtype).itemsize)
+
+
+def _stretch_sheet_values(arr: np.ndarray, target_shape: tuple[int, int]) -> np.ndarray:
+    target_h, target_w = target_shape
+    src_h, src_w = arr.shape
+    if src_h == 0 or src_w == 0:
+        raise ValueError("Sheet data has zero width or height.")
+    if (src_h, src_w) == (target_h, target_w):
+        return arr
+    rows = math.ceil(target_h / src_h)
+    cols = math.ceil(target_w / src_w)
+    stretched = np.repeat(np.repeat(arr, rows, axis=0), cols, axis=1)
+    return stretched[:target_h, :target_w]
+
+
 def _choose_surface_format(formats: list[VkSurfaceFormatKHR]) -> VkSurfaceFormatKHR:
     for fmt in formats:
         if fmt.format == VK_FORMAT_B8G8R8A8_UNORM:
@@ -125,10 +167,46 @@ def main() -> int:
     parser.add_argument("--width", type=int, default=512)
     parser.add_argument("--height", type=int, default=512)
     parser.add_argument("--frames", type=int, default=120)
+    parser.add_argument("--sheet", action="store_true", help="Use sheet expand+fade compute shader.")
+    parser.add_argument("--sheet-w", type=int, default=32, help="Sheet width (cells).")
+    parser.add_argument("--sheet-h", type=int, default=32, help="Sheet height (cells).")
+    parser.add_argument("--block-px", type=int, default=16, help="Pixels per sheet cell.")
+    parser.add_argument("--alpha", type=float, default=0.97, help="Fade factor for accumulator.")
+    parser.add_argument("--vmin", type=float, default=0.0, help="Visual range min.")
+    parser.add_argument("--vmax", type=float, default=1.0, help="Visual range max.")
+    parser.add_argument("--no-clamp", action="store_true", help="Disable vmin/vmax clamping.")
+    parser.add_argument("--record-video", action="store_true", help="Record frames to a video file.")
+    parser.add_argument("--record-out", default="sheet_preview.mp4", help="Output path for recording.")
+    parser.add_argument("--record-fps", type=int, default=60, help="Sampling FPS for recording.")
+    parser.add_argument("--sheet-data", type=str, default=None, help="Optional .npy file exported by the learner for live sheet data.")
+    parser.add_argument("--sheet-data-interval", type=float, default=0.5, help="Seconds between reloading the sheet data file.")
     parser.add_argument("--headless", action="store_true", help="Run compute-only without a window.")
     parser.add_argument("--smoke", action="store_true", help="Create instance/device and exit early.")
     args = parser.parse_args()
 
+    sheet_mode = args.sheet
+    record_enabled = args.record_video
+    if record_enabled and shutil.which("ffmpeg") is None:
+        raise SystemExit("ffmpeg not found in PATH (required for --record-video).")
+
+    sheet_data_path = Path(args.sheet_data) if args.sheet_data else None
+    sheet_reload_interval = max(0.0, args.sheet_data_interval)
+    sheet_data_values = None
+    sheet_last_reload = 0.0
+    sheet_data_mtime = 0.0
+    sheet_w = args.sheet_w
+    sheet_h = args.sheet_h
+    if sheet_mode and sheet_data_path is not None and sheet_data_path.exists():
+        try:
+            sheet_arr = np.load(sheet_data_path)
+            if sheet_arr.ndim == 2:
+                sheet_h, sheet_w = sheet_arr.shape
+                sheet_data_values = sheet_arr.astype(np.float32)
+                sheet_data_mtime = sheet_data_path.stat().st_mtime
+            else:
+                print(f"warning: {sheet_data_path} is not 2D; ignoring", file=sys.stderr)
+        except Exception as exc:
+            print(f"warning: failed to load sheet data from {sheet_data_path}: {exc}", file=sys.stderr)
     window = None
     surface = None
     if not args.headless:
@@ -268,6 +346,9 @@ def main() -> int:
             swap_views.append(vkCreateImageView(device, view_info, None))
 
     mem_props = vkGetPhysicalDeviceMemoryProperties(physical_device)
+    image_usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
+    if record_enabled:
+        image_usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT
     image_info = VkImageCreateInfo(
         sType=VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
         imageType=VK_IMAGE_TYPE_2D,
@@ -277,7 +358,7 @@ def main() -> int:
         arrayLayers=1,
         samples=VK_SAMPLE_COUNT_1_BIT,
         tiling=VK_IMAGE_TILING_OPTIMAL,
-        usage=VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        usage=image_usage,
         sharingMode=VK_SHARING_MODE_EXCLUSIVE,
         initialLayout=VK_IMAGE_LAYOUT_UNDEFINED,
     )
@@ -309,8 +390,163 @@ def main() -> int:
         ),
     )
     compute_view = vkCreateImageView(device, compute_view_info, None)
+    accum_image = None
+    accum_memory = None
+    accum_view = None
+    sheet_buffer = None
+    sheet_memory = None
+    sheet_mapped = None
+    sheet_data = None
+    sheet_size = 0
+    if sheet_mode:
+        accum_info = VkImageCreateInfo(
+            sType=VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            imageType=VK_IMAGE_TYPE_2D,
+            format=VK_FORMAT_R32_SFLOAT,
+            extent=VkExtent3D(width=width, height=height, depth=1),
+            mipLevels=1,
+            arrayLayers=1,
+            samples=VK_SAMPLE_COUNT_1_BIT,
+            tiling=VK_IMAGE_TILING_OPTIMAL,
+            usage=VK_IMAGE_USAGE_STORAGE_BIT,
+            sharingMode=VK_SHARING_MODE_EXCLUSIVE,
+            initialLayout=VK_IMAGE_LAYOUT_UNDEFINED,
+        )
+        accum_image = vkCreateImage(device, accum_info, None)
+        accum_reqs = vkGetImageMemoryRequirements(device, accum_image)
+        accum_type = _find_memory_type(
+            mem_props,
+            accum_reqs.memoryTypeBits,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        )
+        accum_alloc = VkMemoryAllocateInfo(
+            sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            allocationSize=accum_reqs.size,
+            memoryTypeIndex=accum_type,
+        )
+        accum_memory = vkAllocateMemory(device, accum_alloc, None)
+        vkBindImageMemory(device, accum_image, accum_memory, 0)
+        accum_view_info = VkImageViewCreateInfo(
+            sType=VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            image=accum_image,
+            viewType=VK_IMAGE_VIEW_TYPE_2D,
+            format=VK_FORMAT_R32_SFLOAT,
+            subresourceRange=VkImageSubresourceRange(
+                aspectMask=VK_IMAGE_ASPECT_COLOR_BIT,
+                baseMipLevel=0,
+                levelCount=1,
+                baseArrayLayer=0,
+                layerCount=1,
+            ),
+        )
+        accum_view = vkCreateImageView(device, accum_view_info, None)
 
-    compute_shader = Path(__file__).parent / "shaders" / "write_image.spv"
+    if sheet_mode:
+        sheet_size = sheet_w * sheet_h * 4
+        buffer_info = VkBufferCreateInfo(
+            sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            size=sheet_size,
+            usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            sharingMode=VK_SHARING_MODE_EXCLUSIVE,
+        )
+        sheet_buffer = vkCreateBuffer(device, buffer_info, None)
+        sheet_reqs = vkGetBufferMemoryRequirements(device, sheet_buffer)
+        sheet_type = _find_memory_type(
+            mem_props,
+            sheet_reqs.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        )
+        sheet_alloc = VkMemoryAllocateInfo(
+            sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            allocationSize=sheet_reqs.size,
+            memoryTypeIndex=sheet_type,
+        )
+        sheet_memory = vkAllocateMemory(device, sheet_alloc, None)
+        vkBindBufferMemory(device, sheet_buffer, sheet_memory, 0)
+        sheet_mapped = vkMapMemory(device, sheet_memory, 0, sheet_size, 0)
+        sheet_data = _mapped_buffer(sheet_mapped, sheet_size, np.float32)
+        if sheet_data_values is None:
+            sheet_base = (
+                np.arange(sheet_h, dtype=np.float32)[:, None]
+                + np.arange(sheet_w, dtype=np.float32)[None, :]
+            )
+        else:
+            sheet_base = None
+    else:
+        sheet_base = None
+
+    record_buffer = None
+    record_memory = None
+    record_mapped = None
+    record_view = None
+    record_proc = None
+    record_interval = None
+    record_next_time = None
+    if record_enabled:
+        record_size = width * height * 4
+        record_out = _timestamped_path(Path(args.record_out))
+        print(f"recording -> {record_out}")
+        record_buffer = vkCreateBuffer(
+            device,
+            VkBufferCreateInfo(
+                sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                size=record_size,
+                usage=VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                sharingMode=VK_SHARING_MODE_EXCLUSIVE,
+            ),
+            None,
+        )
+        record_reqs = vkGetBufferMemoryRequirements(device, record_buffer)
+        record_type = _find_memory_type(
+            mem_props,
+            record_reqs.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        )
+        record_alloc = VkMemoryAllocateInfo(
+            sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            allocationSize=record_reqs.size,
+            memoryTypeIndex=record_type,
+        )
+        record_memory = vkAllocateMemory(device, record_alloc, None)
+        vkBindBufferMemory(device, record_buffer, record_memory, 0)
+        record_mapped = vkMapMemory(device, record_memory, 0, record_size, 0)
+        record_view = _mapped_buffer(record_mapped, record_size, np.uint8)
+        record_interval = 1.0 / max(1, args.record_fps)
+        record_next_time = time.monotonic()
+        record_cmd = [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgba",
+            "-s",
+            f"{width}x{height}",
+            "-r",
+            str(args.record_fps),
+            "-i",
+            "-",
+            "-an",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-pix_fmt",
+            "yuv420p",
+            str(record_out),
+        ]
+        record_proc = subprocess.Popen(record_cmd, stdin=subprocess.PIPE)
+
+    if sheet_mode and (args.width != args.sheet_w * args.block_px or args.height != args.sheet_h * args.block_px):
+        print(
+            "warning: output size != sheet_w*block_px; sheet will not fill the image.",
+            file=sys.stderr,
+        )
+    compute_shader = Path(__file__).parent / "shaders" / (
+        "sheet_expand_fade.spv" if sheet_mode else "write_image.spv"
+    )
     shaders = [compute_shader]
     if window:
         shaders.extend(
@@ -357,19 +593,42 @@ def main() -> int:
             None,
         )
 
+    if sheet_mode:
+        compute_bindings = [
+            VkDescriptorSetLayoutBinding(
+                binding=0,
+                descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                descriptorCount=1,
+                stageFlags=VK_SHADER_STAGE_COMPUTE_BIT,
+            ),
+            VkDescriptorSetLayoutBinding(
+                binding=1,
+                descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                descriptorCount=1,
+                stageFlags=VK_SHADER_STAGE_COMPUTE_BIT,
+            ),
+            VkDescriptorSetLayoutBinding(
+                binding=2,
+                descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                descriptorCount=1,
+                stageFlags=VK_SHADER_STAGE_COMPUTE_BIT,
+            ),
+        ]
+    else:
+        compute_bindings = [
+            VkDescriptorSetLayoutBinding(
+                binding=0,
+                descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                descriptorCount=1,
+                stageFlags=VK_SHADER_STAGE_COMPUTE_BIT,
+            )
+        ]
     compute_set_layout = vkCreateDescriptorSetLayout(
         device,
         VkDescriptorSetLayoutCreateInfo(
             sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-            bindingCount=1,
-            pBindings=[
-                VkDescriptorSetLayoutBinding(
-                    binding=0,
-                    descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                    descriptorCount=1,
-                    stageFlags=VK_SHADER_STAGE_COMPUTE_BIT,
-                )
-            ],
+            bindingCount=len(compute_bindings),
+            pBindings=compute_bindings,
         ),
         None,
     )
@@ -403,7 +662,7 @@ def main() -> int:
                 VkPushConstantRange(
                     stageFlags=VK_SHADER_STAGE_COMPUTE_BIT,
                     offset=0,
-                    size=4,
+                    size=36 if sheet_mode else 4,
                 )
             ],
         ),
@@ -550,7 +809,12 @@ def main() -> int:
             None,
         )[0]
 
-    pool_sizes = [VkDescriptorPoolSize(type=VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, descriptorCount=1)]
+    pool_sizes = []
+    if sheet_mode:
+        pool_sizes.append(VkDescriptorPoolSize(type=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount=1))
+        pool_sizes.append(VkDescriptorPoolSize(type=VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, descriptorCount=2))
+    else:
+        pool_sizes.append(VkDescriptorPoolSize(type=VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, descriptorCount=1))
     max_sets = 1
     if window:
         pool_sizes.append(
@@ -598,16 +862,59 @@ def main() -> int:
             ),
         )[0]
 
-    writes = [
-        VkWriteDescriptorSet(
-            sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            dstSet=compute_set,
-            dstBinding=0,
-            descriptorCount=1,
-            descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-            pImageInfo=[VkDescriptorImageInfo(imageView=compute_view, imageLayout=VK_IMAGE_LAYOUT_GENERAL)],
+    writes = []
+    if sheet_mode:
+        writes.append(
+            VkWriteDescriptorSet(
+                sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                dstSet=compute_set,
+                dstBinding=0,
+                descriptorCount=1,
+                descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                pBufferInfo=[
+                    VkDescriptorBufferInfo(
+                        buffer=sheet_buffer,
+                        offset=0,
+                        range=sheet_size,
+                    )
+                ],
+            )
         )
-    ]
+        writes.append(
+            VkWriteDescriptorSet(
+                sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                dstSet=compute_set,
+                dstBinding=1,
+                descriptorCount=1,
+                descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                pImageInfo=[
+                    VkDescriptorImageInfo(imageView=accum_view, imageLayout=VK_IMAGE_LAYOUT_GENERAL)
+                ],
+            )
+        )
+        writes.append(
+            VkWriteDescriptorSet(
+                sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                dstSet=compute_set,
+                dstBinding=2,
+                descriptorCount=1,
+                descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                pImageInfo=[
+                    VkDescriptorImageInfo(imageView=compute_view, imageLayout=VK_IMAGE_LAYOUT_GENERAL)
+                ],
+            )
+        )
+    else:
+        writes.append(
+            VkWriteDescriptorSet(
+                sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                dstSet=compute_set,
+                dstBinding=0,
+                descriptorCount=1,
+                descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                pImageInfo=[VkDescriptorImageInfo(imageView=compute_view, imageLayout=VK_IMAGE_LAYOUT_GENERAL)],
+            )
+        )
     if window:
         writes.append(
             VkWriteDescriptorSet(
@@ -678,6 +985,50 @@ def main() -> int:
     frame = 0
     start = time.time()
     while (not window or not glfw.window_should_close(window)) and frame < args.frames:
+        now = time.monotonic()
+        capture_frame = False
+        if record_enabled and record_interval is not None:
+            if now >= record_next_time:
+                capture_frame = True
+                while record_next_time <= now:
+                    record_next_time += record_interval
+        if sheet_mode and sheet_data_path is not None and sheet_reload_interval >= 0.0:
+            if now >= sheet_last_reload + sheet_reload_interval:
+                sheet_last_reload = now
+                try:
+                    if not sheet_data_path.exists():
+                        continue
+                    stat = sheet_data_path.stat()
+                    mtime = stat.st_mtime
+                    if mtime > sheet_data_mtime:
+                        arr = np.load(sheet_data_path)
+                        if arr.ndim == 2:
+                            if arr.shape != (sheet_h, sheet_w):
+                                try:
+                                    arr = _stretch_sheet_values(arr, (sheet_h, sheet_w))
+                                except ValueError as exc:
+                                    print(
+                                        f"warning: cannot stretch sheet data from {arr.shape}: {exc}",
+                                        file=sys.stderr,
+                                    )
+                                    continue
+                            sheet_data_values = arr.astype(np.float32)
+                            sheet_data_mtime = mtime
+                        else:
+                            print(
+                                f"warning: {sheet_data_path} is not 2D; ignoring",
+                                file=sys.stderr,
+                            )
+                    #
+                except Exception as exc:
+                    print(f"warning: failed to reload sheet data: {exc}", file=sys.stderr)
+        if sheet_mode:
+            phase = frame * 0.15
+            if sheet_data_values is not None:
+                sheet_data[:] = sheet_data_values.ravel()
+            else:
+                values = 0.5 + 0.5 * np.sin(phase + sheet_base * 0.2)
+                sheet_data[:] = values.ravel()
         if window:
             glfw.poll_events()
             image_index = acquire_next_image(
@@ -717,16 +1068,125 @@ def main() -> int:
                 1,
                 [to_general],
             )
+            if sheet_mode:
+                to_general_accum = VkImageMemoryBarrier(
+                    sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                    srcAccessMask=0,
+                    dstAccessMask=VK_ACCESS_SHADER_WRITE_BIT,
+                    oldLayout=VK_IMAGE_LAYOUT_UNDEFINED,
+                    newLayout=VK_IMAGE_LAYOUT_GENERAL,
+                    image=accum_image,
+                    subresourceRange=VkImageSubresourceRange(
+                        aspectMask=VK_IMAGE_ASPECT_COLOR_BIT,
+                        baseMipLevel=0,
+                        levelCount=1,
+                        baseArrayLayer=0,
+                        layerCount=1,
+                    ),
+                )
+                vkCmdPipelineBarrier(
+                    cmd,
+                    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    0,
+                    0,
+                    None,
+                    0,
+                    None,
+                    1,
+                    [to_general_accum],
+                )
+                clear = VkClearColorValue(float32=[0.0, 0.0, 0.0, 0.0])
+                vkCmdClearColorImage(
+                    cmd,
+                    accum_image,
+                    VK_IMAGE_LAYOUT_GENERAL,
+                    clear,
+                    1,
+                    [VkImageSubresourceRange(
+                        aspectMask=VK_IMAGE_ASPECT_COLOR_BIT,
+                        baseMipLevel=0,
+                        levelCount=1,
+                        baseArrayLayer=0,
+                        layerCount=1,
+                    )],
+                )
 
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline)
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compute_layout, 0, 1, [compute_set], 0, None)
-        pc_data = ffi.new("uint32_t[]", [frame])
-        vkCmdPushConstants(cmd, compute_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, pc_data)
+        if sheet_mode:
+            pc_data = struct.pack(
+                "<5I3fI",
+                sheet_w,
+                sheet_h,
+                width,
+                height,
+                args.block_px,
+                float(args.alpha),
+                float(args.vmin),
+                float(args.vmax),
+                0 if args.no_clamp else 1,
+            )
+            pc_ptr = ffi.new("char[]", pc_data)
+            vkCmdPushConstants(cmd, compute_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, len(pc_data), pc_ptr)
+        else:
+            pc_data = ffi.new("uint32_t[]", [frame])
+            vkCmdPushConstants(cmd, compute_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, pc_data)
         vkCmdDispatch(cmd, (width + 15) // 16, (height + 15) // 16, 1)
+        if capture_frame:
+            to_transfer = VkImageMemoryBarrier(
+                sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT,
+                dstAccessMask=VK_ACCESS_TRANSFER_READ_BIT,
+                oldLayout=VK_IMAGE_LAYOUT_GENERAL,
+                newLayout=VK_IMAGE_LAYOUT_GENERAL,
+                image=compute_image,
+                subresourceRange=VkImageSubresourceRange(
+                    aspectMask=VK_IMAGE_ASPECT_COLOR_BIT,
+                    baseMipLevel=0,
+                    levelCount=1,
+                    baseArrayLayer=0,
+                    layerCount=1,
+                ),
+            )
+            vkCmdPipelineBarrier(
+                cmd,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                0,
+                0,
+                None,
+                0,
+                None,
+                1,
+                [to_transfer],
+            )
+            vkCmdCopyImageToBuffer(
+                cmd,
+                compute_image,
+                VK_IMAGE_LAYOUT_GENERAL,
+                record_buffer,
+                1,
+                [
+                    VkBufferImageCopy(
+                        bufferOffset=0,
+                        bufferRowLength=0,
+                        bufferImageHeight=0,
+                        imageSubresource=VkImageSubresourceLayers(
+                            aspectMask=VK_IMAGE_ASPECT_COLOR_BIT,
+                            mipLevel=0,
+                            baseArrayLayer=0,
+                            layerCount=1,
+                        ),
+                        imageOffset=VkOffset3D(0, 0, 0),
+                        imageExtent=VkExtent3D(width=width, height=height, depth=1),
+                    )
+                ],
+            )
         if window:
             to_sample = VkImageMemoryBarrier(
                 sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-                srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT,
+                srcAccessMask=VK_ACCESS_TRANSFER_READ_BIT if capture_frame else VK_ACCESS_SHADER_WRITE_BIT,
                 dstAccessMask=VK_ACCESS_SHADER_READ_BIT,
                 oldLayout=VK_IMAGE_LAYOUT_GENERAL,
                 newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -832,11 +1292,21 @@ def main() -> int:
             )
             vkQueueSubmit(queue, 1, [submit], VK_NULL_HANDLE)
         vkQueueWaitIdle(queue)
+        if capture_frame and record_proc and record_proc.stdin:
+            try:
+                record_proc.stdin.write(record_view)
+            except BrokenPipeError:
+                record_enabled = False
 
         frame += 1
         if frame % 60 == 0:
             fps = frame / max(1e-6, time.time() - start)
             print(f"frame {frame} fps {fps:.2f}")
+
+    if record_proc:
+        if record_proc.stdin:
+            record_proc.stdin.close()
+        record_proc.wait()
 
     vkDeviceWaitIdle(device)
 
@@ -865,6 +1335,26 @@ def main() -> int:
     vkDestroyShaderModule(device, compute_module, None)
     if sampler:
         vkDestroySampler(device, sampler, None)
+    if sheet_mode:
+        if sheet_mapped is not None:
+            vkUnmapMemory(device, sheet_memory)
+        if accum_view:
+            vkDestroyImageView(device, accum_view, None)
+        if accum_image:
+            vkDestroyImage(device, accum_image, None)
+        if accum_memory:
+            vkFreeMemory(device, accum_memory, None)
+        if sheet_buffer:
+            vkDestroyBuffer(device, sheet_buffer, None)
+        if sheet_memory:
+            vkFreeMemory(device, sheet_memory, None)
+    if record_buffer is not None:
+        if record_mapped is not None:
+            vkUnmapMemory(device, record_memory)
+        if record_buffer:
+            vkDestroyBuffer(device, record_buffer, None)
+        if record_memory:
+            vkFreeMemory(device, record_memory, None)
     vkDestroyImageView(device, compute_view, None)
     vkDestroyImage(device, compute_image, None)
     vkFreeMemory(device, compute_memory, None)
