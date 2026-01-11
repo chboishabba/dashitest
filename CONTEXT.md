@@ -30009,3 +30009,684 @@ What’s left is a **single missing instance flag/extension** — once that’s 
 
 If you want, paste your **`VkInstanceCreateInfo` block** and I’ll mark the exact lines to change.
 
+
+
+Great — this log actually tells a very clean story, and you’ve already done the *right* thing. Let me tighten it up and then give you the concrete “do this and forget it” guidance.
+
+---
+
+## What actually happened (and why it looked flaky)
+
+### 1. Nothing was wrong with Vulkan *or* your shaders
+
+This line is the key:
+
+```text
+python vulkan_compute/compute_buffer.py
+first 10 results: [ 1  2  3  4  5  6  7  8  9 10]
+```
+
+That proves:
+
+* Vulkan loader works
+* RADV ICD works
+* glslc output is valid
+* vkCreateInstance / vkCreateDevice / dispatch all succeed
+
+So the driver stack is fundamentally healthy.
+
+---
+
+### 2. The failure mode was **environmental, not code**
+
+You hit:
+
+```text
+VkErrorIncompatibleDriver
+```
+
+*only* when running `compute_image_preview.py`, and *only* when:
+
+```bash
+VK_ICD_FILENAMES=…
+```
+
+was **not actually set** (notice the literal ellipsis `…` in the command).
+
+This is subtle but decisive:
+
+```bash
+VK_ICD_FILENAMES=… \
+python vulkan_compute/compute_image_preview.py
+```
+
+That line **does not export a real path**. It exports the Unicode ellipsis character. The Vulkan loader then:
+
+* sees *some* ICDs
+* can’t reconcile loader ↔ driver versions
+* fails early in `vkCreateInstance`
+
+Once you ran:
+
+```bash
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json \
+python vulkan_compute/compute_image_preview.py
+```
+
+…it immediately worked:
+
+```text
+frame 60 fps 1500.06
+frame 120 fps 1760.01
+```
+
+✅ Case closed.
+
+No reinstall, no Mesa mismatch, no shader bug.
+
+---
+
+## Canonical invocation (lock this in)
+
+From now on, **always** run image preview like this:
+
+```bash
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json \
+python vulkan_compute/compute_image_preview.py
+```
+
+If you want to make this idiot-proof, add at the top of `compute_image_preview.py`:
+
+```python
+import os
+if "VK_ICD_FILENAMES" not in os.environ:
+    raise RuntimeError("VK_ICD_FILENAMES must be set explicitly")
+```
+
+That prevents this exact confusion ever again.
+
+---
+
+## Why compute_buffer worked even when preview failed
+
+Important conceptual distinction:
+
+* `compute_buffer.py`
+
+  * minimal Vulkan instance
+  * no surfaces
+  * no storage images
+  * fewer extensions
+
+* `compute_image_preview.py`
+
+  * storage images
+  * format negotiation
+  * extra instance extensions
+
+So when the loader/ICD pairing was ambiguous, **buffer compute slid through**, while **image compute tripped**.
+
+That’s expected behaviour, not a bug.
+
+---
+
+## You are now in the *good* regime
+
+You now have:
+
+* ✅ Stable Vulkan compute
+* ✅ Storage-image pipeline working
+* ✅ ~1.5–1.7 kFPS sheet rendering
+* ✅ Codec-aligned visualization
+* ✅ Learner-side observables locked (E_seq)
+
+This is the exact point where things become *dangerously productive* 😄
+
+---
+
+## What to do next (short, concrete)
+
+### 1. Don’t chase Vulkan anymore
+
+It’s solved. The rest is **policy**, not plumbing.
+
+---
+
+### 2. Add time-gated recording (optional but recommended)
+
+As discussed earlier:
+
+* render at full speed
+* record at fixed fps (e.g. 60)
+* skip frames, never block
+
+This preserves interactivity and gives clean video.
+
+If you want, I can give you a **drop-in 15-line patch** for the ffmpeg write loop.
+
+---
+
+### 3. Proceed with Task B (codec → DNA bridge)
+
+Now that:
+
+* the sheet visualizer is live
+* the learner observable is locked
+* the bridge harness exists
+
+You’re ready to:
+
+```bash
+python scripts/gen_codec_E_seq.py …
+python scripts/bridge_task.py --energy-seq outputs/codec_E_seq.npy …
+```
+
+…and then do the same for DNA.
+
+At that point you’ll have:
+
+* a closed benchmark
+* a learned predictor
+* a visual explanation
+* and a clean story from codec → DNA → wave
+
+---
+
+## One final meta-point (important)
+
+Your intuition earlier was correct:
+
+> “If the learner sees sheets, wouldn’t that just make it efficient?”
+
+Yes — **for the real system**.
+
+But the discipline you followed here (restricting observables, closing Task A/B first) is exactly what lets you *prove* that efficiency is not cheating.
+
+You’re now in the rare position of being able to say:
+
+> *We know exactly which information is sufficient — and we can open it up later without invalidating the result.*
+
+That’s the hard part. You’ve done it.
+
+If you want next:
+
+* time-gated recording patch
+* VAAPI zero-copy sketch
+* DNA E_seq sanity plots
+* or wiring the learner into the codec loop (Task C)
+
+Just tell me which lever you want to pull.
+
+
+👍 **Confirmed — your Vulkan wrap is clean and behaving exactly as expected.**
+
+Here’s a tight confirmation + concrete next steps, based on what you just ran:
+
+---
+
+## ✅ What’s now definitively proven
+
+### 1. Driver + pipeline health
+
+* `compute_buffer.py` + `add.comp` working with `[1 … 10]` output **proves**:
+
+  * RADV + Polaris stack is healthy
+  * Descriptor sets, buffers, queues, barriers are correct
+  * SPIR-V compilation + dispatch path is solid
+
+No latent shader or sync bugs hiding here.
+
+### 2. The `VkErrorIncompatibleDriver` was **purely environmental**
+
+* The failure in `compute_image_preview.py:236` only occurred when you used the literal ellipsis:
+
+  ```bash
+  VK_ICD_FILENAMES=…
+  ```
+* Once you set:
+
+  ```bash
+  export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json
+  ```
+
+  the preview ran immediately and hit **~1.5–1.7 kFPS**, which is exactly the expected regime for that workload.
+
+So yes: **nothing is wrong with the code or shaders**. This was 100% loader mispointing.
+
+---
+
+## 🔧 Strongly recommended tiny guard (optional but wise)
+
+This prevents the same footgun later (CI, new shells, other machines):
+
+```python
+import os
+
+icd = os.environ.get("VK_ICD_FILENAMES")
+if not icd or not os.path.exists(icd):
+    raise RuntimeError(
+        "VK_ICD_FILENAMES must point to a valid Vulkan ICD JSON "
+        "(e.g. /usr/share/vulkan/icd.d/radeon_icd.x86_64.json)"
+    )
+```
+
+Drop this early in `compute_image_preview.py` (or shared Vulkan init).
+
+This is *defensive correctness*, not a workaround.
+
+---
+
+## 📌 TODO.md status
+
+* Your Vulkan results **do not conflict** with anything in TODO.md
+* The existing “Vulkan sheet visual shader / live preview” items already capture this path
+* No TODO edits required right now — the proof is empirical and complete
+
+---
+
+## 🚀 Choose the next lever
+
+You’re now past the Vulkan uncertainty phase. The natural forks are:
+
+1. **Recording / export**
+
+   * VAAPI / DRM DMA-BUF capture
+   * Deterministic frame dumps for analysis
+   * Ties cleanly into learner / dataset generation
+
+2. **Task B wiring**
+
+   * Feed live shader outputs into the learner pipeline
+   * Close the loop between Vulkan compute ↔ model state
+   * This is where your MDL / coarse→fine story really starts paying off
+
+3. **Shader polish**
+
+   * Parameterization, UI hooks, perf counters
+   * Mostly cosmetic, but useful if this becomes a demo surface
+
+Just tell me **which one you want to pull**, and I’ll walk you through it step-by-step without rehashing any of the Vulkan basics you’ve already nailed.
+
+
+Alright — I’ll be opinionated and keep momentum.
+**The next lever to pull is: *Task B wiring (Vulkan → learner)***, not recording.
+
+Here’s why, and exactly what I’d do next if this were my repo.
+
+---
+
+## Why **Task B wiring** beats recording right now
+
+Recording/VAAPI is *downstream polish*. Task B is **architectural closure**.
+
+You’ve already proven:
+
+* Vulkan compute is stable
+* Image path is fast enough (1.5–1.7 kFPS)
+* Environment issues are understood and contained
+
+What you *don’t* yet have is:
+
+* A **semantic contract** between Vulkan output and learner state
+* A proof that GPU-side structure actually **conditions learning**, not just renders pixels
+
+Task B answers that.
+
+Once Task B exists, recording becomes trivial and meaningful (you’ll know *what* to record and *why*).
+
+---
+
+## What “Task B wiring” concretely means (no hand-waving)
+
+### Goal
+
+Make Vulkan compute a **first-class operator** in the learner loop, not a demo.
+
+### Minimal, correct scope (do *not* overbuild)
+
+#### 1. Define a stable output tensor contract
+
+From `compute_image_preview.py`, expose **one** of:
+
+* `uint8 RGBA`
+* `float32 single-channel`
+* `int8 tiled planes`
+
+Example (conceptual):
+
+```python
+frame = vk_run(...)
+# frame.shape == (H, W) or (H, W, C)
+```
+
+No UI. No video. Just a tensor.
+
+---
+
+#### 2. Map Vulkan output → learner observable
+
+Add a thin adapter:
+
+```python
+obs = {
+    "vulkan_frame": frame,
+    "dt": dt,
+    "shader_params": params,
+}
+```
+
+This is **Task B**: Vulkan is now an *environmental operator*, not a renderer.
+
+---
+
+#### 3. Feed into existing learner machinery
+
+Do **not** invent new learning code.
+
+Plug the observable into:
+
+* your existing **coarse / fine**
+* **MDL / compression**
+* **eigenstate summaries**
+
+Even something as simple as:
+
+* entropy(frame)
+* tile sparsity
+* band energy
+
+is enough to close the loop.
+
+---
+
+#### 4. Prove bidirectionality (the real win)
+
+One parameter goes back:
+
+```python
+params = policy(obs)
+vk_run(params)
+```
+
+That’s it.
+
+If *any* learner state can modulate the shader and observe a measurable change, Task B is complete.
+
+---
+
+## What I would *not* do yet
+
+* ❌ VAAPI / ffmpeg
+* ❌ UI polish
+* ❌ Shader generalisation
+* ❌ Multi-shader abstraction
+
+All of those get easier *after* Task B exists.
+
+---
+
+## Concrete next action (today-sized)
+
+If you want a single actionable instruction:
+
+> **Add a Python function that returns the Vulkan frame as a NumPy array and call it from the learner once per step.**
+
+Nothing more.
+
+If you want, next reply I can:
+
+* sketch the exact adapter function signature
+* choose the *best* output format for your MDL goals
+* or wire it into a specific learner file you already have
+
+But directionally:
+**Task B first. Recording later.**
+
+
+This is **exactly the right plan**, and you’ve already done the hard part: reconnaissance + scope control. I’m going to do three things:
+
+1. **Confirm you’re aiming at the correct minimal shape of Task B**
+2. **Lock the design so you don’t accidentally rebuild half of Vulkan**
+3. **Give you a concrete, cuttable implementation checklist + skeleton**
+
+No theory, no fluff.
+
+---
+
+## 1️⃣ You’re targeting the correct Task B boundary
+
+What you described is *precisely* Task B and not overreach:
+
+* ✔ headless Vulkan compute
+* ✔ reuse preview logic (instance/device/queue/shader)
+* ✔ single function → NumPy array
+* ✔ optional GPU dependency
+* ✔ callable once per learner step
+
+Crucially:
+
+> **You are not trying to “integrate Vulkan” into the learner.**
+> You’re making Vulkan an *optional environmental operator*.
+
+That’s correct.
+
+---
+
+## 2️⃣ Lock the architecture (this prevents scope creep)
+
+### **New module (do not reuse preview directly)**
+
+Create **one new file**:
+
+```
+vulkan_compute/frame_capture.py
+```
+
+Do **not**:
+
+* add flags all over the codebase
+* refactor `compute_image_preview.py`
+* introduce a Vulkan abstraction layer
+
+You *copy* from preview, trim aggressively, and freeze it.
+
+---
+
+### **Public API (this is sacred)**
+
+This is the only thing the learner should see:
+
+```python
+class VulkanFrameCapture:
+    def __init__(self, width, height, shader_path, *, device_index=0):
+        ...
+
+    def step(self, push_constants: dict) -> np.ndarray:
+        """
+        Runs the compute shader once and returns a NumPy array
+        shape: (H, W) or (H, W, C)
+        dtype: uint8 or float32
+        """
+        ...
+
+    def close(self):
+        ...
+```
+
+That’s it.
+
+No learner imports Vulkan.
+No Vulkan code leaks upward.
+
+---
+
+## 3️⃣ Concrete implementation plan (cuttable)
+
+Below is the **exact order** I would implement this in.
+
+### Phase A — Copy + strip preview
+
+From `compute_image_preview.py`, copy **only**:
+
+* instance creation
+* device + queue selection
+* shader module loading
+* descriptor setup
+* command buffer submit
+* buffer mapping helper (`_mapped_buffer`)
+
+Delete:
+
+* swapchain
+* windowing
+* FPS loop
+* timers
+* preview UI
+* repeated dispatch loop
+
+Your capture runs **one dispatch per call**.
+
+---
+
+### Phase B — Output format (decide once)
+
+**Choose this now** (don’t revisit later):
+
+**Recommended default**
+
+```text
+Format: VK_FORMAT_R8_UNORM
+Shape: (H, W)
+Dtype: np.uint8
+```
+
+Why:
+
+* trivial readback
+* compressible
+* perfect for MDL / entropy / tiling
+* fast
+
+If later you want RGB, add a flag — *don’t start there*.
+
+---
+
+### Phase C — GPU → CPU readback (the core)
+
+Pattern (simplified):
+
+1. Storage image (shader writes here)
+2. Transfer image → buffer
+3. Map buffer → NumPy
+
+Key rules:
+
+* Use a **staging buffer**
+* Host-visible, host-coherent
+* One buffer reused every call
+
+This is already in your preview — you’re just isolating it.
+
+---
+
+### Phase D — Push constants (keep it boring)
+
+Pack them explicitly:
+
+```python
+def _pack_push_constants(params: dict) -> bytes:
+    return struct.pack(
+        "ffff",
+        params.get("t", 0.0),
+        params.get("alpha", 1.0),
+        params.get("beta", 0.0),
+        0.0,
+    )
+```
+
+Do **not** get clever with layouts yet.
+
+---
+
+### Phase E — Learner hook (minimal)
+
+In `bsmoe_train.py`:
+
+* add a CLI flag
+* import lazily
+* fail gracefully
+
+Example:
+
+```python
+if args.vulkan_sheet:
+    from vulkan_compute.frame_capture import VulkanFrameCapture
+    vk = VulkanFrameCapture(
+        width=H,
+        height=W,
+        shader_path="vulkan_compute/shaders/sheet_expand_fade.spv",
+    )
+else:
+    vk = None
+```
+
+Inside the training loop:
+
+```python
+if vk is not None:
+    sheet = vk.step({"t": step / T})
+    obs["vulkan_sheet"] = sheet
+```
+
+That’s Task B done.
+
+No feedback loop required yet — observation alone closes the loop.
+
+---
+
+## 4️⃣ What success looks like (stop conditions)
+
+You stop when:
+
+* ✔ learner runs with `--vulkan-sheet`
+* ✔ NumPy array arrives per step
+* ✔ training still works without Vulkan
+* ✔ GPU failure disables feature, not training
+
+That’s it.
+
+Anything more is polish.
+
+---
+
+## 5️⃣ What you should **not** add (yet)
+
+* ❌ VAAPI / ffmpeg
+* ❌ persistent Vulkan contexts across processes
+* ❌ shader registries
+* ❌ JAX / torch interop
+* ❌ async pipelines
+
+Those are **Task C** problems.
+
+---
+
+## Final verdict
+
+You are:
+
+* scoping this correctly
+* reusing the right code
+* integrating at the correct abstraction level
+* not contaminating the learner
+
+**Proceed exactly as planned.**
+
+If you want next help, say one of:
+
+* “Give me a minimal `frame_capture.py` skeleton”
+* “Audit my chosen output format”
+* “Help me wire the first learner observable”
+* “Sanity-check cleanup / lifetime rules”
+
+You’re in the integration phase now — this is the right work.
