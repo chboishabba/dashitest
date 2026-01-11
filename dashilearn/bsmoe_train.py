@@ -85,10 +85,28 @@ def _sheet_values_for_capture(
     if sheet_energy.size == 0:
         return np.zeros((sheet_h, sheet_w), dtype=np.float32)
     sheet = np.zeros((sheet_h, sheet_w), dtype=np.float32)
-    i = epoch % sheet_h
-    j = (epoch // sheet_h) % sheet_w
+    i, j = _semantic_tile_coord(epoch, sheet_h, sheet_w)
     sheet[i, j] = np.clip(gate_density, 0.0, 1.0)
     return sheet
+
+
+def _semantic_tile_coord(epoch: int, sheet_h: int, sheet_w: int) -> tuple[int, int]:
+    if sheet_h <= 0 or sheet_w <= 0:
+        return 0, 0
+    i = epoch % sheet_h
+    j = (epoch // sheet_h) % sheet_w
+    return i, j
+
+
+def _tile_block_mean(frame: np.ndarray, tile_i: int, tile_j: int, block_px: int) -> float:
+    height, width = frame.shape[:2]
+    y0 = tile_i * block_px
+    y1 = min(y0 + block_px, height)
+    x0 = tile_j * block_px
+    x1 = min(x0 + block_px, width)
+    if y1 <= y0 or x1 <= x0:
+        return 0.0
+    return float(frame[y0:y1, x0:x1].mean())
 
 
 def make_data(M=256, K=256, N=256, tiles_active=0.5, tile=32, seed=0):
@@ -375,6 +393,7 @@ def main():
     t_fused = bench(lambda: fused_sequence(X, W, plan, microkernel=vnni_microkernel))
     sheet_energy = tile_energy_map(C_ref, plan)
     dump_sheet_energy(sheet_energy)
+    block_px = max(1, args.vulkan_block_px)
     vulkan_capture = None
     if args.capture_vulkan:
         try:
@@ -383,14 +402,14 @@ def main():
             if args.vk_icd:
                 os.environ["VK_ICD_FILENAMES"] = str(args.vk_icd)
             sheet_h, sheet_w = plan.tile_grid_shape
-            width = sheet_w * args.vulkan_block_px
-            height = sheet_h * args.vulkan_block_px
+            width = sheet_w * block_px
+            height = sheet_h * block_px
             vulkan_capture = VulkanFrameCapture(
                 width=width,
                 height=height,
                 sheet_w=sheet_w,
                 sheet_h=sheet_h,
-                block_px=args.vulkan_block_px,
+                block_px=block_px,
                 alpha=args.vulkan_alpha,
                 vmin=args.vulkan_vmin,
                 vmax=args.vulkan_vmax,
@@ -414,9 +433,12 @@ def main():
             thr = VULKAN_CAPTURE_THRESHOLD
             frac_above_thr = (frame > thr).mean()
             max_val = float(frame.max())
+            tile_i, tile_j = _semantic_tile_coord(0, sheet_h, sheet_w)
+            tile_mean = _tile_block_mean(frame, tile_i, tile_j, block_px)
             print(
                 "Initial Vulkan frame captured:",
                 frame.shape,
+                f"tile=({tile_i},{tile_j}) local_mean={tile_mean:.2f}",
                 f"mean={frame.mean():.2f} std={frame.std():.2f}",
                 f"frac>{thr}={frac_above_thr:.3f}",
                 f"max={max_val:.2f}",
@@ -478,8 +500,11 @@ def main():
                 thr = VULKAN_CAPTURE_THRESHOLD
                 frac_above_thr = (frame > thr).mean()
                 max_val = float(frame.max())
+                tile_i, tile_j = _semantic_tile_coord(e, sheet_h, sheet_w)
+                tile_mean = _tile_block_mean(frame, tile_i, tile_j, block_px)
                 print(
-                    f"Vulkan frame [epoch {e+1}] mean={frame.mean():.2f}",
+                    f"Vulkan frame [epoch {e+1}] tile=({tile_i},{tile_j}) local_mean={tile_mean:.2f}",
+                    f"mean={frame.mean():.2f}",
                     f"std={frame.std():.2f}",
                     f"frac>{thr}={frac_above_thr:.3f}",
                     f"max={max_val:.2f}",
