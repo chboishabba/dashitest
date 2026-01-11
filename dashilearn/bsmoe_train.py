@@ -11,10 +11,21 @@ Block-sparse MoE training demo:
 import argparse
 import time
 import os
+import sys
 import ctypes
 from dataclasses import dataclass
 from pathlib import Path
 import numpy as np
+
+# Ensure repo root is on sys.path so top-level Vulkan helpers import reliably.
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+try:
+    from vulkan_compute.frame_capture import VulkanFrameCapture
+except Exception:
+    VulkanFrameCapture = None
 
 
 def gate_prob_for_tile_density(tile_active, tile):
@@ -37,6 +48,7 @@ def tiles_from_gate_mask(gate_mask, tile=32):
 
 
 SHEET_OUT_PATH = Path(__file__).with_name("sheet_energy.npy")
+VULKAN_CAPTURE_THRESHOLD = 128
 
 
 def tile_energy_map(C, plan):
@@ -58,6 +70,25 @@ def dump_sheet_energy(energy, path=SHEET_OUT_PATH):
     tmp = path.with_suffix(".tmp.npy")
     np.save(tmp, energy)
     tmp.replace(path)
+
+
+def _sheet_values_for_capture(
+    sheet_energy: np.ndarray,
+    *,
+    epoch: int,
+    gate_density: float,
+    sheet_h: int,
+    sheet_w: int,
+) -> np.ndarray:
+    if sheet_h <= 0 or sheet_w <= 0:
+        return np.zeros_like(sheet_energy, dtype=np.float32)
+    if sheet_energy.size == 0:
+        return np.zeros((sheet_h, sheet_w), dtype=np.float32)
+    sheet = np.zeros((sheet_h, sheet_w), dtype=np.float32)
+    i = epoch % sheet_h
+    j = (epoch // sheet_h) % sheet_w
+    sheet[i, j] = np.clip(gate_density, 0.0, 1.0)
+    return sheet
 
 
 def make_data(M=256, K=256, N=256, tiles_active=0.5, tile=32, seed=0):
@@ -294,6 +325,25 @@ def main():
         help="Seconds to keep running after training finishes (writes the last sheet each second)",
     )
     parser.add_argument("--stay-interval", type=float, default=1.0, help="Seconds between sheet refresh while staying open")
+    parser.add_argument(
+        "--capture-vulkan",
+        action="store_true",
+        help="Capture the Vulkan sheet frame once per epoch via the Task B wiring helper",
+    )
+    parser.add_argument("--vulkan-block-px", type=int, default=16, help="Pixels per sheet tile in the captured frame")
+    parser.add_argument("--vulkan-alpha", type=float, default=0.97, help="Sheet fade alpha for Vulkan capture")
+    parser.add_argument("--vulkan-vmin", type=float, default=0.0, help="Minimum sheet value clamp")
+    parser.add_argument("--vulkan-vmax", type=float, default=1.0, help="Maximum sheet value clamp")
+    parser.add_argument(
+        "--vulkan-clamp",
+        action="store_true",
+        help="Clamp sheet values before the Vulkan shader runs",
+    )
+    parser.add_argument(
+        "--vk-icd",
+        type=Path,
+        help="Optional Vulkan ICD JSON used when capturing the frame",
+    )
     args = parser.parse_args()
 
     M = N = K = 256
@@ -323,9 +373,58 @@ def main():
     t_act = bench(lambda: activation_plan(C_ref.copy(), plan, clamp_min=0))
     t_energy = bench(lambda: energy_plan(C_ref, plan))
     t_fused = bench(lambda: fused_sequence(X, W, plan, microkernel=vnni_microkernel))
-    dump_sheet_energy(tile_energy_map(C_ref, plan))
-
+    sheet_energy = tile_energy_map(C_ref, plan)
+    dump_sheet_energy(sheet_energy)
+    vulkan_capture = None
+    if args.capture_vulkan:
+        try:
+            if VulkanFrameCapture is None:
+                raise RuntimeError("vulkan_compute.frame_capture is unavailable")
+            if args.vk_icd:
+                os.environ["VK_ICD_FILENAMES"] = str(args.vk_icd)
+            sheet_h, sheet_w = plan.tile_grid_shape
+            width = sheet_w * args.vulkan_block_px
+            height = sheet_h * args.vulkan_block_px
+            vulkan_capture = VulkanFrameCapture(
+                width=width,
+                height=height,
+                sheet_w=sheet_w,
+                sheet_h=sheet_h,
+                block_px=args.vulkan_block_px,
+                alpha=args.vulkan_alpha,
+                vmin=args.vulkan_vmin,
+                vmax=args.vulkan_vmax,
+                use_clamp=args.vulkan_clamp,
+            )
+        except Exception as exc:
+            print(f"warning: Vulkan frame capture disabled: {exc}", file=sys.stderr)
+            vulkan_capture = None
     active_frac = float(tiles.mean()) if tiles.size else 0.0
+    last_capture_sheet = None
+    if vulkan_capture:
+        try:
+            capture_sheet = _sheet_values_for_capture(
+                sheet_energy,
+                epoch=0,
+                gate_density=active_frac,
+                sheet_h=sheet_h,
+                sheet_w=sheet_w,
+            )
+            frame = vulkan_capture.capture(capture_sheet)
+            thr = VULKAN_CAPTURE_THRESHOLD
+            frac_above_thr = (frame > thr).mean()
+            max_val = float(frame.max())
+            print(
+                "Initial Vulkan frame captured:",
+                frame.shape,
+                f"mean={frame.mean():.2f} std={frame.std():.2f}",
+                f"frac>{thr}={frac_above_thr:.3f}",
+                f"max={max_val:.2f}",
+            )
+            last_capture_sheet = capture_sheet
+        except Exception as exc:
+            print(f"warning: failed to capture initial Vulkan frame: {exc}", file=sys.stderr)
+
     print("Block-sparse MoE-style matmul")
     print(f"M=N=K={M}, active tiles ~{active_frac*100:.1f}% (target {tile_active*100:.1f}%)")
     print(f"dense matmul      : {t_dense:6.2f} ms/call")
@@ -365,6 +464,29 @@ def main():
         )
         sheet_energy = tile_energy_map(C, plan)
         dump_sheet_energy(sheet_energy)
+        if vulkan_capture:
+            try:
+                gate_density = float(tiles.mean()) if tiles.size else 0.0
+                capture_sheet = _sheet_values_for_capture(
+                    sheet_energy,
+                    epoch=e,
+                    gate_density=gate_density,
+                    sheet_h=sheet_h,
+                    sheet_w=sheet_w,
+                )
+                frame = vulkan_capture.capture(capture_sheet)
+                thr = VULKAN_CAPTURE_THRESHOLD
+                frac_above_thr = (frame > thr).mean()
+                max_val = float(frame.max())
+                print(
+                    f"Vulkan frame [epoch {e+1}] mean={frame.mean():.2f}",
+                    f"std={frame.std():.2f}",
+                    f"frac>{thr}={frac_above_thr:.3f}",
+                    f"max={max_val:.2f}",
+                )
+                last_capture_sheet = capture_sheet
+            except Exception as exc:
+                print(f"warning: Vulkan capture failed at epoch {e+1}: {exc}", file=sys.stderr)
     print(f"plan_hit_rate     : {plan_hits}/{epochs}")
     if args.stay_open > 0:
         stay_interval = max(0.01, args.stay_interval)
@@ -372,7 +494,14 @@ def main():
         print(f"staying open for {args.stay_open:.1f}s (refresh every {stay_interval:.2f}s)")
         while time.time() < end_time:
             dump_sheet_energy(sheet_energy)
+            if vulkan_capture and last_capture_sheet is not None:
+                try:
+                    vulkan_capture.capture(last_capture_sheet)
+                except Exception:
+                    pass
             time.sleep(stay_interval)
+    if vulkan_capture:
+        vulkan_capture.close()
 
 
 if __name__ == "__main__":

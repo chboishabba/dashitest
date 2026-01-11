@@ -52,14 +52,18 @@ def _find_memory_type(
 
 
 def _mapped_buffer(mapped: object, size: int, dtype: np.dtype) -> np.ndarray:
+    """
+    Create a NumPy view over mapped memory without double-wrapping ffi buffers.
+    """
     try:
-        return np.frombuffer(mapped, dtype=dtype, count=size // np.dtype(dtype).itemsize)
-    except (TypeError, ValueError):
+        buf = memoryview(mapped)
+    except TypeError:
         try:
             buf = ffi.buffer(mapped, size)
         except (TypeError, ValueError) as exc:
             raise TypeError(f"Unsupported mapped buffer type: {type(mapped)}") from exc
-        return np.frombuffer(buf, dtype=dtype, count=size // np.dtype(dtype).itemsize)
+    count = size // np.dtype(dtype).itemsize
+    return np.frombuffer(buf, dtype=dtype, count=count)
 
 
 class VulkanFrameCapture:
@@ -666,8 +670,8 @@ class VulkanFrameCapture:
         if self._record_memory_range is not None:
             vkInvalidateMappedMemoryRanges(self._device, 1, [self._record_memory_range])
 
-        buf = ffi.buffer(self._record_mapped, self._record_size)
-        frame = np.frombuffer(buf, dtype=np.uint8).copy()
+        buf = memoryview(self._record_mapped)
+        frame = np.frombuffer(buf, dtype=np.uint8, count=self._record_size).copy()
         return frame.reshape(self.height, self.width, 4)
 
     def _write_sheet(self, values: np.ndarray) -> None:

@@ -126,14 +126,18 @@ def _timestamped_path(path: Path) -> Path:
 
 
 def _mapped_buffer(mapped: object, size: int, dtype: np.dtype) -> np.ndarray:
+    """
+    Create a NumPy view over mapped Vulkan memory without rebinding an ffi buffer.
+    """
     try:
-        return np.frombuffer(mapped, dtype=dtype, count=size // np.dtype(dtype).itemsize)
-    except (TypeError, ValueError):
+        buf = memoryview(mapped)
+    except TypeError:
         try:
             buf = ffi.buffer(mapped, size)
         except (TypeError, ValueError) as exc:
             raise TypeError(f"Unsupported mapped buffer type: {type(mapped)}") from exc
-        return np.frombuffer(buf, dtype=dtype, count=size // np.dtype(dtype).itemsize)
+    count = size // np.dtype(dtype).itemsize
+    return np.frombuffer(buf, dtype=dtype, count=count)
 
 
 def _stretch_sheet_values(arr: np.ndarray, target_shape: tuple[int, int]) -> np.ndarray:
