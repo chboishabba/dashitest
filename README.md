@@ -32,6 +32,7 @@
 - `accept_persistence.png`: Generated plot asset (accept persistence).
 - `balanced_pn_iter_bench.py`: Benchmark for balanced P/N iterative add loops.
 - `dashilearn/bsmoe_train.py`: Training script for block-sparse MoE models with gate masks, tile-plan reuse across fused ops, plan caching across epochs, and band-energy exports to `dashilearn/sheet_energy.npy` for the visualiser; supports `--epochs` and `--stay-open` so you can keep the run alive for the preview (see `CONTEXT.md#L18720`, `CONTEXT.md#L21231`, and `CONTEXT.md#L20482`).
+- `dashilearn/bsmoe_train.py`: Training script for block-sparse MoE models with gate masks, tile-plan reuse across fused ops, plan caching across epochs, and band-energy exports to `dashilearn/sheet_energy.npy` for the visualiser; supports `--epochs` and `--stay-open` so you can keep the run alive for the preview (see `CONTEXT.md#L18720`, `CONTEXT.md#L21231`, and `CONTEXT.md#L20482`). Added `--plan-hit-experiment` with `--plan-hit-block-size`/`--plan-hit-perms`, `--observer-class` (scalar/corr), and richer regime controls (`--regime-mode`, `--gate-density-bins`, `--regime-alternation-interval`) so you can exercise the Stage A/B observer tests described around `CONTEXT.md#L32387-L34282` and print regime stats + entropy for every run.
 - `dashilearn/run_live_sheet.sh`: Helpers to launch the learner + Vulkan preview with recording so the sheet data gets produced and consumed automatically.
 - `block_sparse_tile_driver.py`: Driver for block-sparse tile experiments.
 - `ca_Figure_1.png`: Generated CA figure asset.

@@ -132,6 +132,19 @@
   - MoE: histogram-based gradients directly from packed tokens (per expert, per lane counts), no unpacked view.
   - CA: histogram-weighted trainer is in place; add packed feature counting and (optionally) symbolic rule extractor.
 
+- **Plan-hit observability experiment**
+  - Run `dashilearn/bsmoe_train.py --plan-hit-experiment --epochs <n> --plan-hit-block-size <b>` with enough `plan_hit=0` epochs to give the blocked permutation test power (`CONTEXT.md#L32897`).
+  - Record Stage B permutation p-values (and the best tile statistic) so we know whether the spatial encoding is distinguishable beyond the privileged `(tile_i, tile_j)` probe mentioned around `CONTEXT.md#L32387`.
+  - If the blind observer fails, note why (lack of samples, failure to saturate plan hits, etc.) and document the experiment results for future reference.
+- **Plan-regime observability experiment**
+  - Use `--regime-mode gate-density` or `--regime-mode alternating` (with `--gate-density-threshold`/`--regime-alternation-interval`) to create a non-degenerate regime for Stage B, then rerun the experiment to validate whether the spatial field encodes those regimes.
+  - Compare the Stage B p-value between `plan-hit` vs `gate-density` runs to see if true spatial decoding is possible once the label stops collapsing to a constant, and log the `Regime stats` counts + entropy (`CONTEXT.md#L34081-L34282`).
+  - Expand the regime via `--gate-density-bins` (or the alternating control) so H(R)>0 before Stage B executes, then explore B1 correlation-based features (and fixed kernels later) to see whether the observer still cannot decode the regime.
+  - Prototype learner-aligned regimes: add `--regime-mode plan-phase` (stable plan reuse) and `--regime-mode cache-hit` (cache hit fraction bins) so Stage B tests semantics that align with plan reuse/cache dynamics.
+- Use `--regime-mode gate-density` or `--regime-mode alternating` (with `--gate-density-threshold`/`--regime-alternation-interval`) to create a non-degenerate regime for Stage B, then rerun the experiment to validate whether the spatial field encodes those regimes.  
+- Compare the Stage B p-value between `plan-hit` vs `gate-density` runs to see if true spatial decoding is possible once the label stops collapsing to a constant, and log the `Regime stats` counts + entropy (`CONTEXT.md#L34081-L34282`).  
+- Expand the regime via `--gate-density-bins` (or the alternating control) so H(R)>0 before Stage B executes, then explore B1 correlation-based features (and fixed kernels later) to see whether the observer still cannot decode the regime.  
+
 - **Dense-structure vs algebra experiment**
   - Swap in a real int8 microkernel (blocked/tiling) and test GF(3)/ternary arithmetic inside it to isolate “structure vs algebra”.
   - Record roofline stats (ops/s, GB/s, ops/byte) for each variant.

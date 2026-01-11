@@ -107,6 +107,7 @@
   remove the individual PNGs.
 - Documented the null-separation/control-case interpretation for tree diffusion
   and queued a symmetry-breaking variant.
+- Added `--plan-hit-experiment` (plus `--plan-hit-block-size`/`--plan-hit-perms`, `--observer-class {scalar,corr}`) and the richer regime controls (`--regime-mode` now includes `plan-phase` and `cache-hit`, plus `--gate-density-bins`, `--cache-hit-bins`, `--plan-stable-length`) so Stage B can exercise correlation-based features, print regime stats/entropy, and evaluate more meaningful semantic regimes in support of the discussion around `CONTEXT.md#L32387-L34282`.
 - Added a brief control-case interpretation note to the tree diffusion spec.
 - Documented discriminator checks for the tree diffusion benchmark.
 - Documented permutation-invariance caveat and queued a quotient-aware kernel

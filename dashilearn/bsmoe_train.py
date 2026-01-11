@@ -49,6 +49,13 @@ def tiles_from_gate_mask(gate_mask, tile=32):
 
 SHEET_OUT_PATH = Path(__file__).with_name("sheet_energy.npy")
 VULKAN_CAPTURE_THRESHOLD = 128
+DEFAULT_GATE_DENSITY_THRESHOLD = 0.5
+DEFAULT_GATEDENSITY_BINS: int | None = None
+DEFAULT_ALTERNATION_INTERVAL = 4
+PLAN_HIT_EXPERIMENT_DEFAULT_BLOCK = 6
+PLAN_HIT_EXPERIMENT_DEFAULT_PERMS = 256
+DEFAULT_PLAN_STABLE_LENGTH = 4
+DEFAULT_CACHE_HIT_BINS: int | None = None
 
 
 def tile_energy_map(C, plan):
@@ -107,6 +114,349 @@ def _tile_block_mean(frame: np.ndarray, tile_i: int, tile_j: int, block_px: int)
     if y1 <= y0 or x1 <= x0:
         return 0.0
     return float(frame[y0:y1, x0:x1].mean())
+
+
+def _plan_hit_tile_stats(frame: np.ndarray, sheet_h: int, sheet_w: int, block_px: int):
+    height, width = frame.shape[:2]
+    tile_means = np.zeros((sheet_h, sheet_w), dtype=np.float32)
+    tile_fracs = np.zeros((sheet_h, sheet_w), dtype=np.float32)
+    thr = VULKAN_CAPTURE_THRESHOLD
+    for i in range(sheet_h):
+        y0 = i * block_px
+        y1 = min(y0 + block_px, height)
+        if y1 <= y0:
+            continue
+        for j in range(sheet_w):
+            x0 = j * block_px
+            x1 = min(x0 + block_px, width)
+            if x1 <= x0:
+                continue
+            patch = frame[y0:y1, x0:x1].astype(np.float32)
+            if patch.size == 0:
+                continue
+            tile_means[i, j] = float(patch.mean())
+            tile_fracs[i, j] = float((patch > thr).mean())
+    return tile_means, tile_fracs
+
+
+def _observer_candidate_features(
+    tile_means_list: list[np.ndarray],
+    tile_fracs_list: list[np.ndarray],
+    observer_class: str,
+) -> list[tuple[str, np.ndarray]]:
+    candidates: list[tuple[str, np.ndarray]] = []
+    if not tile_means_list:
+        return candidates
+    if observer_class in ("scalar", "corr"):
+        mean_stack = np.vstack([tm.reshape(-1) for tm in tile_means_list])
+        frac_stack = np.vstack([tf.reshape(-1) for tf in tile_fracs_list])
+        for idx in range(mean_stack.shape[1]):
+            candidates.append((f"mean_{idx}", mean_stack[:, idx]))
+        for idx in range(frac_stack.shape[1]):
+            candidates.append((f"frac_{idx}", frac_stack[:, idx]))
+    if observer_class == "corr":
+        corr_feats = _correlation_features(tile_means_list)
+        for name, values in corr_feats.items():
+            candidates.append((name, values))
+    return candidates
+
+
+def _correlation_features(tile_means_list: list[np.ndarray]) -> dict[str, np.ndarray]:
+    hor, vert, grad, lap = [], [], [], []
+    for tm in tile_means_list:
+        hor.append(_tile_corr(tm[:, :-1], tm[:, 1:]))
+        vert.append(_tile_corr(tm[:-1, :], tm[1:, :]))
+        grad.append(_tile_gradient_energy(tm))
+        lap.append(_tile_laplacian_energy(tm))
+    return {
+        "hor_corr": np.array(hor, dtype=np.float32),
+        "vert_corr": np.array(vert, dtype=np.float32),
+        "grad_energy": np.array(grad, dtype=np.float32),
+        "lap_energy": np.array(lap, dtype=np.float32),
+    }
+
+
+def _tile_corr(A: np.ndarray, B: np.ndarray) -> float:
+    if A.size == 0 or B.size == 0:
+        return 0.0
+    a = A.reshape(-1).astype(np.float32)
+    b = B.reshape(-1).astype(np.float32)
+    a_mean = a.mean()
+    b_mean = b.mean()
+    num = np.mean((a - a_mean) * (b - b_mean))
+    denom = np.sqrt(np.mean((a - a_mean) ** 2) * np.mean((b - b_mean) ** 2))
+    return float(num / denom) if denom > 1e-6 else 0.0
+
+
+def _tile_gradient_energy(tile_means: np.ndarray) -> float:
+    h, w = tile_means.shape
+    energy = 0.0
+    count = 0
+    if w > 1:
+        diff = tile_means[:, :-1] - tile_means[:, 1:]
+        energy += float(np.mean(diff * diff))
+        count += 1
+    if h > 1:
+        diff = tile_means[:-1, :] - tile_means[1:, :]
+        energy += float(np.mean(diff * diff))
+        count += 1
+    return float(energy / count) if count else 0.0
+
+
+def _tile_laplacian_energy(tile_means: np.ndarray) -> float:
+    padded = np.pad(tile_means, 1, mode="reflect")
+    center = padded[1:-1, 1:-1]
+    neighbors = (
+        padded[1:-1, :-2]
+        + padded[1:-1, 2:]
+        + padded[:-2, 1:-1]
+        + padded[2:, 1:-1]
+    )
+    lap = 4 * center - neighbors
+    return float(np.mean(lap * lap))
+
+
+def _regime_label_for_mode(
+    mode: str,
+    *,
+    gate_density: float,
+    epoch: int,
+    plan_hit: bool,
+    gate_density_threshold: float,
+    alternation_interval: int,
+    gate_density_bins: int | None,
+    plan_stable_length: int,
+    stable_run_len: int,
+    cache_hit_fraction: float,
+    cache_hit_bins: int | None,
+) -> int:
+    if mode == "plan-hit":
+        return 1 if plan_hit else 0
+    if mode == "gate-density":
+        if gate_density_bins and gate_density_bins > 1:
+            idx = int(gate_density * gate_density_bins)
+            idx = max(0, min(gate_density_bins - 1, idx))
+            return idx
+        return 1 if gate_density >= gate_density_threshold else 0
+    if mode == "plan-phase":
+        if not plan_hit:
+            return -1
+        return 1 if stable_run_len >= plan_stable_length else 0
+    if mode == "cache-hit":
+        value = cache_hit_fraction if cache_hit_fraction >= 0 else 0.0
+        if cache_hit_bins and cache_hit_bins > 1:
+            idx = int(value * cache_hit_bins)
+            idx = max(0, min(cache_hit_bins - 1, idx))
+            return idx
+        return 1 if value >= 0.66 else (0 if value >= 0.33 else -1)
+    if mode == "alternating":
+        if alternation_interval <= 0:
+            return 1 if plan_hit else 0
+        period = alternation_interval
+        phase = (epoch // period) % 2
+        return 1 if phase == 0 else 0
+    raise ValueError(f"unknown regime mode: {mode}")
+
+
+def _sheet_to_frame(sheet: np.ndarray, block_px: int):
+    sheet = np.asarray(sheet, dtype=np.float32)
+    if sheet.size == 0 or block_px <= 0:
+        return np.zeros((0, 0, 4), dtype=np.float32)
+    expanded = np.repeat(np.repeat(sheet, block_px, axis=0), block_px, axis=1)
+    frame = np.stack([expanded] * 4, axis=-1)
+    return frame
+
+
+def _train_logistic(X: np.ndarray, y: np.ndarray, steps=2000, lr=0.4):
+    X = np.asarray(X, dtype=np.float32)
+    y = np.asarray(y, dtype=np.float32)
+    n, d = X.shape
+    w = np.zeros(d + 1, dtype=np.float32)
+    for _ in range(steps):
+        logits = w[0] + X @ w[1:]
+        logits = np.clip(logits, -20.0, 20.0)
+        probs = 1.0 / (1.0 + np.exp(-logits))
+        error = probs - y
+        grad = X.T @ error / n
+        bias_grad = float(error.mean())
+        w[1:] -= lr * grad
+        w[0] -= lr * bias_grad
+    return w
+
+
+def _logistic_predict(w: np.ndarray, X: np.ndarray) -> np.ndarray:
+    logits = w[0] + X @ w[1:]
+    logits = np.clip(logits, -20.0, 20.0)
+    probs = 1.0 / (1.0 + np.exp(-logits))
+    return (probs >= 0.5).astype(np.int32)
+
+
+def _best_threshold_accuracy(values: np.ndarray, labels: np.ndarray) -> tuple[float, tuple[float, int] | None]:
+    if labels.size == 0:
+        return 0.0, None
+    values = np.asarray(values, dtype=np.float32)
+    labels = np.asarray(labels, dtype=np.int32)
+    order = np.argsort(values)
+    sorted_vals = values[order]
+    sorted_labels = labels[order]
+    candidates = []
+    if sorted_vals.size:
+        candidates.append(sorted_vals[0] - 1.0)
+        for i in range(sorted_vals.size - 1):
+            candidates.append(0.5 * (sorted_vals[i] + sorted_vals[i + 1]))
+        candidates.append(sorted_vals[-1] + 1.0)
+    best_acc = 0.0
+    best_thr = None
+    for thr in candidates:
+        for sense in (1, -1):
+            if sense > 0:
+                preds = values > thr
+            else:
+                preds = values < thr
+            acc = float((preds == labels).mean())
+            if acc > best_acc:
+                best_acc = acc
+                best_thr = (thr, sense)
+    return best_acc, best_thr
+
+
+def _permute_labels_by_blocks(labels: np.ndarray, block_size: int, rng: np.random.Generator) -> np.ndarray:
+    if block_size <= 0:
+        return labels.copy()
+    n = labels.size
+    blocks = []
+    positions = []
+    pos = 0
+    while pos < n:
+        end = min(pos + block_size, n)
+        blocks.append(labels[pos:end])
+        positions.append((pos, end))
+        pos = end
+    blocks_by_length: dict[int, list[np.ndarray]] = {}
+    positions_by_length: dict[int, list[int]] = {}
+    for idx, block in enumerate(blocks):
+        length = block.size
+        blocks_by_length.setdefault(length, []).append(block)
+        positions_by_length.setdefault(length, []).append(idx)
+    permuted = np.empty_like(labels)
+    for length, block_list in blocks_by_length.items():
+        pos_indices = positions_by_length[length]
+        perm_indices = list(range(len(block_list)))
+        rng.shuffle(perm_indices)
+        for target_pos, source_pos in zip(pos_indices, perm_indices):
+            start, end = positions[target_pos]
+            permuted[start:end] = block_list[source_pos]
+    return permuted
+
+
+def _best_candidate_accuracy(
+    candidates: list[tuple[str, np.ndarray]],
+    labels: np.ndarray,
+) -> tuple[float, tuple[str, tuple[float, int] | None] | None]:
+    best_acc = 0.0
+    best_info = None
+    for name, values in candidates:
+        acc, thr = _best_threshold_accuracy(values, labels)
+        if acc > best_acc:
+            best_acc = acc
+            best_info = (name, thr)
+    return best_acc, best_info
+
+
+def _regime_stats(labels: np.ndarray) -> tuple[dict[int, int], float]:
+    if labels.size == 0:
+        return {}, 0.0
+    unique, counts = np.unique(labels, return_counts=True)
+    total = float(counts.sum())
+    probs = counts / total
+    mask = probs > 0
+    entropy = float(-np.sum(probs[mask] * np.log2(probs[mask])))
+    if abs(entropy) < 1e-12:
+        entropy = 0.0
+    return {int(u): int(c) for u, c in zip(unique, counts)}, entropy
+
+
+def _plan_hit_stage_a(observations: list[dict]) -> tuple[float, np.ndarray | None]:
+    X = []
+    y = []
+    for obs in observations:
+        tile_i, tile_j = obs["tile"]
+        X.append([float(tile_i), float(tile_j), float(obs["local_mean"])])
+        y.append(1.0 if obs["plan_hit"] else 0.0)
+    X = np.array(X, dtype=np.float32)
+    y = np.array(y, dtype=np.float32)
+    if y.size == 0 or y.min() == y.max():
+        return 0.5, None
+    w = _train_logistic(X, y)
+    preds = _logistic_predict(w, X)
+    acc = float((preds == y).mean())
+    return acc, w
+
+
+def _regime_stage_b(
+    observations: list[dict],
+    sheet_h: int,
+    sheet_w: int,
+    block_px: int,
+    block_size: int,
+    perms: int,
+    observer_class: str,
+) -> tuple[float, tuple[str, tuple[float, int] | None] | None, float, dict[int, int], float]:
+    labels = np.array([int(obs["regime_label"]) for obs in observations], dtype=np.int32)
+    label_stats, label_entropy = _regime_stats(labels)
+    if labels.size == 0 or labels.min() == labels.max():
+        return 0.5, None, 1.0, label_stats, label_entropy
+    tile_means = []
+    tile_fracs = []
+    for obs in observations:
+        means, fracs = _plan_hit_tile_stats(obs["frame"], sheet_h, sheet_w, block_px)
+        tile_means.append(means)
+        tile_fracs.append(fracs)
+    candidates = _observer_candidate_features(tile_means, tile_fracs, observer_class)
+    observed_acc, best_info = _best_candidate_accuracy(candidates, labels)
+    rng = np.random.default_rng(0)
+    perm_accs = []
+    for _ in range(perms):
+        permuted_labels = _permute_labels_by_blocks(labels, block_size, rng)
+        acc, _ = _best_candidate_accuracy(candidates, permuted_labels)
+        perm_accs.append(acc)
+    p_value = (1 + sum(1 for acc in perm_accs if acc >= observed_acc)) / (1 + perms)
+    return observed_acc, best_info, p_value, label_stats, label_entropy
+
+
+def run_regime_experiment(
+    observations: list[dict],
+    sheet_h: int,
+    sheet_w: int,
+    block_px: int,
+    block_size: int,
+    perms: int,
+    regime_mode: str,
+    observer_class: str,
+) -> None:
+    print(f"{regime_mode.capitalize()} experiment: Stage A (instrumented) + Stage B (blind observer)")
+    stage_a_acc = 0.5
+    weight_str = "skipped"
+    if regime_mode == "plan-hit":
+        stage_a_acc, weights = _plan_hit_stage_a(observations)
+        if weights is not None:
+            bias = weights[0]
+            coefs = ", ".join(f"{w:.3f}" for w in weights[1:])
+            weight_str = f"bias={bias:.3f}, coefs=[{coefs}]"
+        else:
+            weight_str = "n/a"
+    print(f"Stage A accuracy (tile_i, tile_j, local_mean): {stage_a_acc:.3f} ({weight_str})")
+    stage_b_acc, best_info, p_value, label_stats, label_entropy = _regime_stage_b(
+        observations, sheet_h, sheet_w, block_px, block_size, perms, observer_class
+    )
+    print(f"Regime stats: counts={label_stats}, H={label_entropy:.3f} bits")
+    if best_info is None:
+        print("Stage B: insufficient variation to evaluate.")
+    else:
+        feature_name, thr_data = best_info
+        thr_descr = f"threshold={thr_data[0]:.3f} sense={'>' if thr_data[1] > 0 else '<'}" if thr_data else "n/a"
+        print(f"Stage B best feature: {feature_name} acc={stage_b_acc:.3f} ({thr_descr})")
+        print(f"Blocked permutation test (block_size={block_size}, perms={perms}) p-value={p_value:.3f}")
 
 
 def make_data(M=256, K=256, N=256, tiles_active=0.5, tile=32, seed=0):
@@ -362,6 +712,65 @@ def main():
         type=Path,
         help="Optional Vulkan ICD JSON used when capturing the frame",
     )
+    parser.add_argument(
+        "--plan-hit-experiment",
+        action="store_true",
+        help="Run the plan-hit observability experiment (Stage A + Stage B) after training.",
+    )
+    parser.add_argument(
+        "--regime-mode",
+        choices=("plan-hit", "gate-density", "alternating", "plan-phase", "cache-hit"),
+        default="plan-hit",
+        help="Which regime definition to test in Stage B.",
+    )
+    parser.add_argument(
+        "--gate-density-threshold",
+        type=float,
+        default=DEFAULT_GATE_DENSITY_THRESHOLD,
+        help="Threshold (0-1) for gate-density regimes (>= threshold -> high).",
+    )
+    parser.add_argument(
+        "--regime-alternation-interval",
+        type=int,
+        default=DEFAULT_ALTERNATION_INTERVAL,
+        help="Epoch block size for the synthetic alternating regime.",
+    )
+    parser.add_argument(
+        "--gate-density-bins",
+        type=int,
+        default=DEFAULT_GATEDENSITY_BINS,
+        help="Number of bins for gate-density regime (overrides threshold when >1).",
+    )
+    parser.add_argument(
+        "--cache-hit-bins",
+        type=int,
+        default=DEFAULT_CACHE_HIT_BINS,
+        help="Number of bins for cache-hit / plan-overlap regime (overrides thresholds when >1).",
+    )
+    parser.add_argument(
+        "--plan-stable-length",
+        type=int,
+        default=DEFAULT_PLAN_STABLE_LENGTH,
+        help="Minimum consecutive plan hits before the plan-phase label toggles to 1.",
+    )
+    parser.add_argument(
+        "--observer-class",
+        choices=("scalar", "corr"),
+        default="scalar",
+        help="Observer feature set used by Stage B (scalar tiles vs correlation features).",
+    )
+    parser.add_argument(
+        "--plan-hit-block-size",
+        type=int,
+        default=PLAN_HIT_EXPERIMENT_DEFAULT_BLOCK,
+        help="Frames-per-block used in the blocked permutation test.",
+    )
+    parser.add_argument(
+        "--plan-hit-perms",
+        type=int,
+        default=PLAN_HIT_EXPERIMENT_DEFAULT_PERMS,
+        help="Number of permutations for the Stage B permutation test.",
+    )
     args = parser.parse_args()
 
     M = N = K = 256
@@ -382,6 +791,7 @@ def main():
 
     t_plan0 = time.perf_counter()
     plan = build_tile_plan(tiles, tile=tile, M=M, N=N)
+    sheet_h, sheet_w = plan.tile_grid_shape
     t_plan = (time.perf_counter() - t_plan0) * 1e3
     t_pack = 0.0
 
@@ -401,7 +811,6 @@ def main():
                 raise RuntimeError("vulkan_compute.frame_capture is unavailable")
             if args.vk_icd:
                 os.environ["VK_ICD_FILENAMES"] = str(args.vk_icd)
-            sheet_h, sheet_w = plan.tile_grid_shape
             width = sheet_w * block_px
             height = sheet_h * block_px
             vulkan_capture = VulkanFrameCapture(
@@ -466,6 +875,8 @@ def main():
     # Tiny training loop (for illustration)
     sheet_energy = np.zeros(plan.tile_grid_shape, dtype=np.float32)
     plan_hits = 0
+    plan_hit_observations: list[dict] = []
+    stable_run_len = 0
     for e in range(epochs):
         t_gate0 = time.perf_counter()
         gate_mask = update_gate_mask(gate_mask, gate_flip, rng)
@@ -486,22 +897,44 @@ def main():
         )
         sheet_energy = tile_energy_map(C, plan)
         dump_sheet_energy(sheet_energy)
+        gate_density = float(tiles.mean()) if tiles.size else 0.0
+        plan_hit = bool(reuse)
+        if plan_hit and reuse:
+            stable_run_len += 1
+        else:
+            stable_run_len = 0
+        cache_hit_fraction = float(jacc)
+        capture_sheet = _sheet_values_for_capture(
+            sheet_energy,
+            epoch=e,
+            gate_density=gate_density,
+            sheet_h=sheet_h,
+            sheet_w=sheet_w,
+        )
+        frame_for_experiment = _sheet_to_frame(capture_sheet, block_px)
+        tile_i, tile_j = _semantic_tile_coord(e, sheet_h, sheet_w)
+        tile_mean = _tile_block_mean(frame_for_experiment, tile_i, tile_j, block_px)
+        regime_label = _regime_label_for_mode(
+            args.regime_mode,
+            gate_density=gate_density,
+            epoch=e,
+            plan_hit=plan_hit,
+            gate_density_threshold=args.gate_density_threshold,
+            alternation_interval=args.regime_alternation_interval,
+            gate_density_bins=args.gate_density_bins,
+            plan_stable_length=args.plan_stable_length,
+            stable_run_len=stable_run_len,
+            cache_hit_fraction=cache_hit_fraction,
+            cache_hit_bins=args.cache_hit_bins,
+        )
         if vulkan_capture:
             try:
-                gate_density = float(tiles.mean()) if tiles.size else 0.0
-                capture_sheet = _sheet_values_for_capture(
-                    sheet_energy,
-                    epoch=e,
-                    gate_density=gate_density,
-                    sheet_h=sheet_h,
-                    sheet_w=sheet_w,
-                )
                 frame = vulkan_capture.capture(capture_sheet)
                 thr = VULKAN_CAPTURE_THRESHOLD
                 frac_above_thr = (frame > thr).mean()
                 max_val = float(frame.max())
-                tile_i, tile_j = _semantic_tile_coord(e, sheet_h, sheet_w)
                 tile_mean = _tile_block_mean(frame, tile_i, tile_j, block_px)
+                frame_for_experiment = frame.copy()
                 print(
                     f"Vulkan frame [epoch {e+1}] tile=({tile_i},{tile_j}) local_mean={tile_mean:.2f}",
                     f"mean={frame.mean():.2f}",
@@ -512,6 +945,30 @@ def main():
                 last_capture_sheet = capture_sheet
             except Exception as exc:
                 print(f"warning: Vulkan capture failed at epoch {e+1}: {exc}", file=sys.stderr)
+        if args.plan_hit_experiment:
+                plan_hit_observations.append(
+                {
+                    "epoch": e,
+                    "plan_hit": plan_hit,
+                    "frame": frame_for_experiment,
+                    "tile": (tile_i, tile_j),
+                    "local_mean": tile_mean,
+                    "cache_hit_fraction": cache_hit_fraction,
+                    "stable_run_len": stable_run_len,
+                    "regime_label": regime_label,
+                }
+            )
+    if args.plan_hit_experiment and plan_hit_observations:
+        run_regime_experiment(
+            plan_hit_observations,
+            sheet_h=sheet_h,
+            sheet_w=sheet_w,
+            block_px=block_px,
+            block_size=args.plan_hit_block_size,
+            perms=args.plan_hit_perms,
+            regime_mode=args.regime_mode,
+            observer_class=args.observer_class,
+        )
     print(f"plan_hit_rate     : {plan_hits}/{epochs}")
     if args.stay_open > 0:
         stay_interval = max(0.01, args.stay_interval)
