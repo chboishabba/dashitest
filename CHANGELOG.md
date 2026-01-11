@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Documented the Stage B2 acceptance/failure/ambiguous protocol (p thresholds, BA targets, guardrails, attribution/logging recipes) in `docs/b2_acceptance.md` so every blocked-permutation run can reference the canonical checklist (`CONTEXT.md#L36915-L38950`).
 - Added a Vulkan↔JAX parity mapping note and identified the first Vulkan kernel
   target for block-wise residual statistics.
 - Added `scripts/bridge_task.py` and `scripts/bridge_task_summary.py` so codec/DNA

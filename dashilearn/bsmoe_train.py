@@ -16,6 +16,7 @@ import ctypes
 from dataclasses import dataclass
 from pathlib import Path
 import numpy as np
+from numpy.lib.stride_tricks import sliding_window_view
 
 # Ensure repo root is on sys.path so top-level Vulkan helpers import reliably.
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -56,6 +57,10 @@ PLAN_HIT_EXPERIMENT_DEFAULT_BLOCK = 6
 PLAN_HIT_EXPERIMENT_DEFAULT_PERMS = 256
 DEFAULT_PLAN_STABLE_LENGTH = 4
 DEFAULT_CACHE_HIT_BINS: int | None = None
+
+
+def _parse_bool_flag(value: str) -> bool:
+    return value.lower() in {"1", "true", "t", "yes", "y"}
 
 
 def tile_energy_map(C, plan):
@@ -159,6 +164,114 @@ def _observer_candidate_features(
         for name, values in corr_feats.items():
             candidates.append((name, values))
     return candidates
+
+
+def _grayscale_frames_from_observations(observations: list[dict]) -> np.ndarray:
+    if not observations:
+        return np.zeros((0, 1, 0, 0), dtype=np.float32)
+    frames = np.stack(
+        [np.asarray(obs["frame"], dtype=np.float32) for obs in observations], axis=0
+    )
+    if frames.ndim == 4:
+        frames = frames.mean(axis=-1)
+    if frames.ndim == 3:
+        frames = frames[:, None, :, :]
+    return frames.astype(np.float32, copy=False)
+
+
+def _tiny_cnn_init(rng: np.random.Generator, out_channels=4, kernel_size=3, num_classes=2) -> dict:
+    in_channels = 1
+    conv_scale = np.sqrt(2.0 / (in_channels * kernel_size * kernel_size))
+    conv = rng.normal(0.0, conv_scale, size=(out_channels, in_channels, kernel_size, kernel_size))
+    fc_scale = np.sqrt(1.0 / out_channels)
+    fc = rng.normal(0.0, fc_scale, size=(num_classes, out_channels))
+    return {
+        "conv": np.asarray(conv, dtype=np.float32),
+        "conv_bias": np.zeros(out_channels, dtype=np.float32),
+        "fc": np.asarray(fc, dtype=np.float32),
+        "fc_bias": np.zeros(num_classes, dtype=np.float32),
+    }
+
+
+def _conv_forward(inputs: np.ndarray, kernel: np.ndarray, bias: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    pad = kernel.shape[2] // 2
+    padded = np.pad(inputs, ((0, 0), (0, 0), (pad, pad), (pad, pad)), mode="constant")
+    patches = sliding_window_view(padded, (kernel.shape[2], kernel.shape[3]), axis=(2, 3))
+    B, C, H, W = inputs.shape
+    patches = patches.reshape(B, C, H, W, kernel.shape[2], kernel.shape[3])
+    patches = patches.transpose(0, 2, 3, 1, 4, 5)
+    patches = patches.reshape(B, H, W, C * kernel.shape[2] * kernel.shape[3])
+    kernel_flat = kernel.reshape(kernel.shape[0], -1)
+    conv = patches @ kernel_flat.T
+    conv = np.transpose(conv, (0, 3, 1, 2))
+    conv += bias.reshape(1, -1, 1, 1)
+    return conv, patches
+
+
+def _tiny_cnn_forward(inputs: np.ndarray, params: dict) -> tuple[np.ndarray, dict]:
+    conv_out, patches = _conv_forward(inputs, params["conv"], params["conv_bias"])
+    relu = np.maximum(conv_out, 0.0)
+    pooled = relu.mean(axis=(2, 3))
+    logits = pooled @ params["fc"].T + params["fc_bias"]
+    cache = {
+        "patches": patches,
+        "pooled": pooled,
+        "relu_mask": relu > 0.0,
+        "spatial_size": max(1, relu.shape[2] * relu.shape[3]),
+    }
+    return logits, cache
+
+
+def _tiny_cnn_loss_and_grads(
+    logits: np.ndarray,
+    label_indices: np.ndarray,
+    cache: dict,
+    params: dict,
+) -> tuple[float, dict]:
+    B = logits.shape[0]
+    shifted = logits - logits.max(axis=1, keepdims=True)
+    exp = np.exp(shifted)
+    probs = exp / exp.sum(axis=1, keepdims=True)
+    one_hot = np.zeros_like(probs)
+    one_hot[np.arange(B), label_indices] = 1.0
+    loss = -np.sum(one_hot * np.log(np.clip(probs, 1e-9, 1.0))) / B
+    d_logits = (probs - one_hot) / B
+    d_fc = d_logits.T @ cache["pooled"]
+    d_fc_bias = d_logits.sum(axis=0)
+    d_pooled = d_logits @ params["fc"]
+    d_relu = d_pooled[:, :, None, None] / cache["spatial_size"]
+    relu_mask = cache["relu_mask"].astype(np.float32)
+    d_conv_out = d_relu * relu_mask
+    patches = cache["patches"]
+    d_kernel_flat = np.einsum("bhwm,bhwo->om", patches, d_conv_out.transpose(0, 2, 3, 1))
+    grads = {
+        "conv": d_kernel_flat.T.reshape(params["conv"].shape),
+        "conv_bias": d_conv_out.sum(axis=(0, 2, 3)),
+        "fc": d_fc,
+        "fc_bias": d_fc_bias,
+    }
+    return loss, grads
+
+
+def _train_eval_tiny_cnn(
+    frames: np.ndarray,
+    label_indices: np.ndarray,
+    num_classes: int,
+    rng: np.random.Generator,
+    steps: int = 120,
+    lr: float = 0.35,
+) -> float:
+    params = _tiny_cnn_init(rng, num_classes=num_classes)
+    for _ in range(steps):
+        logits, cache = _tiny_cnn_forward(frames, params)
+        _, grads = _tiny_cnn_loss_and_grads(logits, label_indices, cache, params)
+        params["conv"] -= lr * grads["conv"]
+        params["conv_bias"] -= lr * grads["conv_bias"]
+        params["fc"] -= lr * grads["fc"]
+        params["fc_bias"] -= lr * grads["fc_bias"]
+    logits, _ = _tiny_cnn_forward(frames, params)
+    preds = np.argmax(logits, axis=1)
+    return float((preds == label_indices).mean())
 
 
 def _correlation_features(tile_means_list: list[np.ndarray]) -> dict[str, np.ndarray]:
@@ -406,6 +519,36 @@ def _regime_stage_b(
     label_stats, label_entropy = _regime_stats(labels)
     if labels.size == 0 or labels.min() == labels.max():
         return 0.5, None, 1.0, label_stats, label_entropy
+    if observer_class == "cnn":
+        frames = _grayscale_frames_from_observations(observations)
+        unique_labels, label_indices = np.unique(labels, return_inverse=True)
+        label_indices = label_indices.astype(np.int32, copy=False)
+        label_map = {int(value): int(idx) for idx, value in enumerate(unique_labels)}
+        rng = np.random.default_rng(0)
+        seed = rng.integers(0, 1 << 31)
+        observed_acc = _train_eval_tiny_cnn(
+            frames,
+            label_indices,
+            unique_labels.size,
+            np.random.default_rng(seed),
+        )
+        perm_accs: list[float] = []
+        for _ in range(perms):
+            permuted_labels = _permute_labels_by_blocks(labels, block_size, rng)
+            perm_indices = np.array(
+                [label_map[int(lbl)] for lbl in permuted_labels], dtype=np.int32
+            )
+            perm_seed = rng.integers(0, 1 << 31)
+            perm_rng = np.random.default_rng(perm_seed)
+            perm_acc = _train_eval_tiny_cnn(
+                frames,
+                perm_indices,
+                unique_labels.size,
+                perm_rng,
+            )
+            perm_accs.append(perm_acc)
+        p_value = (1 + sum(1 for acc in perm_accs if acc >= observed_acc)) / (1 + perms)
+        return observed_acc, ("tiny_cnn", None), p_value, label_stats, label_entropy
     tile_means = []
     tile_fracs = []
     for obs in observations:
@@ -755,9 +898,9 @@ def main():
     )
     parser.add_argument(
         "--observer-class",
-        choices=("scalar", "corr"),
+        choices=("scalar", "corr", "cnn"),
         default="scalar",
-        help="Observer feature set used by Stage B (scalar tiles vs correlation features).",
+        help="Observer feature set used by Stage B (scalar tiles vs correlation features, or tiny CNN).",
     )
     parser.add_argument(
         "--plan-hit-block-size",
@@ -770,6 +913,12 @@ def main():
         type=int,
         default=PLAN_HIT_EXPERIMENT_DEFAULT_PERMS,
         help="Number of permutations for the Stage B permutation test.",
+    )
+    parser.add_argument(
+        "--blocked-permutations",
+        type=_parse_bool_flag,
+        default=False,
+        help="Legacy reminder that Stage B uses blocked permutations (no-op).",
     )
     args = parser.parse_args()
 
