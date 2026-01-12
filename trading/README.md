@@ -60,7 +60,8 @@ PYTHONPATH=. python run_all_two_pointO.py \
 
 Run from this directory with `PYTHONPATH=.` to avoid import issues. Plot
 scripts auto-timestamp `--save` outputs to avoid overwriting prior plots (see
-`CONTEXT.md#L2532`).
+`CONTEXT.md#L2532`). Requirement: graphs/images must emit timestamped filenames
+by default; overwriting is not allowed.
 
 - `scripts/ca_epistemic_tape.py`: CA tape visualization driven by price series.  
   Command: `PYTHONPATH=. python scripts/ca_epistemic_tape.py --csv data/raw/stooq/btc_intraday_1s.csv`

@@ -1,0 +1,153 @@
+diff --git a/bsmoe_train.py b/bsmoe_train.py
+index 0000000..1111111 100644
+--- a/bsmoe_train.py
++++ b/bsmoe_train.py
+@@ -1,6 +1,7 @@
+ import argparse
+ import time
+ import os
++import math
+ import sys
+ import ctypes
+ from dataclasses import dataclass
+@@ -360,6 +361,86 @@ def fused_sequence(X, W, plan, microkernel=vnni_microkernel):
+     energies = energy_plan(C, plan)
+     return C, energies
+ 
++def _plan_mdl_cost(plan: TilePlan, *, total_tiles: int, plan_changed: bool) -> float:
++    """
++    Cheap MDL-style gauge cost:
++      - prefer fewer active tiles (description length ~ support size)
++      - prefer plan reuse (penalize plan changes)
++    """
++    if total_tiles <= 0:
++        return 0.0
++    active_frac = float(plan.count) / float(total_tiles)
++    change_pen = 1.0 if plan_changed else 0.0
++    return active_frac + 0.25 * change_pen
++
++def train_epoch_phase3(
++    X: np.ndarray,
++    W: np.ndarray,
++    plan_r1: TilePlan,
++    plan_r0: TilePlan,
++    *,
++    lr: float,
++    alpha: float,
++    beta: float,
++    total_tiles: int,
++    plan_changed: bool,
++    microkernel=vnni_microkernel,
++) -> tuple[np.ndarray, float, dict, np.ndarray]:
++    """
++    Phase-3 quotient objective:
++      - task term: keep existing (C_r1 -> 0) unless you want to drop it later
++      - quotient term: match tile-energy-map invariants to canonical plan output (stopgrad)
++      - mdl term: penalize gauge complexity (tile count + plan changes)
++    Returns: (W_new, total_loss, metrics, C_r1)
++    """
++    # Current regime
++    C1 = block_sparse_matmul_plan(X, W, plan_r1, microkernel=microkernel)
++
++    # Canonical regime (stopgrad target in NumPy: compute but don't differentiate through it)
++    C0 = block_sparse_matmul_plan(X, W, plan_r0, microkernel=microkernel)
++
++    # Quotient statistic V(C): tile energy map (already aligned to your “field as manifold” story)
++    V1 = tile_energy_map(C1, plan_r1).astype(np.float32)
++    V0 = tile_energy_map(C0, plan_r0).astype(np.float32)
++
++    # Losses
++    task_loss = float((C1.astype(np.float32) ** 2).mean())
++    q_loss = float(((V1 - V0) ** 2).mean())
++    mdl = _plan_mdl_cost(plan_r1, total_tiles=total_tiles, plan_changed=plan_changed)
++    total_loss = task_loss + alpha * q_loss + beta * mdl
++
++    # Backprop surrogate:
++    # Keep your existing simple gradient on the task term only (safe, minimal diff).
++    # (If you want true quotient gradients later, we can add a VJP from V1 back to C1.)
++    err = C1
++    gradW = np.zeros_like(W, dtype=np.int32)
++    for idx in range(plan_r1.count):
++        i0 = int(plan_r1.i0[idx]); j0 = int(plan_r1.j0[idx])
++        i1 = int(plan_r1.i1[idx]); j1 = int(plan_r1.j1[idx])
++        X_blk = X[i0:i1, :].astype(np.int32)
++        err_blk = err[i0:i1, j0:j1]
++        gradW[:, j0:j1] += X_blk.T @ err_blk
++    W = W - lr * gradW.astype(W.dtype)
++
++    metrics = {
++        "task_loss": task_loss,
++        "quotient_loss": q_loss,
++        "mdl_cost": float(mdl),
++        "alpha": float(alpha),
++        "beta": float(beta),
++    }
++    return W, float(total_loss), metrics, C1
++
+@@ -871,6 +952,18 @@ def main():
+     parser.add_argument("--plan-hit-perms", type=int, default=PLAN_HIT_EXPERIMENT_DEFAULT_PERMS,
+                         help="Number of permutations for the Stage B permutation test.")
++
++    # Phase 3 knobs
++    parser.add_argument("--phase3", action="store_true",
++                        help="Enable Phase-3 quotient-by-construction loss (plan equivalence + MDL cost).")
++    parser.add_argument("--phase3-alpha", type=float, default=1.0,
++                        help="Weight on quotient consistency loss.")
++    parser.add_argument("--phase3-beta", type=float, default=0.05,
++                        help="Weight on MDL/gauge cost.")
++    parser.add_argument("--phase3-alpha-warmup", type=float, default=0.3,
++                        help="Fraction of epochs to warm up alpha from 0->phase3-alpha.")
+     args = parser.parse_args()
+@@ -940,6 +1033,11 @@ def main():
+     plan = build_tile_plan(tiles, tile=tile, M=M, N=N)
+     sheet_h, sheet_w = plan.tile_grid_shape
++    # Canonical plan for Phase 3: freeze epoch-0 plan as r0
++    plan0 = build_tile_plan(tiles, tile=tile, M=M, N=N)
++    total_tiles = int(plan.tile_grid_shape[0] * plan.tile_grid_shape[1])
++
+     t_plan = (time.perf_counter() - t_plan0) * 1e3
+@@ -1030,6 +1128,7 @@ def main():
+     stable_run_len = 0
+     for e in range(epochs):
+@@ -1041,10 +1140,29 @@ def main():
+         jacc = jaccard_similarity(plan.tile_ids, next_plan.tile_ids)
+         reuse = jacc >= jaccard_thresh
+-        if not reuse:
++        plan_changed = False
++        if not reuse:
+             plan = next_plan
++            plan_changed = True
+         plan_hits += int(reuse)
+         t0 = time.perf_counter()
+-        W, loss, C = train_epoch(X, W, plan, lr=1e-5, microkernel=vnni_microkernel)
++        if args.phase3:
++            warm = max(1, int(math.ceil(args.phase3_alpha_warmup * max(1, epochs))))
++            alpha = args.phase3_alpha * min(1.0, float(e) / float(warm))
++            W, loss, m, C = train_epoch_phase3(
++                X, W,
++                plan_r1=plan,
++                plan_r0=plan0,
++                lr=1e-5,
++                alpha=alpha,
++                beta=args.phase3_beta,
++                total_tiles=total_tiles,
++                plan_changed=plan_changed,
++                microkernel=vnni_microkernel,
++            )
++        else:
++            W, loss, C = train_epoch(X, W, plan, lr=1e-5, microkernel=vnni_microkernel)
+         t1 = time.perf_counter()
+         print(
+             f"epoch {e+1}: loss={loss:8.2e}  time={(t1-t0)*1e3:6.2f} ms  "
+             f"jaccard={jacc:5.2f}  plan_hit={int(reuse)}  gate_time={t_gate:5.2f} ms"
+         )
++        if args.phase3:
++            print(f"          phase3: task={m['task_loss']:.2e}  q={m['quotient_loss']:.2e}  mdl={m['mdl_cost']:.3f}  alpha={m['alpha']:.3f}")
+@@ -1103,8 +1221,8 @@ def main():
+-        if args.plan_hit_experiment:
+-                plan_hit_observations.append(
++        if args.plan_hit_experiment:
++            plan_hit_observations.append(
+                 {
+                     "epoch": e,
+                     "plan_hit": plan_hit,

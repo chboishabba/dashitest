@@ -12,7 +12,10 @@ import argparse
 import time
 import os
 import sys
+import math
+import json
 import ctypes
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 import numpy as np
@@ -57,6 +60,7 @@ PLAN_HIT_EXPERIMENT_DEFAULT_BLOCK = 6
 PLAN_HIT_EXPERIMENT_DEFAULT_PERMS = 256
 DEFAULT_PLAN_STABLE_LENGTH = 4
 DEFAULT_CACHE_HIT_BINS: int | None = None
+DEFAULT_PHASE3_RADIAL_BINS = 4
 
 
 def _parse_bool_flag(value: str) -> bool:
@@ -661,6 +665,85 @@ def build_tile_plan(tiles, tile, M, N):
     )
 
 
+def _permute_plan(plan: TilePlan, rng: np.random.Generator) -> TilePlan:
+    count = plan.count
+    if count <= 1:
+        return plan
+    perm = rng.permutation(count)
+    return TilePlan(
+        tile=plan.tile,
+        tile_grid_shape=plan.tile_grid_shape,
+        i0=plan.i0[perm],
+        i1=plan.i1[perm],
+        j0=plan.j0[perm],
+        j1=plan.j1[perm],
+        tile_ids=plan.tile_ids[perm],
+    )
+
+
+def _apply_regime_noise(
+    mode: str,
+    tiles: np.ndarray,
+    gate_mask: np.ndarray,
+    tile: int,
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
+    info: dict[str, object] = {
+        "mode": mode,
+        "desc": None,
+        "force_replan": False,
+        "permute_plan": False,
+    }
+    mode = (mode or "").lower()
+    noisy_tiles = tiles.copy()
+    noisy_gate_mask = gate_mask
+    if mode in ("", "none"):
+        info["desc"] = "no noise"
+        return noisy_tiles, noisy_gate_mask, info
+    if mode == "tile_shuffle":
+        flat = noisy_tiles.ravel()
+        rng.shuffle(flat)
+        noisy_tiles = flat.reshape(noisy_tiles.shape)
+        info["desc"] = "tile order shuffled"
+    elif mode == "cache_poison":
+        flat = noisy_tiles.ravel()
+        true_idx = np.flatnonzero(flat)
+        drop_frac = 0.25
+        drop_count = int(len(true_idx) * drop_frac)
+        if drop_count > 0:
+            drop_idx = rng.choice(true_idx, size=drop_count, replace=False)
+            flat[drop_idx] = False
+        noisy_tiles = flat.reshape(noisy_tiles.shape)
+        info["desc"] = f"cache poison drop={drop_count}"
+    elif mode == "gate_jitter":
+        jitter = rng.uniform(-0.3, 0.3, size=gate_mask.shape)
+        gate_float = gate_mask.astype(np.float32) + jitter
+        noisy_gate_mask = (gate_float.clip(0.0, 1.0) > 0.5).astype(bool)
+        noisy_tiles = tiles_from_gate_mask(noisy_gate_mask, tile=tile)
+        info["desc"] = "gate density jittered"
+    elif mode == "replan_always":
+        info["force_replan"] = True
+        info["desc"] = "force plan rebuild"
+    elif mode == "schedule_jitter":
+        info["permute_plan"] = True
+        info["desc"] = "plan execution order permuted"
+    else:
+        info["desc"] = "unhandled noise"
+    return noisy_tiles, noisy_gate_mask, info
+
+
+def _load_training_state(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    with np.load(path, allow_pickle=False) as data:
+        W = np.asarray(data["W"], dtype=np.int8)
+        gate_mask = np.asarray(data["gate_mask"], dtype=bool)
+    return W, gate_mask
+
+
+def _save_training_state(path: Path, W: np.ndarray, gate_mask: np.ndarray) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(path, W=W, gate_mask=gate_mask.astype(np.uint8))
+
+
 def jaccard_similarity(a_ids, b_ids):
     if a_ids.size == 0 and b_ids.size == 0:
         return 1.0
@@ -784,6 +867,198 @@ def energy_plan(C, plan):
         block = C[i0:i1, j0:j1]
         energies[idx] = float(np.sum(block * block))
     return energies
+
+
+def _normalized_tile_energy(C: np.ndarray, plan: TilePlan) -> np.ndarray:
+    energy = tile_energy_map(C, plan).astype(np.float32)
+    return np.log1p(energy)
+
+
+def radial_bins_energy(C: np.ndarray, bins: int = 4) -> np.ndarray:
+    if bins <= 0 or C.size == 0:
+        return np.zeros(bins, dtype=np.float32)
+    height, width = C.shape
+    if height <= 0 or width <= 0:
+        return np.zeros(bins, dtype=np.float32)
+    y, x = np.ogrid[:height, :width]
+    cy = (height - 1) / 2.0
+    cx = (width - 1) / 2.0
+    r = np.sqrt((y - cy) ** 2 + (x - cx) ** 2)
+    rmax = float(r.max()) if r.size else 0.0
+    if rmax > 0:
+        r = r / rmax
+    else:
+        r = np.zeros_like(r)
+    E = np.zeros(bins, dtype=np.float32)
+    for bin_idx in range(bins):
+        lower = bin_idx / bins
+        upper = (bin_idx + 1) / bins if bin_idx < bins - 1 else 1.0 + 1e-6
+        mask = (r >= lower) & (r < upper)
+        if not mask.any():
+            continue
+        block = C[mask].astype(np.float32)
+        E[bin_idx] = float(np.sum(block * block))
+    return np.log1p(E)
+
+
+def _phase3_artifact_paths(timestamp: str) -> tuple[Path, Path]:
+    log_dir = Path("logs/bsmoe_train")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    outputs_dir = Path("outputs")
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / f"bsmoe_phase3_{timestamp}.json"
+    plot_file = outputs_dir / f"bsmoe_phase3_{timestamp}.png"
+    return log_file, plot_file
+
+
+def _phase3_metric_stats(history: list[dict]) -> dict:
+    if not history:
+        return {"metrics": {}}
+    epochs = np.array([entry["epoch"] for entry in history], dtype=np.float64)
+    metric_stats = {}
+    for metric in ("task_loss", "quotient_loss", "mdl_cost"):
+        values = np.array([entry[metric] for entry in history], dtype=np.float64)
+        if values.size == 0:
+            continue
+        scale = float(np.max(np.abs(values))) if np.max(np.abs(values)) > 0 else 1.0
+        deg = 0
+        if values.size >= 3:
+            deg = 2
+        elif values.size == 2:
+            deg = 1
+        coeffs = np.polyfit(epochs, values, deg=deg)
+        poly = np.poly1d(coeffs)
+        fit_type = {0: "constant", 1: "linear", 2: "quadratic"}[deg]
+        fit_values = poly(epochs).tolist()
+        metric_stats[metric] = {
+            "scale": scale,
+            "best_fit": {
+                "type": fit_type,
+                "coefficients": coeffs.tolist(),
+            },
+            "fit_values": fit_values,
+        }
+    return {"metrics": metric_stats}
+
+
+def _dump_phase3_plot(history: list[dict], plot_path: Path, stats: dict) -> None:
+    if not history:
+        return
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("warning: matplotlib unavailable; skipping Phase-3 plot", file=sys.stderr)
+        return
+    epochs = [entry["epoch"] for entry in history]
+    fig, ax = plt.subplots(figsize=(6, 4))
+    metric_stats = stats.get("metrics", {})
+    for metric in ("task_loss", "quotient_loss", "mdl_cost"):
+        values = [entry[metric] for entry in history]
+        if not values:
+            continue
+        ax.plot(epochs, values, label=metric)
+        fit_info = metric_stats.get(metric)
+        if fit_info:
+            ax.plot(
+                epochs,
+                fit_info["fit_values"],
+                label=f"{metric}_fit",
+                linestyle="--",
+                linewidth=1,
+            )
+    ax.set_xlabel("epoch")
+    ax.set_ylabel("value")
+    ax.set_title("Phase-3 run metrics")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(plot_path)
+    plt.close(fig)
+
+
+def _dump_phase3_artifacts(history: list[dict], timestamp: str) -> None:
+    stats = _phase3_metric_stats(history)
+    for metric, info in stats["metrics"].items():
+        scale = max(info.get("scale", 1.0), 1e-9)
+        for entry in history:
+            entry[f"{metric}_scaled"] = float(entry[metric]) / scale
+    log_file, plot_file = _phase3_artifact_paths(timestamp)
+    payload = {"timestamp": timestamp, "history": history, "stats": stats}
+    with log_file.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+    _dump_phase3_plot(history, plot_file, stats)
+    print(f"Phase-3 artifacts saved: {log_file}, {plot_file}")
+
+
+def _plan_mdl_cost(plan: TilePlan, *, total_tiles: int, plan_changed: bool) -> float:
+    if total_tiles <= 0:
+        return 0.0
+    active_frac = float(plan.count) / float(total_tiles)
+    change_pen = 1.0 if plan_changed else 0.0
+    return active_frac + 0.25 * change_pen
+
+
+def train_epoch_phase3(
+    X: np.ndarray,
+    W: np.ndarray,
+    plan_r1: TilePlan,
+    plan_r0: TilePlan,
+    *,
+    lr: float,
+    alpha: float,
+    beta: float,
+    total_tiles: int,
+    plan_changed: bool,
+    radial_bins: int = 0,
+    microkernel=vnni_microkernel,
+) -> tuple[np.ndarray, float, dict, np.ndarray]:
+    C1 = block_sparse_matmul_plan(X, W, plan_r1, microkernel=microkernel)
+    C0 = block_sparse_matmul_plan(X, W, plan_r0, microkernel=microkernel)
+    V1 = _normalized_tile_energy(C1, plan_r1)
+    V0 = _normalized_tile_energy(C0, plan_r0)
+    task_loss = float((C1.astype(np.float32) ** 2).mean())
+    q_loss = float(((V1 - V0) ** 2).mean())
+    mdl = _plan_mdl_cost(plan_r1, total_tiles=total_tiles, plan_changed=plan_changed)
+    total_loss = task_loss + alpha * q_loss + beta * mdl
+    delta_V = V1 - V0
+    delta_V_flat = delta_V.reshape(-1)
+    tile_ids = plan_r1.tile_ids
+    err_q = np.zeros_like(C1, dtype=np.float32)
+    C1_float = C1.astype(np.float32)
+    for idx in range(plan_r1.count):
+        i0 = int(plan_r1.i0[idx])
+        j0 = int(plan_r1.j0[idx])
+        i1 = int(plan_r1.i1[idx])
+        j1 = int(plan_r1.j1[idx])
+        tile_id = int(tile_ids[idx]) if idx < tile_ids.size else idx
+        err_q[i0:i1, j0:j1] += 4.0 * float(delta_V_flat[tile_id]) * C1_float[i0:i1, j0:j1]
+    err = C1_float + alpha * err_q
+    gradW = np.zeros_like(W, dtype=np.float32)
+    for idx in range(plan_r1.count):
+        i0 = int(plan_r1.i0[idx])
+        j0 = int(plan_r1.j0[idx])
+        i1 = int(plan_r1.i1[idx])
+        j1 = int(plan_r1.j1[idx])
+        X_blk = X[i0:i1, :].astype(np.float32)
+        err_blk = err[i0:i1, j0:j1]
+        gradW[:, j0:j1] += X_blk.T @ err_blk
+    W = W - lr * gradW.astype(W.dtype)
+    radial_metrics: dict[str, float | list[float]] = {}
+    if radial_bins > 0:
+        radial1 = radial_bins_energy(C1, bins=radial_bins)
+        radial0 = radial_bins_energy(C0, bins=radial_bins)
+        radial_metrics = {
+            "radial_bins": radial1.tolist(),
+            "radial_quotient_loss": float(((radial1 - radial0) ** 2).mean()),
+        }
+    metrics = {
+        "task_loss": task_loss,
+        "quotient_loss": q_loss,
+        "mdl_cost": float(mdl),
+        "alpha": float(alpha),
+        "beta": float(beta),
+    }
+    metrics.update(radial_metrics)
+    return W, float(total_loss), metrics, C1
 
 
 def fused_sequence(X, W, plan, microkernel=vnni_microkernel):
@@ -920,6 +1195,51 @@ def main():
         default=False,
         help="Legacy reminder that Stage B uses blocked permutations (no-op).",
     )
+    parser.add_argument(
+        "--regime-noise",
+        choices=("none", "replan_always", "tile_shuffle", "cache_poison", "gate_jitter", "schedule_jitter"),
+        default="none",
+        help="Runtime perturbation mode for regime-robust execution testing.",
+    )
+    parser.add_argument(
+        "--resume-state",
+        type=Path,
+        help="Path to a saved training state (W + gate mask) to initialize the run.",
+    )
+    parser.add_argument(
+        "--save-state",
+        type=Path,
+        help="Path to write the final training state (W + gate mask) after the run.",
+    )
+    parser.add_argument(
+        "--phase3",
+        action="store_true",
+        help="Enable Phase-3 quotient-by-construction loss (plan-equivalence + MDL cost).",
+    )
+    parser.add_argument(
+        "--phase3-alpha",
+        type=float,
+        default=1.0,
+        help="Weight on the quotient consistency loss.",
+    )
+    parser.add_argument(
+        "--phase3-beta",
+        type=float,
+        default=0.05,
+        help="Weight on the MDL-style gauge cost.",
+    )
+    parser.add_argument(
+        "--phase3-alpha-warmup",
+        type=float,
+        default=0.3,
+        help="Fraction of epochs to ramp alpha from 0 to phase3-alpha.",
+    )
+    parser.add_argument(
+        "--phase3-radial-bins",
+        type=int,
+        default=DEFAULT_PHASE3_RADIAL_BINS,
+        help="Number of radial bins for the supplementary quotient diagnostic (<=0 to disable).",
+    )
     args = parser.parse_args()
 
     M = N = K = 256
@@ -930,9 +1250,18 @@ def main():
     jaccard_thresh = 0.9
     rng = np.random.default_rng(0)
     X = rng.integers(0, 3, size=(M, K), dtype=np.int8)
-    W = rng.integers(0, 3, size=(K, N), dtype=np.int8)
-    gate_prob = gate_prob_for_tile_density(tile_active, tile)
-    gate_mask = rng.random((M, N)) < gate_prob
+    if args.resume_state:
+        if not args.resume_state.exists():
+            print(f"resume state not found: {args.resume_state}", file=sys.stderr)
+            sys.exit(1)
+        W, gate_mask = _load_training_state(args.resume_state)
+        if W.shape != (K, N) or gate_mask.shape != (M, N):
+            print("resume state has incompatible shapes", file=sys.stderr)
+            sys.exit(1)
+    else:
+        W = rng.integers(0, 3, size=(K, N), dtype=np.int8)
+        gate_prob = gate_prob_for_tile_density(tile_active, tile)
+        gate_mask = rng.random((M, N)) < gate_prob
     tiles = tiles_from_gate_mask(gate_mask, tile=tile)
 
     # Baseline dense timing
@@ -941,6 +1270,10 @@ def main():
     t_plan0 = time.perf_counter()
     plan = build_tile_plan(tiles, tile=tile, M=M, N=N)
     sheet_h, sheet_w = plan.tile_grid_shape
+    plan0 = build_tile_plan(tiles, tile=tile, M=M, N=N)
+    total_tiles = int(sheet_h * sheet_w)
+    phase3_history = [] if args.phase3 else None
+    phase3_timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ") if args.phase3 else None
     t_plan = (time.perf_counter() - t_plan0) * 1e3
     t_pack = 0.0
 
@@ -1030,24 +1363,81 @@ def main():
         t_gate0 = time.perf_counter()
         gate_mask = update_gate_mask(gate_mask, gate_flip, rng)
         tiles = tiles_from_gate_mask(gate_mask, tile=tile)
+        tiles, gate_mask, noise_info = _apply_regime_noise(
+            args.regime_noise,
+            tiles,
+            gate_mask,
+            tile,
+            rng,
+        )
         t_gate = (time.perf_counter() - t_gate0) * 1e3
         next_plan = build_tile_plan(tiles, tile=tile, M=M, N=N)
+        if noise_info.get("permute_plan"):
+            next_plan = _permute_plan(next_plan, rng)
         jacc = jaccard_similarity(plan.tile_ids, next_plan.tile_ids)
         reuse = jacc >= jaccard_thresh
+        if noise_info.get("force_replan"):
+            reuse = False
+        plan_changed = False
         if not reuse:
             plan = next_plan
+            plan_changed = True
+        plan_hit = bool(reuse)
         plan_hits += int(reuse)
         t0 = time.perf_counter()
-        W, loss, C = train_epoch(X, W, plan, lr=1e-5, microkernel=vnni_microkernel)
+        if args.phase3:
+            warm_epochs = max(1, int(math.ceil(args.phase3_alpha_warmup * max(1, epochs))))
+            alpha_scale = min(1.0, float(e) / float(warm_epochs))
+            alpha = args.phase3_alpha * alpha_scale
+            W, loss, phase3_metrics, C = train_epoch_phase3(
+                X,
+                W,
+                plan_r1=plan,
+                plan_r0=plan0,
+                lr=1e-5,
+                alpha=alpha,
+                beta=args.phase3_beta,
+                total_tiles=total_tiles,
+                plan_changed=plan_changed,
+                radial_bins=args.phase3_radial_bins,
+                microkernel=vnni_microkernel,
+            )
+        else:
+            W, loss, C = train_epoch(X, W, plan, lr=1e-5, microkernel=vnni_microkernel)
         t1 = time.perf_counter()
         print(
             f"epoch {e+1}: loss={loss:8.2e}  time={(t1-t0)*1e3:6.2f} ms  "
             f"jaccard={jacc:5.2f}  plan_hit={int(reuse)}  gate_time={t_gate:5.2f} ms"
         )
+        if args.phase3:
+            print(
+                f"          phase3: task={phase3_metrics['task_loss']:.2e}  "
+                f"q={phase3_metrics['quotient_loss']:.2e}  "
+                f"mdl={phase3_metrics['mdl_cost']:.3f}  "
+                f"alpha={phase3_metrics['alpha']:.3f}"
+            )
+            if phase3_history is not None:
+                phase3_history.append(
+                        {
+                            "epoch": e + 1,
+                            "task_loss": phase3_metrics["task_loss"],
+                            "quotient_loss": phase3_metrics["quotient_loss"],
+                            "mdl_cost": phase3_metrics["mdl_cost"],
+                            "alpha": phase3_metrics["alpha"],
+                            "plan_hit": plan_hit,
+                            "plan_changed": plan_changed,
+                            "radial_bins": phase3_metrics.get("radial_bins"),
+                            "radial_quotient_loss": phase3_metrics.get("radial_quotient_loss"),
+                            "regime_noise": args.regime_noise,
+                            "regime_noise_desc": noise_info.get("desc"),
+                            "jaccard": jacc,
+                            "gate_time": t_gate,
+                            "resume_state": str(args.resume_state) if args.resume_state else None,
+                        }
+                    )
         sheet_energy = tile_energy_map(C, plan)
         dump_sheet_energy(sheet_energy)
         gate_density = float(tiles.mean()) if tiles.size else 0.0
-        plan_hit = bool(reuse)
         if plan_hit and reuse:
             stable_run_len += 1
         else:
@@ -1095,7 +1485,7 @@ def main():
             except Exception as exc:
                 print(f"warning: Vulkan capture failed at epoch {e+1}: {exc}", file=sys.stderr)
         if args.plan_hit_experiment:
-                plan_hit_observations.append(
+            plan_hit_observations.append(
                 {
                     "epoch": e,
                     "plan_hit": plan_hit,
@@ -1118,7 +1508,12 @@ def main():
             regime_mode=args.regime_mode,
             observer_class=args.observer_class,
         )
+    if args.phase3 and phase3_history:
+        _dump_phase3_artifacts(phase3_history, phase3_timestamp)
     print(f"plan_hit_rate     : {plan_hits}/{epochs}")
+    if args.save_state:
+        _save_training_state(args.save_state, W, gate_mask)
+        print(f"Training state saved to {args.save_state}")
     if args.stay_open > 0:
         stay_interval = max(0.01, args.stay_interval)
         end_time = time.time() + args.stay_open

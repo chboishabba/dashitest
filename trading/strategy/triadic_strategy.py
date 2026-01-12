@@ -45,7 +45,15 @@ class TriadicStrategy:
         # Optional confidence gate
         conf = 1.0
         if self.confidence_fn is not None:
-            conf = max(0.0, min(1.0, float(self.confidence_fn(ts, state))))
+            raw_conf = self.confidence_fn(ts, state)
+            # Accept either scalar or (ell, qfeat) tuple; ignore qfeat here.
+            if isinstance(raw_conf, tuple):
+                raw_conf = raw_conf[0]
+            try:
+                conf = float(raw_conf)
+            except (TypeError, ValueError):
+                conf = 0.0
+            conf = max(0.0, min(1.0, conf))
 
         # Hysteresis HOLD gate: turn ACT on at tau_on, off at tau_off
         hold_by_conf = False

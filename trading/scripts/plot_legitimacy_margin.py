@@ -19,7 +19,11 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 from plot_utils import timestamped_path
-from trading.regime import RegimeSpec
+
+try:
+    from trading.regime import RegimeSpec
+except ModuleNotFoundError:
+    from regime import RegimeSpec
 
 
 def sign_run_lengths(states: np.ndarray) -> np.ndarray:
@@ -134,7 +138,7 @@ def main():
             raise SystemExit(f"Missing required column '{col}' in log.")
 
     states = pd.to_numeric(df["state"], errors="coerce").fillna(0).to_numpy(dtype=int)
-    prices = pd.to_numeric(df["price"], errors="coerce").fillna(method="ffill").fillna(method="bfill").to_numpy(dtype=float)
+    prices = pd.to_numeric(df["price"], errors="coerce").ffill().bfill().to_numpy(dtype=float)
     t = pd.to_numeric(df["t"], errors="coerce").to_numpy(dtype=float)
     actionability = pd.to_numeric(df["actionability"], errors="coerce").to_numpy(dtype=float)
 

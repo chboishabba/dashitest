@@ -23,12 +23,14 @@ try:
     from trading.hft_exec import LOBReplayExecution
     from trading.intent import Intent
     from trading.strategy.triadic_strategy import TriadicStrategy
+    from trading.strategy.learner_adapter import LearnerAdapter
     from trading.regime import RegimeSpec, check_regime
 except ModuleNotFoundError:
     from bar_exec import BarExecution
     from hft_exec import LOBReplayExecution
     from intent import Intent
     from strategy.triadic_strategy import TriadicStrategy
+    from strategy.learner_adapter import LearnerAdapter
     from regime import RegimeSpec, check_regime
 import pandas as pd
 import pathlib
@@ -50,6 +52,8 @@ def run_bars(
     confidence_fn=None,
     tau_conf_enter: float = 0.0,
     tau_conf_exit: float = 0.0,
+    use_stub_adapter: bool = False,
+    adapter_kwargs: dict = None,
 ):
     """
     bars: DataFrame with columns [ts, close, state] (state ∈ {-1,0,+1})
@@ -59,10 +63,22 @@ def run_bars(
     confidence_fn: optional callable(ts, state) -> confidence in [0,1]
     tau_conf: (deprecated) use tau_on/tau_off
     tau_on/tau_off: hysteresis thresholds; ACT when conf >= tau_on, HOLD when conf < tau_off
+    use_stub_adapter: if True and confidence_fn is None, uses LearnerAdapter stub to supply ℓ
     """
     # backward compatibility
     if tau_conf_enter is not None and tau_conf_exit is not None and tau_conf_enter < tau_conf_exit:
         raise ValueError("tau_conf_enter should be >= tau_conf_exit for hysteresis")
+
+    adapter = None
+    current_price = None
+    if confidence_fn is None and use_stub_adapter:
+        adapter = LearnerAdapter(**(adapter_kwargs or {}))
+
+        def confidence_fn(ts, state):
+            payload = {"state": state, "price": current_price}
+            ell, _qfeat = adapter.update(ts, payload)
+            return ell
+
     # strategy emits intents from triadic state
     strategy = TriadicStrategy(
         symbol=symbol,
@@ -90,6 +106,7 @@ def run_bars(
         state = int(row["state"])
         price = float(row["close"])
         volume = float(row["volume"]) if "volume" in row else np.nan
+        current_price = price
         # mark-to-market on previous exposure
         if prev_price is not None:
             ret = (price / prev_price) - 1.0

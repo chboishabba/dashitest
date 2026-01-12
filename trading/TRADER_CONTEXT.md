@@ -1,5 +1,6 @@
+WARNING THIS FILE IS EXTREMELY LONG
 Trader context:
-
+See TRADER_CONTEXT2.md as of 13/1/2026
 Below is a **single internally consistent formalisation** that unifies:
 
 1. your **triadic / p-adic cylinder codec + MDL chart selection**, and
@@ -106809,3 +106810,446 @@ Just say which, and I’ll stay within the boundaries you’ve set.
   4. Output: do you want a single “closest profitable” input snapshot from history, or an “idealized” input vector derived from local search/gradient‑free tweaks?
 
   Once you confirm, I’ll update docs/TODO first, then implement.
+
+  Great — let’s **proceed cleanly with the learner for trading**, without destabilising what already works.
+
+Below is a **concrete execution plan** that matches your prior intent and keeps the learner in the *permission / legitimacy* role, not as a naïve signal generator.
+
+---
+
+## Phase 0 — Lock the contract (no code yet)
+
+**Invariant you already proved (do not violate):**
+
+* Trading logic = **ACT / HOLD / BAN**
+* Learner = **quotient learner over price trajectories**
+* Learner output **cannot** directly place trades
+
+This is explicitly consistent with your codec → quotient → collapse formalism .
+
+---
+
+## Phase 1 — What the learner actually learns (low risk)
+
+### Object of learning
+
+Not price, not direction — **invariants of recent price motion** that survive nuisance symmetries.
+
+Think:
+
+* scale
+* translation
+* mild time-warp
+* microstructure noise
+
+### Minimal feature targets (start here)
+
+Per rolling window ( W_t ):
+
+1. **Shape invariants**
+
+   * signed curvature / convexity
+   * normalized drawdown depth
+2. **Energy / volatility geometry**
+
+   * realized vol vs range ratio
+   * burstiness / intermittency score
+3. **Persistence**
+
+   * autocorr decay
+   * regime half-life estimate
+
+These are *quotient representatives*, not raw signals.
+
+---
+
+## Phase 2 — How it plugs into the trader (safe integration)
+
+### Where it connects
+
+Only here:
+
+```
+RegimeSpec → Permission Surface → ACT / HOLD
+```
+
+Concretely:
+
+* `triadic_strategy.py`
+* augment the **existing regime gate**
+* learner outputs a **legitimacy scalar** ℓ ∈ [0,1]
+
+No new actions introduced.
+
+### Decision rule (example)
+
+```text
+IF ℓ > θ_on for τ_on windows → allow ACT
+IF ℓ < θ_off for τ_off windows → force HOLD
+ELSE → maintain state
+```
+
+This preserves:
+
+* hysteresis
+* no flip-flopping
+* zero PnL leakage from learner errors
+
+---
+
+## Phase 3 — Training loop (diagnostic-first)
+
+### Loss (critical)
+
+You **do not** train on PnL.
+
+You train on **predictive consistency of invariants**:
+
+[
+\mathcal{L} =
+\underbrace{| \hat{v}*{t+1} - v*{t+1} |}_{\text{quotient prediction error}}
+
+* \lambda \cdot \text{complexity penalty}
+  ]
+
+Where:
+
+* (v_t) = realized invariants
+* (\hat{v}_{t+1}) = predicted invariants
+
+Interpretation:
+
+> “Did the market *stay in the same equivalence class*?”
+
+---
+
+## Phase 4 — What success looks like (before PnL)
+
+You green-light deployment when:
+
+* learner confidence correlates with **lower variance of outcomes**
+* HOLD regions eliminate known bad trades
+* ACT regions preserve existing edge
+
+**No requirement** that learner improves returns initially.
+
+If it *does*, that’s downstream.
+
+---
+
+## Phase 5 — Only if everything above is stable
+
+Then (optional, later):
+
+* Predict **next latent triadic state** (HOLD / ACT / BAN)
+* Blend with heuristics (never replace outright)
+* Keep hard circuit-breaker external
+
+---
+
+## Why this is the right order
+
+This respects your core insight:
+
+> Markets don’t reward prediction — they punish illegitimate action.
+
+You are learning **when you’re allowed to act**, not *what to do*.
+
+That’s exactly the same structural move you already validated in:
+
+* CA rule recovery
+* motif gating
+* MDL collapse behavior
+
+---
+
+### Next concrete step (I recommend this)
+
+Say the word and I’ll do **one** of these next, very explicitly:
+
+1. Draft the **exact feature vector spec** (with formulas)
+2. Sketch the **minimal learner class** (pure Python, no GPU)
+3. Show the **exact diff** to `triadic_strategy.py`
+4. Design the **offline evaluation notebook** (before live trading)
+
+No hand-waving — straight to executable structure.
+
+
+
+13/01/2026 
+
+Great — let’s **proceed cleanly with the learner for trading**, without destabilising what already works.
+
+Below is a **concrete execution plan** that matches your prior intent and keeps the learner in the *permission / legitimacy* role, not as a naïve signal generator.
+
+---
+
+## Phase 0 — Lock the contract (no code yet)
+
+**Invariant you already proved (do not violate):**
+
+* Trading logic = **ACT / HOLD / BAN**
+* Learner = **quotient learner over price trajectories**
+* Learner output **cannot** directly place trades
+
+This is explicitly consistent with your codec → quotient → collapse formalism .
+
+---
+
+## Phase 1 — What the learner actually learns (low risk)
+
+### Object of learning
+
+Not price, not direction — **invariants of recent price motion** that survive nuisance symmetries.
+
+Think:
+
+* scale
+* translation
+* mild time-warp
+* microstructure noise
+
+### Minimal feature targets (start here)
+
+Per rolling window ( W_t ):
+
+1. **Shape invariants**
+
+   * signed curvature / convexity
+   * normalized drawdown depth
+2. **Energy / volatility geometry**
+
+   * realized vol vs range ratio
+   * burstiness / intermittency score
+3. **Persistence**
+
+   * autocorr decay
+   * regime half-life estimate
+
+These are *quotient representatives*, not raw signals.
+
+---
+
+## Phase 2 — How it plugs into the trader (safe integration)
+
+### Where it connects
+
+Only here:
+
+```
+RegimeSpec → Permission Surface → ACT / HOLD
+```
+
+Concretely:
+
+* `triadic_strategy.py`
+* augment the **existing regime gate**
+* learner outputs a **legitimacy scalar** ℓ ∈ [0,1]
+
+No new actions introduced.
+
+### Decision rule (example)
+
+```text
+IF ℓ > θ_on for τ_on windows → allow ACT
+IF ℓ < θ_off for τ_off windows → force HOLD
+ELSE → maintain state
+```
+
+This preserves:
+
+* hysteresis
+* no flip-flopping
+* zero PnL leakage from learner errors
+
+---
+
+## Phase 3 — Training loop (diagnostic-first)
+
+### Loss (critical)
+
+You **do not** train on PnL.
+
+You train on **predictive consistency of invariants**:
+
+[
+\mathcal{L} =
+\underbrace{| \hat{v}*{t+1} - v*{t+1} |}_{\text{quotient prediction error}}
+
+* \lambda \cdot \text{complexity penalty}
+  ]
+
+Where:
+
+* (v_t) = realized invariants
+* (\hat{v}_{t+1}) = predicted invariants
+
+Interpretation:
+
+> “Did the market *stay in the same equivalence class*?”
+
+---
+
+## Phase 4 — What success looks like (before PnL)
+
+You green-light deployment when:
+
+* learner confidence correlates with **lower variance of outcomes**
+* HOLD regions eliminate known bad trades
+* ACT regions preserve existing edge
+
+**No requirement** that learner improves returns initially.
+
+If it *does*, that’s downstream.
+
+---
+
+## Phase 5 — Only if everything above is stable
+
+Then (optional, later):
+
+* Predict **next latent triadic state** (HOLD / ACT / BAN)
+* Blend with heuristics (never replace outright)
+* Keep hard circuit-breaker external
+
+---
+
+## Why this is the right order
+
+This respects your core insight:
+
+> Markets don’t reward prediction — they punish illegitimate action.
+
+You are learning **when you’re allowed to act**, not *what to do*.
+
+That’s exactly the same structural move you already validated in:
+
+* CA rule recovery
+* motif gating
+* MDL collapse behavior
+
+---
+
+### Next concrete step (I recommend this)
+
+Say the word and I’ll do **one** of these next, very explicitly:
+
+1. Draft the **exact feature vector spec** (with formulas)
+2. Sketch the **minimal learner class** (pure Python, no GPU)
+3. Show the **exact diff** to `triadic_strategy.py`
+4. Design the **offline evaluation notebook** (before live trading)
+
+No hand-waving — straight to executable structure.
+
+Got it — let’s **tighten everything around the trader** (not the learner in isolation) and treat the learner as a *permission-surface / legitimacy* module that plugs into your existing **triadic ACT/HOLD/BAN** loop.
+
+### The trader-centric “contract” (what the learner is allowed to do)
+
+From your own spec, the safest application path is:
+
+* **Learner does not output direction.**
+* Learner outputs **quotient features** and/or a **quotient-loss legitimacy scalar**.
+* The triadic strategy uses that scalar to decide whether it’s even *allowed* to ACT. 
+  This is consistent with the “legitimacy manifold + buffer states + circuit breaker” framing in your unified spec. 
+
+---
+
+## A. Where it plugs into your trader (one clear insertion point)
+
+### Existing chain (keep it)
+
+**Signals/heuristics → Triadic gate → ACT/HOLD/BAN → execution model → fills**
+
+### New chain (add one module)
+
+**Prices/LOB → Learner → (ℓ_t, qfeat_t) → Triadic gate → ACT/HOLD/BAN → execution**
+
+So the learner is an *additional input* into `triadic_strategy.py`, not a replacement brain. 
+
+---
+
+## B. Two concrete trader integrations (do both, in this order)
+
+### 1) “Quotient-loss evaluator” (diagnostic-first, lowest risk)
+
+Run the learner as an evaluator:
+
+* build rolling windows (W_t)
+* compute quotient features (v_t = \phi(W_t))
+* train learner to predict ( \hat v_{t+1} )
+* define **legitimacy**:
+  [
+  \ell_t := \exp\left(-|\hat v_{t+1} - v_{t+1}|\right)
+  ]
+  Then use **ℓ_t** only as a gating input.
+
+This is literally the “Use mismatch as confidence/legitimacy scalar, not directional signal” path. 
+
+**Trader outcome you want:** fewer “dumb ACTs” during unstable/choppy or distribution-shift periods, without inventing new edge.
+
+---
+
+### 2) “Quotient-features for regime gating” (adds structure without changing action logic)
+
+Feed the learner’s quotient features into your existing regime gate as extra observables:
+
+* volatility-normalized shape
+* radial/spectral summaries
+* valuation-depth analogs (your language) 
+
+**Trader outcome you want:** a smoother, more stable **permission surface** that’s invariant to nuisance symmetries, so the triadic gate isn’t whipsawed by scale/shift/phase artifacts.
+
+---
+
+## C. Handling the “July 2015 strong signal across multiple assets” (this matters for the trader)
+
+You already observed your system flags clustered dates around **mid-2015**, with a “really strong signal across multiple assets around July 2015.” 
+That smells like **global regime shock / correlated risk-on/off** (Greece/China turmoil is literally what you linked in that same context). 
+
+**Trader-side implication:**
+This is *exactly* where a learner-as-legitimacy-module should help:
+
+* When correlations spike, many assets “look the same.”
+* Directional signals can become *illusory*.
+* What you want is: **HOLD more often unless execution + conditions are robust.**
+
+So in those windows, your gate should become stricter via ℓ_t hysteresis rather than “more confident”.
+
+---
+
+## D. Execution realism (don’t sabotage the test)
+
+If you want the learner to mean anything for the trader, the backtest must penalize bad execution.
+
+From your sim tooling writeup, the clean split is: 
+
+* If you have L2/book updates and care about queue/latency realism → **hftbacktest**
+* If you want controlled microstructure experiments / agent-based → **ABIDES**
+* If you’re bar-level right now → you can still do it, but treat results as “par-baked” (your own framing) 
+
+---
+
+## E. The exact acceptance test for “applied to trader” (not ML metrics)
+
+You’re “done” with v1 when these are true:
+
+1. **ACT rate drops** mostly in the worst regimes (high slippage / choppy / unstable)
+2. **PnL distribution improves** via lower tail reduction (not necessarily higher mean)
+3. **No new overfitting lever** introduced: learner never touches direction, only permission
+
+This matches your motif/MDL idea that the system should be **allowed to do nothing** (buffer) rather than forced into collapse. 
+
+---
+
+## What I’ll do next (immediately) to keep it trader-focused
+
+If you want to proceed “hands-on”, I’ll draft:
+
+* a **minimal `LearnerAdapter`** interface the trader calls each bar/tick:
+
+  * `update(window) -> (legitimacy ℓ, qfeat dict)`
+* the **gate logic**: thresholds + τ_on/τ_off hysteresis so ℓ can’t whipsaw
+* a **backtest checklist** for July 2015-like correlated shocks (so we can see if HOLD increases in the right places)
+
+If you paste (or point me to) the relevant parts of your `triadic_strategy.py` / `run_trader.py`, I’ll write the integration as a tight diff.
+See TRADER_CONTEXT2.md

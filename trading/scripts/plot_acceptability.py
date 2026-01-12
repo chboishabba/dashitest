@@ -23,7 +23,7 @@ def load_log(path: str) -> pd.DataFrame:
         raise SystemExit(f"Failed to read log {path}: {e}")
 
 
-def build_heatmap(df: pd.DataFrame, time_bins: int, act_bins: int):
+def build_heatmap(df: pd.DataFrame, time_bins: int, act_bins: int, clip: float = None):
     if "acceptable" not in df or "actionability" not in df or "t" not in df:
         raise SystemExit("Log must contain columns: acceptable, actionability, t")
     acc = df["acceptable"].astype(bool)
@@ -45,6 +45,8 @@ def build_heatmap(df: pd.DataFrame, time_bins: int, act_bins: int):
     hist_count, _, _ = np.histogram2d(t, act, bins=[time_edges, act_edges])
     with np.errstate(invalid="ignore", divide="ignore"):
         density = np.where(hist_count > 0, hist_acc / hist_count, np.nan)
+    if clip is not None:
+        density = np.clip(density, 0.0, clip)
     return density, time_edges, act_edges
 
 
@@ -79,11 +81,12 @@ def main():
     ap.add_argument("--log", type=str, required=True, help="Trading log CSV with acceptable/actionability/t")
     ap.add_argument("--time_bins", type=int, default=100, help="Number of time bins")
     ap.add_argument("--act_bins", type=int, default=20, help="Number of actionability bins")
+    ap.add_argument("--clip", type=float, default=None, help="Optional clip for density to improve contrast")
     ap.add_argument("--save", type=str, default=None, help="Optional output image path")
     args = ap.parse_args()
 
     df = load_log(args.log)
-    density, t_edges, a_edges = build_heatmap(df, args.time_bins, args.act_bins)
+    density, t_edges, a_edges = build_heatmap(df, args.time_bins, args.act_bins, clip=args.clip)
     plot_heatmap(density, t_edges, a_edges, title="Acceptable density (time × actionability)", save=args.save)
 
 

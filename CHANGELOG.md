@@ -1,7 +1,11 @@
 # Changelog
 
 ## Unreleased
+- Added `docs/phase3_quotient_learning.md` describing the Phase-3 plan-equivalence + MDL loss, label-entropy corrections, and the rationale for stopping the observer ladder once the quotient is enforced (`CONTEXT.md#L39825-L40230`).
+- Normalized the Phase-3 tile-energy invariant (`log1p(tile_energy_map)`) and wired a minimal quotient VJP into `dashilearn/bsmoe_train.py` so the gradient follows the normalized `delta_V`, keeping `α` interpretable (`CONTEXT.md#L39825-L40797`).
+- Added a Phase-3 logger/grapher that auto-saves timestamped `logs/bsmoe_train/bsmoe_phase3_<timestamp>.json` histories and `outputs/bsmoe_phase3_<timestamp>.png` metric plots for each run so experiments stay reproducible per `docs/phase3_quotient_learning.md`.
 - Documented the Stage B2 acceptance/failure/ambiguous protocol (p thresholds, BA targets, guardrails, attribution/logging recipes) in `docs/b2_acceptance.md` so every blocked-permutation run can reference the canonical checklist (`CONTEXT.md#L36915-L38950`).
+- Added `--phase3` plus α/β/warmup knobs to `dashilearn/bsmoe_train.py`, wired a canonical plan `r₀`, tile-energy quotient loss, and an MDL gauge cost so the learner trains on invariants instead of chasing the observer ladder.
 - Added a Vulkan↔JAX parity mapping note and identified the first Vulkan kernel
   target for block-wise residual statistics.
 - Added `scripts/bridge_task.py` and `scripts/bridge_task_summary.py` so codec/DNA

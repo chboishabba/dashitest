@@ -152,6 +152,12 @@
   - Refer to `docs/b2_acceptance.md` when planning each blocked-permutation run so the definitions, thresholds, guardrails, and logging matrix stay explicit.
   - Track how the new thresholds (p ≤ 0.01, effect-size floors, failure zone) play out across alternating controls and plan-hit regimes, noting any remaining decision points.
   - Tie motif-attribution follow-ups to the documented occlusion/gradient/pyramid strategies only when B2 officially lights up (`CONTEXT.md#L38691-L38800`).
+- **Phase 3: Quotient-first learning**
+  - Implement the plan-equivalence + MDL loss in `bsmoe_train.py` (canonical plan `r₀`, invariant `V=tile energy map`, `α`/`β` knobs, logging of `task_loss`, `quotient_loss`, `mdl_cost`) per `docs/phase3_quotient_learning.md` and `CONTEXT.md#L39825-L40230`.
+  - Freeze the observer ladder once Phase 3 is activated; log the last B2 run (alternating regime with `p=0.192`, `BA≈0.61`) as the final hypothesis test before quotient optimization begins.
+  - Before any further Stage B evaluation, adjust `--plan-stable-length` / cache-hit bins so regime labels hit every class (prevent `{2:1,4:63}` imbalances and the resulting degenerate permutation tests described around `CONTEXT.md#L39890-L39920`).
+  - Normalize the tile-energy invariant (`log1p(tile_energy_map)`) and propagate a minimal quotient VJP so the gradient respects the normalized `delta_V` direction while keeping `α` interpretable.
+  - Confirm that each Phase-3 run writes `logs/bsmoe_train/bsmoe_phase3_<timestamp>.json` and `outputs/bsmoe_phase3_<timestamp>.png` so the new logger/grapher artifacts are generated per `docs/phase3_quotient_learning.md`.
 - Use `--regime-mode gate-density` or `--regime-mode alternating` (with `--gate-density-threshold`/`--regime-alternation-interval`) to create a non-degenerate regime for Stage B, then rerun the experiment to validate whether the spatial field encodes those regimes.  
 - Compare the Stage B p-value between `plan-hit` vs `gate-density` runs to see if true spatial decoding is possible once the label stops collapsing to a constant, and log the `Regime stats` counts + entropy (`CONTEXT.md#L34081-L34282`).  
 - Expand the regime via `--gate-density-bins` (or the alternating control) so H(R)>0 before Stage B executes, then explore B1 correlation-based features (and fixed kernels later) to see whether the observer still cannot decode the regime.  
