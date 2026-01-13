@@ -95,6 +95,28 @@ class RunningStats:
         return math.sqrt(self.m2 / (self.n - 1))
 
 
+@dataclass
+class BucketBuffer:
+    size: int
+    values: np.ndarray
+    index: int = 0
+    count: int = 0
+
+    @classmethod
+    def create(cls, size: int) -> "BucketBuffer":
+        return cls(size=size, values=np.zeros(size, dtype=float))
+
+    def add(self, x: float) -> None:
+        if not math.isfinite(x):
+            return
+        self.values[self.index] = x
+        self.index = (self.index + 1) % self.size
+        self.count = min(self.count + 1, self.size)
+
+    def sample(self) -> np.ndarray:
+        return self.values[: self.count]
+
+
 def _ell_bin(ell: float, bins: int) -> int:
     if not math.isfinite(ell):
         return -1
@@ -104,6 +126,22 @@ def _ell_bin(ell: float, bins: int) -> int:
     if idx >= bins:
         return bins - 1
     return idx
+
+
+def _zscore(arr: np.ndarray) -> np.ndarray:
+    mean = np.nanmean(arr)
+    std = np.nanstd(arr)
+    if not math.isfinite(std) or std <= 0:
+        return np.zeros_like(arr, dtype=float)
+    return (arr - mean) / std
+
+
+def _softmax_vec(scores: np.ndarray, temp: float) -> np.ndarray:
+    t = max(1e-6, float(temp))
+    x = scores / t
+    x = x - np.max(x)
+    expx = np.exp(x)
+    return expx / np.clip(expx.sum(), 1e-12, None)
 
 
 def main() -> None:
@@ -117,8 +155,34 @@ def main() -> None:
     ap.add_argument("--tau-on", type=float, default=0.5, help="ell hysteresis on.")
     ap.add_argument("--tau-off", type=float, default=0.49, help="ell hysteresis off.")
     ap.add_argument("--ell-bins", type=int, default=10, help="Number of ell bins for veto stats.")
-    ap.add_argument("--kappa", type=float, default=0.0, help="Veto threshold: mean - kappa*std <= 0.")
-    ap.add_argument("--min-samples", type=int, default=50, help="Min samples before veto activates.")
+    ap.add_argument("--veto-mode", type=str, default="cvar", choices=["meanstd", "cvar"])
+    ap.add_argument("--kappa", type=float, default=0.0, help="Mean/std veto: mean - kappa*std <= 0.")
+    ap.add_argument("--cvar-alpha", type=float, default=0.10, help="CVaR tail alpha.")
+    ap.add_argument("--epsilon", type=float, default=0.0, help="CVaR veto threshold.")
+    ap.add_argument("--veto-min-samples", type=int, default=50, help="Min samples before veto activates.")
+    ap.add_argument("--veto-buffer", type=int, default=1024, help="Per-bucket buffer size.")
+    ap.add_argument("--veto-cooldown", type=int, default=25, help="Cooldown bars after veto.")
+    ap.add_argument("--hazard-veto", action="store_true", help="Enable hazard veto.")
+    ap.add_argument("--hazard-threshold", type=float, default=2.0, help="Hazard veto threshold.")
+    ap.add_argument("--hazard-a", type=float, default=1.0, help="Hazard weight for burstiness.")
+    ap.add_argument("--hazard-b", type=float, default=1.0, help="Hazard weight for curvature.")
+    ap.add_argument("--hazard-c", type=float, default=1.0, help="Hazard weight for vol_ratio.")
+    ap.add_argument("--inst-temp", type=float, default=1.0, help="Instrument score temperature.")
+    ap.add_argument("--inst-w-iv", type=float, default=1.0, help="Option score weight for IV.")
+    ap.add_argument("--inst-w-iv-chg", type=float, default=0.5, help="Option score weight for IV change.")
+    ap.add_argument("--inst-w-hazard", type=float, default=0.8, help="Option score weight for hazard.")
+    ap.add_argument("--inst-w-funding", type=float, default=0.4, help="Option score weight for funding.")
+    ap.add_argument("--inst-w-basis", type=float, default=0.4, help="Option score weight for basis.")
+    ap.add_argument("--inst-w-ell", type=float, default=0.5, help="Option score weight for ell margin.")
+    ap.add_argument("--perp-w-trend", type=float, default=0.8, help="Perp score weight for trend proxy.")
+    ap.add_argument("--perp-w-iv", type=float, default=0.6, help="Perp score weight for IV.")
+    ap.add_argument("--perp-w-hazard", type=float, default=0.6, help="Perp score weight for hazard.")
+    ap.add_argument("--perp-w-carry", type=float, default=0.5, help="Perp score weight for funding carry.")
+    ap.add_argument("--perp-w-oi", type=float, default=0.4, help="Perp score weight for OI change.")
+    ap.add_argument("--spot-w-funding", type=float, default=0.3, help="Spot score weight for funding.")
+    ap.add_argument("--spot-w-basis", type=float, default=0.3, help="Spot score weight for basis.")
+    ap.add_argument("--spot-w-hazard", type=float, default=0.4, help="Spot score weight for hazard.")
+    ap.add_argument("--exp-temp", type=float, default=1.0, help="Exposure score temperature.")
     ap.add_argument("--horizon", type=int, default=None, help="Override horizon for delta_pnl.")
     ap.add_argument("--min-run-length", type=int, default=3, help="RegimeSpec min_run_length.")
     ap.add_argument("--max-flip-rate", type=float, default=None, help="RegimeSpec max_flip_rate.")
@@ -153,6 +217,25 @@ def main() -> None:
         meta_cols = list(aligned.columns)
         meta_values = aligned.to_numpy(dtype=float)
 
+    if meta_values is not None:
+        meta_map = {name: meta_values[:, idx] for idx, name in enumerate(meta_cols)}
+        iv = meta_map.get("opt_mark_iv_p50", meta_map.get("opt_mark_iv_mean"))
+        basis = None
+        if "premium_mark_price" in meta_map and "premium_index_price" in meta_map:
+            basis = meta_map["premium_mark_price"] - meta_map["premium_index_price"]
+        funding = meta_map.get("premium_funding_rate")
+        oi_val = meta_map.get("oi_sum_open_interest_value")
+        iv_chg = np.diff(iv, prepend=iv[0]) if iv is not None else None
+        oi_chg = np.diff(oi_val, prepend=oi_val[0]) if oi_val is not None else None
+        z_iv = _zscore(iv) if iv is not None else None
+        z_iv_chg = _zscore(iv_chg) if iv_chg is not None else None
+        z_basis = _zscore(np.abs(basis)) if basis is not None else None
+        z_funding = _zscore(np.abs(funding)) if funding is not None else None
+        z_oi_chg = _zscore(oi_chg) if oi_chg is not None else None
+    else:
+        iv = iv_chg = basis = funding = oi_chg = None
+        z_iv = z_iv_chg = z_basis = z_funding = z_oi_chg = None
+
     model = json.loads(args.dir_model.read_text())
     order = int(model["order"])
     classes = model["classes"]
@@ -164,6 +247,11 @@ def main() -> None:
 
     qfeat = tape.mm[args.series, :, :6].astype(np.float32, copy=False)
     ell = tape.mm[args.series, :, 6].astype(np.float32, copy=False)
+    z_hazard = _zscore(
+        args.hazard_a * qfeat[:, 3] + args.hazard_b * qfeat[:, 1] + args.hazard_c * qfeat[:, 0]
+    )
+    z_trend = _zscore(np.abs(qfeat[:, 4]))
+    z_ell_margin = _zscore(ell - args.tau_on)
 
     log_price = np.log(np.clip(price, 1e-12, None))
     future_ret = np.full(price.shape[0], np.nan, dtype=float)
@@ -184,11 +272,19 @@ def main() -> None:
     windows = np.lib.stride_tricks.sliding_window_view(qfeat, window_shape=order, axis=0)
     feat_mat = windows.reshape(-1, order * qfeat.shape[1])
 
-    stats: dict[tuple[int, int], RunningStats] = {}
+    stats: dict[tuple[int, int, str], RunningStats] = {}
+    buffers: dict[tuple[int, int, str], BucketBuffer] = {}
     rows = []
     is_holding = False
+    cooldown = 0
 
     for t in range(price.size):
+        qrow = qfeat[t]
+        hazard = (
+            args.hazard_a * float(qrow[3])
+            + args.hazard_b * float(qrow[1])
+            + args.hazard_c * float(qrow[0])
+        )
         row = {
             "i": int(t),
             "ts": int(ts_int[t]),
@@ -198,6 +294,7 @@ def main() -> None:
             "actionability": float(ell[t]),
             "margin": float(margin[t]) if math.isfinite(margin[t]) else float("nan"),
             "acceptable": bool(acceptable[t]),
+            "hazard": float(hazard),
         }
         if meta_values is not None:
             for idx, col in enumerate(meta_cols):
@@ -213,6 +310,40 @@ def main() -> None:
         if ell[t] <= 0.0 or not math.isfinite(ell[t]):
             gate_open = False
 
+        if cooldown > 0:
+            cooldown -= 1
+            row.update(
+                {
+                    "dir_pred": 0,
+                    "p_long": float("nan"),
+                    "p_flat": float("nan"),
+                    "p_short": float("nan"),
+                    "delta_pnl": float(future_ret[t]),
+                    "delta_pnl_signed": float("nan"),
+                    "veto": 1,
+                    "veto_reason": "cooldown",
+                    "would_act": "HOLD",
+                    "action": 0,
+                    "hold": 1,
+                    "bucket_n": 0,
+                    "bucket_q": float("nan"),
+                    "bucket_cvar": float("nan"),
+                    "instrument_pred": "flat",
+                    "p_spot": float("nan"),
+                    "p_perp": float("nan"),
+                    "p_option": float("nan"),
+                    "exposure_pred": "flat",
+                    "p_exp_small": float("nan"),
+                    "p_exp_med": float("nan"),
+                    "score_best": float("nan"),
+                    "score_second": float("nan"),
+                    "score_margin": float("nan"),
+                }
+            )
+            is_holding = True
+            rows.append(row)
+            continue
+
         if t < order - 1 or t >= price.size - horizon or not gate_open:
             row.update(
                 {
@@ -227,6 +358,19 @@ def main() -> None:
                     "would_act": "HOLD",
                     "action": 0,
                     "hold": 1,
+                    "bucket_n": 0,
+                    "bucket_q": float("nan"),
+                    "bucket_cvar": float("nan"),
+                    "instrument_pred": "flat",
+                    "p_spot": float("nan"),
+                    "p_perp": float("nan"),
+                    "p_option": float("nan"),
+                    "exposure_pred": "flat",
+                    "p_exp_small": float("nan"),
+                    "p_exp_med": float("nan"),
+                    "score_best": float("nan"),
+                    "score_second": float("nan"),
+                    "score_margin": float("nan"),
                 }
             )
             is_holding = True
@@ -247,28 +391,52 @@ def main() -> None:
         key = (dir_pred, ell_bin)
         if key not in stats:
             stats[key] = RunningStats()
+        if key not in buffers:
+            buffers[key] = BucketBuffer.create(int(args.veto_buffer))
         if dir_pred != 0:
             stats[key].update(delta_signed)
+            buffers[key].add(delta_signed)
 
         veto = 0
         veto_reason = ""
         st = stats[key]
+        buf = buffers[key]
+        bucket_q = float("nan")
+        bucket_cvar = float("nan")
+
         if dir_pred == 0:
             veto_reason = "flat"
-        elif st.n < args.min_samples:
+        elif args.hazard_veto and hazard > args.hazard_threshold:
+            veto = 1
+            veto_reason = "hazard"
+        elif st.n < args.veto_min_samples:
             veto = 1
             veto_reason = "insufficient_samples"
         else:
-            std = st.std()
-            thresh = st.mean - args.kappa * (std if math.isfinite(std) else 0.0)
-            if thresh <= 0.0:
-                veto = 1
-                veto_reason = "mean_minus_kstd<0"
+            if args.veto_mode == "meanstd":
+                std = st.std()
+                thresh = st.mean - args.kappa * (std if math.isfinite(std) else 0.0)
+                if thresh <= 0.0:
+                    veto = 1
+                    veto_reason = "mean_minus_kstd<0"
+            else:
+                alpha = float(args.cvar_alpha)
+                values = buf.sample()
+                if values.size:
+                    k = max(0, int(math.floor(alpha * values.size)) - 1)
+                    bucket_q = float(np.partition(values, k)[k]) if values.size > 1 else float(values[0])
+                    tail = values[values <= bucket_q]
+                    bucket_cvar = float(np.mean(tail)) if tail.size else float("nan")
+                if math.isfinite(bucket_cvar) and bucket_cvar < -float(args.epsilon):
+                    veto = 1
+                    veto_reason = "cvar"
 
         if dir_pred == 0 or veto == 1:
             would_act = "HOLD"
             action = 0
             is_holding = True
+            if veto == 1 and veto_reason not in {"insufficient_samples", "flat"}:
+                cooldown = max(cooldown, int(args.veto_cooldown))
         else:
             would_act = "ACT_LONG" if dir_pred > 0 else "ACT_SHORT"
             action = int(dir_pred)
@@ -287,6 +455,9 @@ def main() -> None:
                 "would_act": would_act,
                 "action": action,
                 "hold": int(action == 0),
+                "bucket_n": int(st.n),
+                "bucket_q": bucket_q,
+                "bucket_cvar": bucket_cvar,
             }
         )
         rows.append(row)

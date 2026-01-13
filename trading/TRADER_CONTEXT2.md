@@ -7335,3 +7335,414 @@ If you want, next I can:
 * help you design **pseudo-labels** that won’t leak PnL but still make sense economically.
 
 Just say which.
+
+Good — the plots tell a very clear story now. Let me answer at the *system-design* level and then give you a concrete next patch recommendation.
+
+---
+
+## What the diagnostics are actually saying
+
+### 1. Direction head is **already saturated**
+
+* **Hit-rate ≈ 1.0 across ℓ deciles** is not “great prediction” — it means:
+
+  * You’re evaluating *conditional on veto + ℓ gate*.
+  * Only trivially easy regimes survive.
+* This is why mean signed return **decreases** with higher ℓ: ℓ is currently acting as a *safety filter*, not an edge amplifier.
+
+> Interpretation: ℓ ≈ regime legitimacy, not opportunity strength.
+
+That’s good. It means the abstraction is working.
+
+---
+
+### 2. CVaR + hazard veto is doing exactly what it should
+
+From the left-tail plots:
+
+* **Allowed trades**: tight, near-zero left tail
+* **Vetoed trades**: fatter, shifted right (but higher variance)
+
+This confirms something important:
+
+> The veto is removing *variance*, not just losers.
+
+That’s what you want if execution comes later.
+
+---
+
+### 3. The real missing piece is **conditional leverage**, not better direction
+
+Right now everything is implicitly:
+
+* same size
+* same instrument
+* same payoff geometry
+
+So improving “direction accuracy” won’t help much — you’ve already carved away most entropy.
+
+---
+
+## Answering your earlier question explicitly
+
+> **“A with B as input?”**
+
+Yes — but *only* in one direction:
+
+* **ℓ → gates → what is even allowed to speak**
+* Direction / instrument heads operate **inside** the allowed regime
+
+Never feed realized PnL back into ℓ.
+ℓ stays epistemic.
+
+---
+
+## What to optimize next (my recommendation)
+
+### ✅ **Not**: improve direction accuracy
+
+You’re already at the ceiling *given the current action space*.
+
+### ✅ **Yes**: expand the action space *safely*
+
+That means:
+
+## Step 1 — Add a magnitude / payoff head (no execution change)
+
+### New head: **exposure / convexity selector**
+
+Conceptually:
+
+```
+features:
+  qfeat
+  ℓ
+  market_meta (funding, OI, IV, skew)
+
+outputs:
+  exposure_bin ∈ {flat, small, medium}
+  instrument_class ∈ {spot, perp, option}
+```
+
+Still **proposal-only**.
+
+No orders. No fills.
+
+---
+
+## Step 2 — Make PnL-aware rejection *direction-conditional*
+
+You already did global CVaR. Next refinement:
+
+### Per-(direction × instrument × ℓ-bin) tail stats
+
+Pseudo-logic:
+
+```python
+bucket = (dir, instrument, ell_bin)
+
+if bucket_n >= min_samples:
+    if CVaR_alpha(bucket) < -epsilon:
+        veto
+```
+
+This lets the system learn things like:
+
+* “Longs are fine here, shorts are toxic”
+* “Options explode tail risk in this regime”
+  without learning weights.
+
+Still **no gradient**, still no feedback.
+
+---
+
+## Step 3 — Introduce *relative* sizing (still no execution)
+
+Instead of absolute PnL optimization:
+
+* Predict **ranked desirability**:
+
+  * which proposal is *better than others* at the same time
+* Output:
+
+  ```
+  proposal_score ∈ ℝ
+  ```
+
+Execution can later map this to size.
+
+This avoids premature capital modeling.
+
+---
+
+## What I would have you implement **next**
+
+Given where you are **right now**, the cleanest next patch is:
+
+### 🔧 **Instrument / payoff head v0 (proposal-only)**
+
+Specifically:
+
+1. **Train** `instrument_head.py`
+
+   * Inputs: qfeat + market_meta + ℓ
+   * Labels: heuristic (e.g. high IV → option-friendly)
+2. **Emit in proposals**:
+
+   * `instrument_type`
+   * `exposure_class`
+3. **Extend veto buckets** to include instrument
+
+This unlocks:
+
+* long/short *and* convexity
+* regime-aware derivatives
+* leverage without execution risk
+
+---
+
+## Big-picture checkpoint (important)
+
+You’ve now built:
+
+* ❌ No RL
+* ❌ No overfitting loop
+* ❌ No PnL leakage
+* ✅ Regime epistemics (ℓ)
+* ✅ Safety filters (CVaR, hazard)
+* ✅ Modular proposal heads
+
+This is exactly the right order.
+
+If you want, next I can:
+
+* sketch the **instrument head loss**
+* define **option vs perp regime heuristics**
+* or design the **proposal competition / ranking layer**
+
+Just tell me which one.
+
+
+### 1) Instrument head loss (proposal-only, no execution)
+
+You want two coupled decisions:
+
+* **instrument** (z \in {\text{spot}, \text{perp}, \text{option}})
+* **exposure class** (a \in {\text{flat}, \text{small}, \text{med}}) (or size bins)
+
+Let the head output logits (g_z(x)) and (h_a(x)) from inputs (x = [qfeat,\ \ell,\ meta]).
+
+**Core loss = imitation of a teacher heuristic (distillation):**
+
+* Build a *soft* target distribution (q(z \mid x)) from rules (below), not a hard label.
+* Train with cross entropy / KL:
+
+[
+\mathcal{L}_{inst} = \mathrm{CE}\big(q(z\mid x),\ \mathrm{softmax}(g(x))\big)
+]
+
+Similarly for exposure:
+[
+\mathcal{L}_{exp} = \mathrm{CE}\big(q(a\mid x),\ \mathrm{softmax}(h(x))\big)
+]
+
+**Add a “risk penalty” regularizer using your existing tail stats** (still not feedback learning; it’s supervised from a stored table):
+
+* Maintain per-bucket estimated downside (\widehat{\mathrm{CVaR}}_\alpha(z, a, \text{dir}, \ell\text{-bin})).
+* Penalize putting probability on buckets with bad tail:
+
+[
+\mathcal{L}*{risk} = \sum*{z,a} p(z,a\mid x)\ \max{0,\ -\widehat{\mathrm{CVaR}}_\alpha(z,a,\cdot)-\epsilon}
+]
+
+where (p(z,a\mid x)=\mathrm{softmax}(g)\otimes\mathrm{softmax}(h)).
+
+**Add an entropy/temperature term to avoid collapsing early:**
+[
+\mathcal{L}_{ent} = -\lambda_H\big(H[p(z\mid x)] + H[p(a\mid x)]\big)
+]
+
+Final:
+[
+\mathcal{L} = \mathcal{L}*{inst} + \beta,\mathcal{L}*{exp} + \gamma,\mathcal{L}*{risk} + \mathcal{L}*{ent}
+]
+
+This stays “proposal-only”: you’re training to mimic a regime teacher + avoid known tail buckets, not optimize realized PnL.
+
+---
+
+### 2) Option vs perp regime heuristics (teacher (q(z\mid x)))
+
+Use the meta features you already assembled (IV, OI, funding/premium, etc.) plus qfeat hazard. Build **scores** and softmax them.
+
+Define quick derived signals (all scalars per time (t)):
+
+* (IV): `opt_mark_iv_p50` (or mean)
+* (IV_chg): (\Delta IV) over a short window
+* (skew): if you have call/put IV split; else proxy with call-put OI imbalance
+* (fund): `premium_funding_rate`
+* (basis): `premium_mark_price - premium_index_price` (or premium rate)
+* (OI): `oi_sum_open_interest_value` (or sum OI)
+* (OI_chg): (\Delta OI)
+* (haz): `hazard` from qfeat (burstiness/curvature/vol_ratio blend)
+* (trend): direction head confidence or simple return sign persistence
+* (\ell): legitimacy/actionability (gate)
+
+#### Options-favored regime (convexity pays)
+
+Options score high when:
+
+* **IV high and/or rising**: volatility regime / event risk
+* **hazard high**: jumpy / bursty microstructure
+* **skew meaningful** (if available): tail hedging demand
+* **funding/basis unstable**: perps may bleed or be crowded
+* **you want limited downside** (tail risk present)
+
+A concrete score:
+[
+S_{opt} = w_1,\mathrm{z}(IV) + w_2,\mathrm{z}(IV_{chg}) + w_3,\mathrm{z}(haz) + w_4,\mathrm{z}(|fund|) + w_5,\mathrm{z}(|basis|)
+]
+Then downweight if (\ell) is barely above (\tau) (don’t buy convexity in junk regimes):
+[
+S_{opt} \leftarrow S_{opt} + w_6,\mathrm{z}(\ell-\tau)
+]
+
+#### Perp-favored regime (linear exposure pays)
+
+Perp score high when:
+
+* **trend is stable** (direction signal persistent)
+* **IV is low/moderate** (options overpriced when IV high)
+* **funding favorable** (you get paid to hold the side)
+* **OI rising with trend** (momentum participation)
+* **hazard low** (less jump risk)
+
+[
+S_{perp} = v_1,\mathrm{z}(\text{trend_conf}) - v_2,\mathrm{z}(IV) - v_3,\mathrm{z}(haz) + v_4,\mathrm{z}(\text{fund_carry}) + v_5,\mathrm{z}(OI_{chg})
+]
+where `fund_carry` is signed by direction:
+
+* if going long, positive if funding is negative (longs receive)
+* if going short, positive if funding is positive (shorts receive)
+
+#### Spot (baseline / default)
+
+Spot gets what’s left, plus a preference when:
+
+* funding/basis is ugly (avoid perpetual carry)
+* options/perps look toxic by tail stats
+
+[
+S_{spot} = u_0 - u_1,\mathrm{z}(|fund|) - u_2,\mathrm{z}(|basis|) - u_3,\mathrm{z}(haz)
+]
+and optionally add a “safety prior” if your tail table says spot buckets are safer.
+
+Finally produce a **soft teacher distribution**:
+[
+q(z\mid x) = \mathrm{softmax}\left(\frac{[S_{spot},S_{perp},S_{opt}]}{T}\right)
+]
+with (T\approx 1.0) early, then reduce (T) to sharpen later.
+
+This gives you stable labels without pretending you know the true best instrument.
+
+---
+
+### 3) Proposal competition / ranking layer (choose among candidates)
+
+At each time (t), you can generate multiple proposals:
+
+* directions: ({-1,0,+1})
+* instruments: {spot, perp, option}
+* exposures: {small, med}
+  That’s a **candidate set** (\mathcal{C}_t).
+
+You want a scorer (s(c,t)) that ranks them, while respecting veto/gates.
+
+#### The key design constraint
+
+You *must not* learn on raw PnL yet. So competition is trained from:
+
+* teacher desirability (heuristics + tail stats)
+* self-consistency (stability / low churn)
+* optional weak outcome proxy (future signed return *only for evaluation*, not training)
+
+#### Candidate feature vector
+
+For candidate (c=(dir,z,a)):
+
+* (\ell_t)
+* direction confidence (p_{dir})
+* instrument head probs (p_z)
+* exposure head probs (p_a)
+* hazard (haz_t)
+* carry/cost proxy (funding signed by dir, spread proxy if you have it)
+* tail table lookups: (\widehat{CVaR}_\alpha(c,\ell\text{-bin})), veto rate, etc.
+
+#### Scoring function (non-learning baseline)
+
+Start with a deterministic score:
+
+[
+s(c,t)=
+\underbrace{\log p_{dir}}*{\text{direction confidence}}+
+\underbrace{\log p_z + \log p_a}*{\text{instrument+size belief}}+
+\underbrace{\eta,(\ell-\tau)}*{\text{legitimacy margin}}-
+\underbrace{\rho,haz}*{\text{microstructure hazard}}+
+\underbrace{\kappa,\text{carry}(dir)}*{\text{funding/basis}}-
+\underbrace{\lambda,\max(0,-\widehat{CVaR}*\alpha-\epsilon)}_{\text{tail penalty}}
+]
+
+Then pick:
+
+* if all candidates vetoed → HOLD
+* else choose argmax (s)
+
+This already yields a coherent “competition” layer without any new training.
+
+#### If you do want a learnable ranker (still not PnL feedback)
+
+Train a small linear/MLP ranker with a **pairwise preference loss** built from your teacher score:
+
+For each (t), create pairwise comparisons:
+
+* winner (c^* = \arg\max s_{teacher}(c,t))
+* losers (c\neq c^*)
+
+Use Bradley–Terry / logistic pairwise loss:
+[
+\mathcal{L}*{rank}=\sum*{t}\sum_{c\neq c^*} \log\left(1+\exp\left(-(r(x_{c^*})-r(x_c))\right)\right)
+]
+
+This learns to reproduce your teacher ranking (plus tail constraints), not PnL.
+
+Add a **churn penalty** (smoothness):
+[
+\mathcal{L}*{churn} = \lambda \sum_t \mathbf{1}[c_t \neq c*{t-1}]
+]
+or a differentiable version using probabilities.
+
+**Output artifact:** proposal log with:
+
+* `chosen_dir`, `chosen_instrument`, `chosen_exposure`
+* `score_best`, `score_second`, `margin`
+* veto reasons per candidate
+* tail penalties per candidate
+
+That’s enough to start stress-testing invariance across instruments and symbols.
+
+---
+
+### What to implement next (minimal but powerful)
+
+1. Implement the **teacher scores** and soft labels (q(z|x)) inside your existing instrument-head trainer.
+2. Add the **deterministic competition scorer** (no learning) to `run_proposals.py`:
+
+   * generate candidate set
+   * score + veto
+   * write `chosen_*` columns
+3. Add one diagnostic plot:
+
+   * chosen instrument counts vs (IV) deciles
+   * chosen instrument counts vs hazard deciles
+
+If you want, paste a few column names from `market_meta_features_btc.csv` (especially anything skew-ish), and I’ll write the exact formulas matching your current schema.
