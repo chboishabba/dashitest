@@ -67,12 +67,19 @@ class QFeatTape:
         self.mm = np.memmap(self.path, dtype=np.float32, mode="r", shape=self.shape)
 
     @classmethod
-    def from_existing(cls, path: str) -> "QFeatTape":
+    def from_existing(cls, path: str, rows: Optional[int] = None) -> "QFeatTape":
         mm = np.memmap(path, dtype=np.float32, mode="r")
-        if mm.ndim != 3 or mm.shape[2] != 8:
-            raise ValueError("tape must be float32 with last dim 8")
-        num_series, T, _ = mm.shape
-        return cls(path, num_series, T)
+        if rows is None:
+            if mm.ndim != 3 or mm.shape[2] != 8:
+                raise ValueError("tape must be float32 with last dim 8")
+            num_series, T, _ = mm.shape
+            return cls(path, num_series, T)
+        if rows <= 0:
+            raise ValueError("rows must be positive")
+        if mm.size % (rows * 8) != 0:
+            raise ValueError("tape size does not align with rows")
+        num_series = mm.size // (rows * 8)
+        return cls(path, num_series, rows)
 
     def qfeat(self, series: int, t: int) -> np.ndarray:
         return np.array(self.mm[series, t, :6], dtype=np.float32, copy=True)

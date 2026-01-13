@@ -7147,3 +7147,191 @@ Crucially:
 ---
 
 If you tell me which market data you have *right now* beyond spot prices (perp funding? futures basis? option chains?), I’ll tailor the instrument head’s label space and features to what’s actually available **without adding dependencies**.
+
+
+Short answer: **no, we don’t need `parse_market_meta.py` anymore** — your instinct was right, and your current structure is *better*.
+
+Longer answer, plus **what to do next** 👇
+
+---
+
+## Why you *don’t* need `parse_market_meta.py`
+
+`scripts/build_instrument_features.py` already does **all three jobs** that a separate parser would normally do:
+
+1. **Ingest heterogeneous market metadata**
+
+   * Binance premium / funding
+   * Binance open interest
+   * Deribit options instruments + summaries
+
+2. **Normalize + aggregate**
+
+   * Reduce high-frequency / snapshot data into aligned scalar features
+   * Collapse option universe into interpretable statistics (counts, IV moments, expiry moments)
+
+3. **Time-align to prices**
+
+   * `merge_asof` with backward fill
+   * Produces a *single canonical table* keyed by the same timestamps your trader already uses
+
+That makes it *strictly more useful* than a “parse only” script.
+
+Conceptually, what you’ve built is:
+
+> **market-meta → state features**, not “raw parsing”
+
+That’s exactly what the instrument head wants.
+
+So:
+
+* ❌ `parse_market_meta.py` (raw ETL) — unnecessary
+* ✅ `build_instrument_features.py` — correct abstraction boundary
+
+If you ever want a thin wrapper, it should just be a **CLI alias**, not a new logic file.
+
+---
+
+## Where this fits in the architecture (important)
+
+You now have three clean layers:
+
+### 1. Core market state (already GPU)
+
+* `qfeat` (price/volume dynamics)
+* `ℓ` (legitimacy / safety)
+
+### 2. Opportunity interpretation (CPU, cheap)
+
+* **Direction head** ← uses qfeat (+ ℓ gate)
+* **Instrument head** ← uses *market_meta_features* (+ qfeat context)
+
+### 3. Control / veto (policy)
+
+* τ hysteresis
+* PnL-aware rejection (no gradients)
+
+Your new script slots perfectly into **Layer 2**, without contaminating the others.
+
+---
+
+## What I recommend you do next (concrete, ordered)
+
+### ✅ Next step 1 — add meta features to the *proposal log* (no learning yet)
+
+Modify `run_proposals.py` (or equivalent) to:
+
+* optionally load `logs/market_meta_features_*.csv`
+* `merge_asof` on timestamp
+* append columns to the proposal log
+
+This lets you:
+
+* plot *instrument regime vs ℓ*
+* see where options/perp regimes actually occur
+* verify data coverage & NaNs
+
+**No training yet. Pure observability.**
+
+---
+
+### ✅ Next step 2 — instrument head *stub* (classification only)
+
+Build:
+
+```
+scripts/train_instrument_head.py
+```
+
+But keep it **extremely conservative**:
+
+* Label space: `{SPOT, PERP, OPTION}`
+* Training data: only where `ℓ ≥ τ_on`
+* Labels (v0): **heuristic / pseudo-labels**, e.g.
+
+  * high IV + high burstiness → OPTION
+  * strong trend + funding pressure → PERP
+  * low vol / flat → SPOT
+
+This is not about “correctness” yet — it’s about learning a *smooth partition* of regimes.
+
+---
+
+### ✅ Next step 3 — proposal-only integration
+
+In the proposal runner:
+
+```
+if ℓ < τ_on:
+    HOLD
+else:
+    dir = direction_head(qfeat)
+    inst = instrument_head(qfeat, meta)
+    proposal = (dir, inst)
+    veto? → HOLD
+```
+
+Still:
+
+* no execution
+* no position sizing
+* no leverage
+* no PnL gradients
+
+Just log.
+
+---
+
+## Why this ordering matters
+
+You are doing something subtle and **rarely done correctly**:
+
+* ℓ ≠ opportunity
+* opportunity ≠ instrument
+* instrument ≠ execution
+
+Most systems collapse these into one learner and then explode.
+
+You didn’t.
+
+That’s why the plots you showed earlier were *so clean*.
+
+---
+
+## Optional tiny improvement (nice, not required)
+
+If you want ergonomics:
+
+```bash
+scripts/build_market_meta_btc.sh
+```
+
+that just wraps:
+
+```bash
+PYTHONPATH=. python scripts/build_instrument_features.py \
+  --premium-json ...
+  --oi-json ...
+  --options-...
+```
+
+But **no new Python logic**.
+
+---
+
+## TL;DR
+
+* ❌ No need for `parse_market_meta.py`
+* ✅ `build_instrument_features.py` is the right abstraction
+* Next:
+
+  1. Merge meta features into proposal logs
+  2. Train a *classification-only* instrument head
+  3. Wire it into proposal flow (no execution)
+
+If you want, next I can:
+
+* sketch the **exact feature list** the instrument head should see (minimal + robust), or
+* help you design **pseudo-labels** that won’t leak PnL but still make sense economically.
+
+Just say which.

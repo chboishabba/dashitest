@@ -1,20 +1,14 @@
 """
-train_direction_head.py
------------------------
-Train a simple linear softmax direction head on qfeat windows.
+train_instrument_head.py
+------------------------
+Train a simple instrument-family classifier using qfeat + market meta features.
 
-Labels are ternary based on future log return over horizon H:
-  +1 if r_t > +deadzone
-   0 if |r_t| <= deadzone
-  -1 if r_t < -deadzone
+Pseudo-labels (heuristic, no PnL):
+  OPTION if (opt_mark_iv_mean >= iv_high) and (burstiness >= burst_high)
+  PERP if (abs(premium_funding_rate) >= funding_thresh) and (acorr_1 >= acorr_trend)
+  SPOT otherwise
 
 Training is gated by ell (e.g., ell >= tau_on).
-
-Usage:
-  PYTHONPATH=. python trading/scripts/train_direction_head.py \
-    --tape logs/qfeat_btc.us_20260113_210153.memmap \
-    --prices-csv data/raw/stooq/btc.us.csv \
-    --out logs/dir_head_btc.us.json
 """
 
 from __future__ import annotations
@@ -64,101 +58,101 @@ def _train_softmax(
     return W, b
 
 
-def _compute_deadzone(
-    log_returns: np.ndarray,
-    horizon: int,
-    deadzone: float | None,
-    deadzone_mult: float | None,
-    vol_window: int,
-) -> np.ndarray:
-    if deadzone is not None:
-        return np.full_like(log_returns, fill_value=float(deadzone), dtype=float)
-    if deadzone_mult is None:
-        return np.zeros_like(log_returns, dtype=float)
-    vol = pd.Series(log_returns).rolling(vol_window).std().to_numpy()
-    return deadzone_mult * vol * math.sqrt(float(horizon))
+def _align_meta(meta_path: Path, ts_int: np.ndarray) -> pd.DataFrame:
+    meta_df = pd.read_csv(meta_path)
+    if "ts" not in meta_df.columns:
+        raise SystemExit("meta-features CSV must contain a ts column")
+    meta_df = meta_df.sort_values("ts")
+    base = pd.DataFrame({"ts": ts_int})
+    aligned = pd.merge_asof(base, meta_df, on="ts", direction="backward")
+    return aligned.drop(columns=["ts"])
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Train a linear direction head on qfeat windows.")
+    ap = argparse.ArgumentParser(description="Train a simple instrument head on qfeat + meta features.")
     ap.add_argument("--tape", type=Path, required=True, help="QFeat tape (.memmap).")
-    ap.add_argument("--prices-csv", type=Path, required=True, help="Prices CSV for labels.")
-    ap.add_argument("--out", type=Path, default=Path("logs/dir_head.json"))
+    ap.add_argument("--prices-csv", type=Path, required=True, help="Prices CSV for timestamps.")
+    ap.add_argument("--meta-features", type=Path, required=True, help="Market meta feature CSV.")
+    ap.add_argument("--out", type=Path, default=Path("logs/instrument_head.json"))
     ap.add_argument("--series", type=int, default=0, help="Series index in tape.")
     ap.add_argument("--order", type=int, default=1, help="Window order for qfeat.")
-    ap.add_argument("--horizon", type=int, default=10, help="Future return horizon in bars.")
-    ap.add_argument("--deadzone", type=float, default=None, help="Absolute deadzone for labels.")
-    ap.add_argument("--deadzone-mult", type=float, default=None, help="Vol-scaled deadzone multiplier.")
-    ap.add_argument("--vol-window", type=int, default=50, help="Vol window for deadzone scaling.")
     ap.add_argument("--tau-on", type=float, default=0.5, help="ell gating threshold.")
     ap.add_argument("--ell-min", type=float, default=None, help="Override ell gate threshold.")
+    ap.add_argument("--iv-high", type=float, default=60.0, help="Option IV threshold.")
+    ap.add_argument("--burst-high", type=float, default=1.5, help="Burstiness threshold.")
+    ap.add_argument("--funding-thresh", type=float, default=0.0005, help="Funding rate threshold.")
+    ap.add_argument("--acorr-trend", type=float, default=0.2, help="ACF threshold for trend.")
     ap.add_argument("--lambda", dest="lam", type=float, default=1e-3, help="L2 regularization.")
     ap.add_argument("--lr", type=float, default=0.1, help="Learning rate.")
     ap.add_argument("--epochs", type=int, default=200, help="Training epochs.")
     ap.add_argument("--max-rows", type=int, default=None, help="Optional cap on training rows.")
     args = ap.parse_args()
 
-    price, _volume, _ts = load_prices(args.prices_csv, return_time=True)
+    price, _volume, ts = load_prices(args.prices_csv, return_time=True)
+    ts_int = pd.to_datetime(ts).astype("int64") if ts is not None else np.arange(price.size, dtype=np.int64)
+
     tape = QFeatTape.from_existing(str(args.tape), rows=price.size)
     if args.series < 0 or args.series >= tape.num_series:
         raise SystemExit(f"series index {args.series} out of range (S={tape.num_series})")
     if tape.T != price.size:
         raise SystemExit(f"Tape length (T={tape.T}) != prices length (T={price.size})")
 
+    meta = _align_meta(args.meta_features, ts_int)
+    meta = meta.ffill().fillna(0.0)
+    meta_cols = list(meta.columns)
+    meta_arr = meta.to_numpy(dtype=np.float32)
+
     qfeat = tape.mm[args.series, :, :6].astype(np.float32, copy=False)
     ell = tape.mm[args.series, :, 6].astype(np.float32, copy=False)
 
     order = max(1, int(args.order))
-    horizon = max(1, int(args.horizon))
-    log_price = np.log(np.clip(price, 1e-12, None))
-    log_returns = np.diff(log_price, prepend=log_price[0])
-    deadzone = _compute_deadzone(
-        log_returns,
-        horizon=horizon,
-        deadzone=args.deadzone,
-        deadzone_mult=args.deadzone_mult,
-        vol_window=max(2, int(args.vol_window)),
-    )
-
     windows = np.lib.stride_tricks.sliding_window_view(qfeat, window_shape=order, axis=0)
+    feat_mat = windows.reshape(-1, order * qfeat.shape[1])
+
     t_start = order - 1
-    t_end = price.size - horizon
-    if t_end <= t_start:
-        raise SystemExit("Not enough rows for requested order/horizon.")
-
-    idx = np.arange(t_start, t_end)
-    X = windows[: t_end - order + 1].reshape(-1, order * qfeat.shape[1])
-    X = X[idx - t_start]
-
-    future_ret = log_price[idx + horizon] - log_price[idx]
-    dz = deadzone[idx]
-    y = np.zeros_like(future_ret, dtype=int)
-    y[future_ret > dz] = 1
-    y[future_ret < -dz] = -1
+    idx = np.arange(t_start, price.size)
+    X_q = feat_mat[idx - t_start]
+    X_meta = meta_arr[idx]
+    X = np.concatenate([X_q, X_meta], axis=1)
 
     ell_gate = args.ell_min if args.ell_min is not None else args.tau_on
-    mask = np.isfinite(X).all(axis=1) & np.isfinite(future_ret) & (ell[idx] >= ell_gate)
+    mask = np.isfinite(X).all(axis=1) & np.isfinite(ell[idx]) & (ell[idx] >= ell_gate)
     if mask.sum() == 0:
         raise SystemExit("No training rows after gating/finite filters.")
-
     X = X[mask]
-    y = y[mask]
+
+    # pseudo-labels
+    burst = X_q[mask][:, 3]
+    acorr = X_q[mask][:, 4]
+    iv = meta.loc[idx[mask], "opt_mark_iv_mean"].to_numpy(dtype=float)
+    funding = meta.loc[idx[mask], "premium_funding_rate"].to_numpy(dtype=float)
+
+    high_iv = np.isfinite(iv) & (iv >= args.iv_high)
+    high_burst = np.isfinite(burst) & (burst >= args.burst_high)
+    high_funding = np.isfinite(funding) & (np.abs(funding) >= args.funding_thresh)
+    trend = np.isfinite(acorr) & (acorr >= args.acorr_trend)
+
+    labels = np.full(X.shape[0], "SPOT", dtype=object)
+    labels[high_funding & trend] = "PERP"
+    labels[high_iv & high_burst] = "OPTION"
+
     if args.max_rows is not None and X.shape[0] > args.max_rows:
         X = X[: args.max_rows]
-        y = y[: args.max_rows]
+        labels = labels[: args.max_rows]
 
     mean = X.mean(axis=0)
     std = X.std(axis=0)
     std = np.where(std > 0, std, 1.0)
     Xn = (X - mean) / std
 
-    class_map = {-1: 0, 0: 1, 1: 2}
-    y_idx = np.vectorize(class_map.get)(y)
+    classes = ["SPOT", "PERP", "OPTION"]
+    class_map = {c: i for i, c in enumerate(classes)}
+    y_idx = np.vectorize(class_map.get)(labels)
 
     W, b = _train_softmax(
         Xn.astype(np.float32),
         y_idx.astype(np.int64),
-        num_classes=3,
+        num_classes=len(classes),
         lr=float(args.lr),
         epochs=int(args.epochs),
         lam=float(args.lam),
@@ -168,16 +162,14 @@ def main() -> None:
     probs = _softmax(logits)
     pred = probs.argmax(axis=1)
     acc = float(np.mean(pred == y_idx))
-    counts = {str(k): int(np.sum(y == k)) for k in (-1, 0, 1)}
+    counts = {c: int(np.sum(labels == c)) for c in classes}
 
     payload = {
         "order": int(order),
-        "horizon": int(horizon),
-        "deadzone": float(args.deadzone) if args.deadzone is not None else None,
-        "deadzone_mult": float(args.deadzone_mult) if args.deadzone_mult is not None else None,
-        "vol_window": int(args.vol_window),
         "ell_gate": float(ell_gate),
-        "classes": [-1, 0, 1],
+        "classes": classes,
+        "feature_qfeat": ["vol_ratio", "curvature", "drawdown", "burstiness", "acorr_1", "var_ratio"],
+        "feature_meta": meta_cols,
         "weights": W.tolist(),
         "bias": b.tolist(),
         "mean": mean.tolist(),
@@ -187,6 +179,12 @@ def main() -> None:
             "rows": int(X.shape[0]),
             "acc": acc,
             "class_counts": counts,
+        },
+        "heuristic": {
+            "iv_high": float(args.iv_high),
+            "burst_high": float(args.burst_high),
+            "funding_thresh": float(args.funding_thresh),
+            "acorr_trend": float(args.acorr_trend),
         },
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)

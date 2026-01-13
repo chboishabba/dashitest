@@ -112,6 +112,7 @@ def main() -> None:
     ap.add_argument("--prices-csv", type=Path, required=True, help="Prices CSV for bars.")
     ap.add_argument("--dir-model", type=Path, required=True, help="Direction head JSON.")
     ap.add_argument("--proposal-log", type=Path, required=True, help="Output proposal CSV.")
+    ap.add_argument("--meta-features", type=Path, default=None, help="Optional market meta feature CSV.")
     ap.add_argument("--series", type=int, default=0, help="Series index in tape.")
     ap.add_argument("--tau-on", type=float, default=0.5, help="ell hysteresis on.")
     ap.add_argument("--tau-off", type=float, default=0.49, help="ell hysteresis off.")
@@ -129,7 +130,7 @@ def main() -> None:
         raise SystemExit("Require tau-on >= tau-off for hysteresis.")
 
     price, volume, ts = load_prices(args.prices_csv, return_time=True)
-    tape = QFeatTape.from_existing(str(args.tape))
+    tape = QFeatTape.from_existing(str(args.tape), rows=price.size)
     if args.series < 0 or args.series >= tape.num_series:
         raise SystemExit(f"series index {args.series} out of range (S={tape.num_series})")
     if tape.T != price.size:
@@ -138,6 +139,19 @@ def main() -> None:
     state = compute_triadic_state(price)
     ts_int = pd.to_datetime(ts).astype("int64") if ts is not None else np.arange(price.size, dtype=np.int64)
     price = price.astype(float)
+
+    meta_cols = []
+    meta_values = None
+    if args.meta_features is not None:
+        meta_df = pd.read_csv(args.meta_features)
+        if "ts" not in meta_df.columns:
+            raise SystemExit("meta-features CSV must contain a ts column")
+        meta_df = meta_df.sort_values("ts")
+        base = pd.DataFrame({"ts": ts_int})
+        aligned = pd.merge_asof(base, meta_df, on="ts", direction="backward")
+        aligned = aligned.drop(columns=["ts"])
+        meta_cols = list(aligned.columns)
+        meta_values = aligned.to_numpy(dtype=float)
 
     model = json.loads(args.dir_model.read_text())
     order = int(model["order"])
@@ -185,6 +199,9 @@ def main() -> None:
             "margin": float(margin[t]) if math.isfinite(margin[t]) else float("nan"),
             "acceptable": bool(acceptable[t]),
         }
+        if meta_values is not None:
+            for idx, col in enumerate(meta_cols):
+                row[col] = float(meta_values[t, idx]) if math.isfinite(meta_values[t, idx]) else float("nan")
 
         gate_open = True
         if not is_holding:
