@@ -3777,3 +3777,983 @@ Once that’s stable, we map *that exact code* into the Vulkan shader (the GLSL 
 
 If you want, paste your window length `W` as used in the adapter (and w1/w2 defaults there), and I’ll give you the exact Vulkan dispatch/buffer packing for your current replay pipeline.
 
+
+Perfect — this is exactly the right moment to **lock GPU–CPU parity and move forward with confidence**.
+
+What you just did is *not* a small refactor; it’s a **contract-level stabilization** of the learner → trader interface.
+
+I’ll break this into **(A) what is now proven**, **(B) what this unlocks on GPU**, and **(C) the exact next GPU steps**, all explicitly consistent with the codec → quotient → collapse formalism .
+
+---
+
+## A. What is now *provably fixed*
+
+### 1. Deterministic quotient feature contract
+
+By pinning `compute_qfeat` to:
+
+* explicit `float32`
+* fixed loop order
+* shared mean in autocorr
+* NaN/Inf squashing
+
+you’ve done the one thing that *must* be done before GPU deployment:
+
+> **The CPU implementation is now a reference oracle for the GPU kernel.**
+
+The sample output you showed:
+
+```
+[0.3784172, 0.03934639, 0.26900288, 2.2810578, -0.69888365, 0.99989635]
+```
+
+is exactly what we want: numerically stable, bounded, and interpretable.
+
+And critically, the **feature order is frozen**:
+
+```
+[ vol_ratio,
+  curvature,
+  drawdown,
+  burstiness,
+  acorr_1,
+  var_ratio ]
+```
+
+That is now the **ABI** between:
+
+* Vulkan kernels
+* any MoE / predictor head
+* the trader gate
+
+Breaking this order later would be a bug, not a design choice.
+
+---
+
+## B. Why this is the correct place to “keep GPU-based compute”
+
+This step cleanly aligns three layers that *must* agree:
+
+1. **Formal layer**
+   You are learning on **quotients / invariants**, not raw trajectories. That’s explicitly the design in the codec → quotient → collapse pipeline .
+
+2. **Numerical layer**
+   Float32 determinism + loop order = GPU-friendly and reproducible.
+   You are avoiding the classic “CPU reference drifts from GPU reality” trap.
+
+3. **Control layer (trader)**
+   The trader only sees:
+
+   * a legitimacy scalar ℓ
+   * optional invariant diagnostics
+     It never sees raw prices or gradients.
+
+This is exactly how you avoid the learner *leaking into execution*.
+
+---
+
+## C. What this unlocks next on GPU (concrete, no fluff)
+
+Now that `compute_qfeat` is pinned, the GPU roadmap is unambiguous.
+
+### Step 1 — Vulkan kernel = literal transliteration
+
+Your Vulkan compute shader should:
+
+* read a fixed-length window buffer
+* reproduce the same loop order
+* emit a `vec4 + vec2` (or `float[6]`) SSBO
+
+No cleverness yet. Just parity.
+
+This is **not optimization time** — it’s correctness time.
+
+---
+
+### Step 2 — GPU-side legitimacy scalar ℓ
+
+Once GPU produces:
+
+```
+qfeat_t
+qfeat̂_{t+1}
+```
+
+you compute on GPU:
+
+```
+ℓ_t = exp( - || qfeat̂_{t+1} - qfeat_{t+1} ||_2 )
+```
+
+Only **ℓ_t** crosses the GPU→CPU boundary by default.
+
+This respects the trading formalism:
+
+> learner informs *permission*, not *action* .
+
+---
+
+### Step 3 — Trader gate stays CPU and dumb (by design)
+
+The trader logic remains:
+
+```
+if ℓ_t > θ_on for τ_on  → ACT allowed
+if ℓ_t < θ_off for τ_off → HOLD forced
+else → persist
+```
+
+No GPU logic touches:
+
+* position sizing
+* order placement
+* execution timing
+
+That separation is sacred.
+
+---
+
+## D. Why this is now *safe* to backtest seriously
+
+Because:
+
+* the same quotient features are used offline and live
+* the same float32 semantics apply
+* the same GPU path is exercised in replay
+
+So when you see:
+
+* ACT suppressed during July 2015-style correlation spikes
+* HOLD dominating during regime churn
+
+you can trust it’s structural, not numeric noise.
+
+---
+
+## E. What **not** to change next (important)
+
+Do **not**:
+
+* add new features yet
+* widen precision to float64 “just to check”
+* mix CPU-computed features back into the trader
+* let the learner emit direction or size
+
+All of those would weaken the proof you just completed.
+
+---
+
+## Recommended next move (one clean choice)
+
+Pick **one** and I’ll help you implement it precisely:
+
+**A.** Write the Vulkan kernel that exactly mirrors `compute_qfeat`
+**B.** Define the SSBO layout + alignment (so this never breaks later)
+**C.** Add GPU-computed ℓ into `triadic_strategy.py` behind a flag
+**D.** Build the GPU replay harness for historical backtests
+
+You’ve crossed the hardest line already: **numerical parity**.
+Everything after this is engineering, not philosophy.
+
+
+
+Nice — with the SSBO contract now pinned in TRADER_CONTEXT2, the next move is purely engineering: **(1) implement the Vulkan kernel + bindings exactly to spec, (2) build the parity + replay harness, and (3) plug it into the existing runner/trader loop without touching strategy semantics**. That’s fully consistent with the “quotient invariants feed the permission surface” approach in your codec→trading formalism. 
+
+Below is a concrete plan + drop-in code skeletons that match the contract you documented, and integrate cleanly with your current `run_bars` / adapter plumbing in `runner.py`. 
+
+---
+
+# 1) Vulkan compute shader: SSBO bindings 0–4, 8-float records
+
+### File: `trading/vulkan_shaders/qfeat.comp` (GLSL)
+
+This is the *literal* ABI you documented: Params (binding 0), price (1), volume (2), qfeat out (3), optional debug (4). It assumes 2D dispatch: `(series, t)`.
+
+```glsl
+#version 450
+
+// Choose local sizes to match your dispatch plan.
+// We'll dispatch: (ceil(num_series/LSX), T, 1)
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) buffer ParamsSSBO {
+    uvec4 meta0;   // x=num_series, y=T, z=w1, w=w2
+    uvec4 meta1;   // x=price_stride, y=volume_stride, z=flags, w=reserved
+    vec4  fmeta0;  // x=eps, y=nan_squash, z=reserved, w=reserved
+    vec4  fmeta1;  // optional
+} P;
+
+layout(std430, binding = 1) readonly buffer PriceSSBO  { float price[];  };
+layout(std430, binding = 2) readonly buffer VolumeSSBO { float volume[]; }; // optional
+layout(std430, binding = 3) writeonly buffer QFeatSSBO { float qfeat[];  };
+
+layout(std430, binding = 4) buffer DebugSSBO { uint dbg[]; }; // optional
+
+// --- helpers ---
+float squash(float x, float nan_squash) {
+    // GLSL has isnan/isinf in 450
+    if (isnan(x) || isinf(x)) return nan_squash;
+    return x;
+}
+
+void write_record(uint s, uint t, float f0,float f1,float f2,float f3,float f4,float f5, float r6, float r7) {
+    uint T = P.meta0.y;
+    uint rec = (s * T + t) * 8u;
+    qfeat[rec + 0u] = f0;
+    qfeat[rec + 1u] = f1;
+    qfeat[rec + 2u] = f2;
+    qfeat[rec + 3u] = f3;
+    qfeat[rec + 4u] = f4;
+    qfeat[rec + 5u] = f5;
+    qfeat[rec + 6u] = r6; // reserved (ℓ later)
+    qfeat[rec + 7u] = r7; // reserved (checksum/debug)
+}
+
+void main() {
+    uint s = gl_GlobalInvocationID.x;
+    uint t = gl_GlobalInvocationID.y;
+
+    uint num_series = P.meta0.x;
+    uint T          = P.meta0.y;
+    uint w2         = P.meta0.w;
+    uint stride     = P.meta1.x;
+
+    if (s >= num_series || t >= T) return;
+
+    // warmup gate: if not enough history, emit zeros (stable ABI)
+    if (t < w2) {
+        write_record(s,t, 0,0,0,0,0,0, 0,0);
+        return;
+    }
+
+    // === TODO: implement compute_qfeat parity logic ===
+    // You will transliterate your pinned float32 CPU loop:
+    // - fixed loop order
+    // - shared mean in acorr
+    // - NaN/Inf squashing
+    //
+    // For now: placeholder values
+    float nan_squash = P.fmeta0.y;
+    float f0 = squash(0.0, nan_squash);
+    float f1 = squash(0.0, nan_squash);
+    float f2 = squash(0.0, nan_squash);
+    float f3 = squash(0.0, nan_squash);
+    float f4 = squash(0.0, nan_squash);
+    float f5 = squash(0.0, nan_squash);
+
+    write_record(s,t, f0,f1,f2,f3,f4,f5, 0.0, 0.0);
+}
+```
+
+**Important implementation constraint:** keep the per-feature arithmetic in the **same loop order** as your pinned CPU version (including the “shared mean” autocorr detail and NaN/Inf squashing). That’s what makes the parity harness meaningful.
+
+---
+
+# 2) Binding + dispatch setup: minimal Python module
+
+You already have Vulkan scaffolding proven to work (buffers + compute + readback), and `runner.py` is built to accept an adapter that provides ℓ/qfeat. 
+
+### File: `trading/vk_qfeat.py` (skeleton)
+
+This module has two responsibilities:
+
+1. run the kernel over an entire history (replay mode)
+2. provide a `FeatureTape` / `Oracle` interface
+
+```python
+import numpy as np
+import pathlib
+
+class QFeatTape:
+    """
+    Memmap-backed feature tape:
+      shape = (num_series, T, 8) float32
+      first 6 slots are ABI features
+      slot 6 reserved for ell
+      slot 7 reserved for checksum/debug
+    """
+    def __init__(self, path: str, num_series: int, T: int):
+        self.path = str(path)
+        self.num_series = int(num_series)
+        self.T = int(T)
+        self.mm = np.memmap(self.path, dtype=np.float32, mode="r", shape=(num_series, T, 8))
+
+    def qfeat_at(self, s: int, t: int) -> np.ndarray:
+        return np.array(self.mm[s, t, :6], dtype=np.float32, copy=True)
+
+    def ell_at(self, s: int, t: int) -> float:
+        return float(self.mm[s, t, 6])
+
+def build_feature_tape(
+    *,
+    prices: np.ndarray,        # (S,T) float32
+    volumes: np.ndarray | None,# (S,T) float32 or None
+    out_path: str,
+    w1: int = 64,
+    w2: int = 256,
+    eps: float = 1e-8,
+    nan_squash: float = 0.0,
+    vk_icd: str | None = None,
+):
+    """
+    Run Vulkan once over entire history:
+      dispatch = (ceil(S/64), T, 1)
+      output = (S,T,8) float32 memmap
+    """
+    prices = np.asarray(prices, dtype=np.float32, order="C")
+    assert prices.ndim == 2
+    S, T = prices.shape
+
+    if volumes is not None:
+        volumes = np.asarray(volumes, dtype=np.float32, order="C")
+        assert volumes.shape == prices.shape
+
+    out_path = str(out_path)
+    pathlib.Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+
+    # Allocate memmap for output
+    mm = np.memmap(out_path, dtype=np.float32, mode="w+", shape=(S, T, 8))
+    mm[:] = 0.0
+    mm.flush()
+
+    # TODO: Vulkan plumbing:
+    # - create device/queue
+    # - create SSBOs (Params, Price, Volume, QFeat, optional Debug)
+    # - upload prices/volumes
+    # - fill Params (meta0/meta1/fmeta0)
+    # - dispatch (ceil(S/64), T, 1)
+    # - barrier, read back QFeat into mm (or map & memcpy)
+    # - flush mm
+
+    return QFeatTape(out_path, S, T)
+```
+
+---
+
+# 3) Parity harness: CPU `compute_qfeat` vs GPU tape
+
+This is the gate that prevents “GPU drift” from silently corrupting the trader.
+
+### File: `tools/parity_qfeat.py` (skeleton)
+
+```python
+import numpy as np
+from trading.features.quotient import compute_qfeat  # your pinned CPU reference
+from trading.vk_qfeat import build_feature_tape
+
+def parity_check(
+    prices: np.ndarray,
+    tape_path: str,
+    *,
+    w1: int = 64,
+    w2: int = 256,
+    nsamples: int = 200,
+    tol: float = 1e-4,
+    seed: int = 0,
+):
+    prices = np.asarray(prices, dtype=np.float32, order="C")
+    S, T = prices.shape
+
+    tape = build_feature_tape(prices=prices, volumes=None, out_path=tape_path, w1=w1, w2=w2)
+
+    rng = np.random.default_rng(seed)
+    worst = np.zeros(6, dtype=np.float32)
+    worst_idx = [None]*6
+
+    for _ in range(nsamples):
+        s = int(rng.integers(0, S))
+        t = int(rng.integers(w2, T))
+        # CPU computes over window ending at t (define exactly how your kernel does it!)
+        # Example: use prices[s, t-w2:t] or prices[s, t-w2+1:t+1] — must match kernel.
+        window = prices[s, (t-w2+1):(t+1)]
+        cpu = compute_qfeat(window)  # must return 6 float32
+        gpu = tape.mm[s, t, :6]
+
+        diff = np.abs(cpu.astype(np.float32) - gpu.astype(np.float32))
+        for k in range(6):
+            if diff[k] > worst[k]:
+                worst[k] = diff[k]
+                worst_idx[k] = (s, t, float(cpu[k]), float(gpu[k]))
+
+        if np.any(diff > tol):
+            # You can choose to early-fail or keep collecting stats
+            pass
+
+    return worst, worst_idx
+```
+
+**One critical detail:** define the window indexing *once* (inclusive/exclusive) and keep it identical in:
+
+* the Vulkan kernel
+* the CPU reference used in parity
+  That’s usually the #1 source of “false mismatches”.
+
+---
+
+# 4) Replay harness into `runner.py` via LearnerAdapter (no strategy changes)
+
+Your `runner.py` already supports a `LearnerAdapter` stub that provides ℓ and qfeat through `adapter.update(ts, payload)` and logs `ell`. 
+
+So you can add a new adapter:
+
+### File: `trading/strategy/vulkan_tape_adapter.py`
+
+```python
+import numpy as np
+from trading.vk_qfeat import QFeatTape
+
+class VulkanTapeAdapter:
+    """
+    Provides (ell, qfeat) from a precomputed tape.
+    This keeps the trader deterministic and fast.
+    """
+    def __init__(self, tape: QFeatTape, series_index: int = 0):
+        self.tape = tape
+        self.s = int(series_index)
+
+    def update(self, ts: int, payload: dict):
+        # payload must include an integer timestep index 't'
+        t = int(payload["t"])
+        q = self.tape.mm[self.s, t, :6].astype(np.float32, copy=True)
+        ell = float(self.tape.mm[self.s, t, 6])
+        return ell, q
+```
+
+Then in `run_bars`, set `use_stub_adapter=True` but swap in this adapter (or pass a `confidence_fn` that reads from tape). The *strategy stays unchanged*; it just consumes ℓ.
+
+---
+
+# 5) Execution order (so you don’t paint yourself into a corner)
+
+1. **Implement qfeat kernel parity only** (write 6 features, leave slot6/7 = 0)
+2. **Run parity harness** until worst diffs are acceptable
+3. **Produce feature tapes** for historical periods (fast iteration)
+4. Wire tape adapter → trader, verify gating behaviour
+5. Only then add predictor head + ℓ into slot6
+
+This keeps your “learning drives permission surface, not direct signal” stance intact. 
+
+---
+
+## If you want me to target your repo structure precisely
+
+Paste:
+
+* the current location of `features/quotient.py` (or the import path you’re using)
+* how `bars.ts` maps to “timestep index” during replay (is `ts` already 0..T-1 like the demo in runner.py?) 
+
+…and I’ll write the *exact* glue so the tape adapter drops into `run_bars` with no ambiguity about indexing.
+
+
+Nice — with the SSBO contract now pinned in TRADER_CONTEXT2, the next move is purely engineering: **(1) implement the Vulkan kernel + bindings exactly to spec, (2) build the parity + replay harness, and (3) plug it into the existing runner/trader loop without touching strategy semantics**. That’s fully consistent with the “quotient invariants feed the permission surface” approach in your codec→trading formalism. 
+
+Below is a concrete plan + drop-in code skeletons that match the contract you documented, and integrate cleanly with your current `run_bars` / adapter plumbing in `runner.py`. 
+
+---
+
+# 1) Vulkan compute shader: SSBO bindings 0–4, 8-float records
+
+### File: `trading/vulkan_shaders/qfeat.comp` (GLSL)
+
+This is the *literal* ABI you documented: Params (binding 0), price (1), volume (2), qfeat out (3), optional debug (4). It assumes 2D dispatch: `(series, t)`.
+
+```glsl
+#version 450
+
+// Choose local sizes to match your dispatch plan.
+// We'll dispatch: (ceil(num_series/LSX), T, 1)
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) buffer ParamsSSBO {
+    uvec4 meta0;   // x=num_series, y=T, z=w1, w=w2
+    uvec4 meta1;   // x=price_stride, y=volume_stride, z=flags, w=reserved
+    vec4  fmeta0;  // x=eps, y=nan_squash, z=reserved, w=reserved
+    vec4  fmeta1;  // optional
+} P;
+
+layout(std430, binding = 1) readonly buffer PriceSSBO  { float price[];  };
+layout(std430, binding = 2) readonly buffer VolumeSSBO { float volume[]; }; // optional
+layout(std430, binding = 3) writeonly buffer QFeatSSBO { float qfeat[];  };
+
+layout(std430, binding = 4) buffer DebugSSBO { uint dbg[]; }; // optional
+
+// --- helpers ---
+float squash(float x, float nan_squash) {
+    // GLSL has isnan/isinf in 450
+    if (isnan(x) || isinf(x)) return nan_squash;
+    return x;
+}
+
+void write_record(uint s, uint t, float f0,float f1,float f2,float f3,float f4,float f5, float r6, float r7) {
+    uint T = P.meta0.y;
+    uint rec = (s * T + t) * 8u;
+    qfeat[rec + 0u] = f0;
+    qfeat[rec + 1u] = f1;
+    qfeat[rec + 2u] = f2;
+    qfeat[rec + 3u] = f3;
+    qfeat[rec + 4u] = f4;
+    qfeat[rec + 5u] = f5;
+    qfeat[rec + 6u] = r6; // reserved (ℓ later)
+    qfeat[rec + 7u] = r7; // reserved (checksum/debug)
+}
+
+void main() {
+    uint s = gl_GlobalInvocationID.x;
+    uint t = gl_GlobalInvocationID.y;
+
+    uint num_series = P.meta0.x;
+    uint T          = P.meta0.y;
+    uint w2         = P.meta0.w;
+    uint stride     = P.meta1.x;
+
+    if (s >= num_series || t >= T) return;
+
+    // warmup gate: if not enough history, emit zeros (stable ABI)
+    if (t < w2) {
+        write_record(s,t, 0,0,0,0,0,0, 0,0);
+        return;
+    }
+
+    // === TODO: implement compute_qfeat parity logic ===
+    // You will transliterate your pinned float32 CPU loop:
+    // - fixed loop order
+    // - shared mean in acorr
+    // - NaN/Inf squashing
+    //
+    // For now: placeholder values
+    float nan_squash = P.fmeta0.y;
+    float f0 = squash(0.0, nan_squash);
+    float f1 = squash(0.0, nan_squash);
+    float f2 = squash(0.0, nan_squash);
+    float f3 = squash(0.0, nan_squash);
+    float f4 = squash(0.0, nan_squash);
+    float f5 = squash(0.0, nan_squash);
+
+    write_record(s,t, f0,f1,f2,f3,f4,f5, 0.0, 0.0);
+}
+```
+
+**Important implementation constraint:** keep the per-feature arithmetic in the **same loop order** as your pinned CPU version (including the “shared mean” autocorr detail and NaN/Inf squashing). That’s what makes the parity harness meaningful.
+
+---
+
+# 2) Binding + dispatch setup: minimal Python module
+
+You already have Vulkan scaffolding proven to work (buffers + compute + readback), and `runner.py` is built to accept an adapter that provides ℓ/qfeat. 
+
+### File: `trading/vk_qfeat.py` (skeleton)
+
+This module has two responsibilities:
+
+1. run the kernel over an entire history (replay mode)
+2. provide a `FeatureTape` / `Oracle` interface
+
+```python
+import numpy as np
+import pathlib
+
+class QFeatTape:
+    """
+    Memmap-backed feature tape:
+      shape = (num_series, T, 8) float32
+      first 6 slots are ABI features
+      slot 6 reserved for ell
+      slot 7 reserved for checksum/debug
+    """
+    def __init__(self, path: str, num_series: int, T: int):
+        self.path = str(path)
+        self.num_series = int(num_series)
+        self.T = int(T)
+        self.mm = np.memmap(self.path, dtype=np.float32, mode="r", shape=(num_series, T, 8))
+
+    def qfeat_at(self, s: int, t: int) -> np.ndarray:
+        return np.array(self.mm[s, t, :6], dtype=np.float32, copy=True)
+
+    def ell_at(self, s: int, t: int) -> float:
+        return float(self.mm[s, t, 6])
+
+def build_feature_tape(
+    *,
+    prices: np.ndarray,        # (S,T) float32
+    volumes: np.ndarray | None,# (S,T) float32 or None
+    out_path: str,
+    w1: int = 64,
+    w2: int = 256,
+    eps: float = 1e-8,
+    nan_squash: float = 0.0,
+    vk_icd: str | None = None,
+):
+    """
+    Run Vulkan once over entire history:
+      dispatch = (ceil(S/64), T, 1)
+      output = (S,T,8) float32 memmap
+    """
+    prices = np.asarray(prices, dtype=np.float32, order="C")
+    assert prices.ndim == 2
+    S, T = prices.shape
+
+    if volumes is not None:
+        volumes = np.asarray(volumes, dtype=np.float32, order="C")
+        assert volumes.shape == prices.shape
+
+    out_path = str(out_path)
+    pathlib.Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+
+    # Allocate memmap for output
+    mm = np.memmap(out_path, dtype=np.float32, mode="w+", shape=(S, T, 8))
+    mm[:] = 0.0
+    mm.flush()
+
+    # TODO: Vulkan plumbing:
+    # - create device/queue
+    # - create SSBOs (Params, Price, Volume, QFeat, optional Debug)
+    # - upload prices/volumes
+    # - fill Params (meta0/meta1/fmeta0)
+    # - dispatch (ceil(S/64), T, 1)
+    # - barrier, read back QFeat into mm (or map & memcpy)
+    # - flush mm
+
+    return QFeatTape(out_path, S, T)
+```
+
+---
+
+# 3) Parity harness: CPU `compute_qfeat` vs GPU tape
+
+This is the gate that prevents “GPU drift” from silently corrupting the trader.
+
+### File: `tools/parity_qfeat.py` (skeleton)
+
+```python
+import numpy as np
+from trading.features.quotient import compute_qfeat  # your pinned CPU reference
+from trading.vk_qfeat import build_feature_tape
+
+def parity_check(
+    prices: np.ndarray,
+    tape_path: str,
+    *,
+    w1: int = 64,
+    w2: int = 256,
+    nsamples: int = 200,
+    tol: float = 1e-4,
+    seed: int = 0,
+):
+    prices = np.asarray(prices, dtype=np.float32, order="C")
+    S, T = prices.shape
+
+    tape = build_feature_tape(prices=prices, volumes=None, out_path=tape_path, w1=w1, w2=w2)
+
+    rng = np.random.default_rng(seed)
+    worst = np.zeros(6, dtype=np.float32)
+    worst_idx = [None]*6
+
+    for _ in range(nsamples):
+        s = int(rng.integers(0, S))
+        t = int(rng.integers(w2, T))
+        # CPU computes over window ending at t (define exactly how your kernel does it!)
+        # Example: use prices[s, t-w2:t] or prices[s, t-w2+1:t+1] — must match kernel.
+        window = prices[s, (t-w2+1):(t+1)]
+        cpu = compute_qfeat(window)  # must return 6 float32
+        gpu = tape.mm[s, t, :6]
+
+        diff = np.abs(cpu.astype(np.float32) - gpu.astype(np.float32))
+        for k in range(6):
+            if diff[k] > worst[k]:
+                worst[k] = diff[k]
+                worst_idx[k] = (s, t, float(cpu[k]), float(gpu[k]))
+
+        if np.any(diff > tol):
+            # You can choose to early-fail or keep collecting stats
+            pass
+
+    return worst, worst_idx
+```
+
+**One critical detail:** define the window indexing *once* (inclusive/exclusive) and keep it identical in:
+
+* the Vulkan kernel
+* the CPU reference used in parity
+  That’s usually the #1 source of “false mismatches”.
+
+---
+
+# 4) Replay harness into `runner.py` via LearnerAdapter (no strategy changes)
+
+Your `runner.py` already supports a `LearnerAdapter` stub that provides ℓ and qfeat through `adapter.update(ts, payload)` and logs `ell`. 
+
+So you can add a new adapter:
+
+### File: `trading/strategy/vulkan_tape_adapter.py`
+
+```python
+import numpy as np
+from trading.vk_qfeat import QFeatTape
+
+class VulkanTapeAdapter:
+    """
+    Provides (ell, qfeat) from a precomputed tape.
+    This keeps the trader deterministic and fast.
+    """
+    def __init__(self, tape: QFeatTape, series_index: int = 0):
+        self.tape = tape
+        self.s = int(series_index)
+
+    def update(self, ts: int, payload: dict):
+        # payload must include an integer timestep index 't'
+        t = int(payload["t"])
+        q = self.tape.mm[self.s, t, :6].astype(np.float32, copy=True)
+        ell = float(self.tape.mm[self.s, t, 6])
+        return ell, q
+```
+
+Then in `run_bars`, set `use_stub_adapter=True` but swap in this adapter (or pass a `confidence_fn` that reads from tape). The *strategy stays unchanged*; it just consumes ℓ.
+
+---
+
+# 5) Execution order (so you don’t paint yourself into a corner)
+
+1. **Implement qfeat kernel parity only** (write 6 features, leave slot6/7 = 0)
+2. **Run parity harness** until worst diffs are acceptable
+3. **Produce feature tapes** for historical periods (fast iteration)
+4. Wire tape adapter → trader, verify gating behaviour
+5. Only then add predictor head + ℓ into slot6
+
+This keeps your “learning drives permission surface, not direct signal” stance intact. 
+
+---
+
+## If you want me to target your repo structure precisely
+
+Paste:
+
+* the current location of `features/quotient.py` (or the import path you’re using)
+* how `bars.ts` maps to “timestep index” during replay (is `ts` already 0..T-1 like the demo in runner.py?) 
+
+…and I’ll write the *exact* glue so the tape adapter drops into `run_bars` with no ambiguity about indexing.
+
+
+Yes — **you already established the Vulkan toolchain**. Nothing fundamental is missing, and you **do not** need to pivot to a C++ helper unless you *want* to for ergonomics.
+
+Let me reset the ground truth, then give you the **exact proceed plan** so there’s no ambiguity.
+
+---
+
+## Ground truth (what is already true)
+
+You have **already proven** all of the following earlier in this repo/session:
+
+1. **System Vulkan toolchain exists and works**
+
+   * `glslc` works (you compiled `.comp → .spv`)
+   * RADV driver is healthy
+   * Compute pipelines dispatch successfully
+   * Buffers, descriptor sets, and sync barriers work
+   * You’ve already run Vulkan compute shaders from Python in this repo
+
+   This was established with:
+
+   * `compute_buffer.py`
+   * `compute_image_preview.py`
+   * explicit `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json`
+
+   So: **no missing Vulkan installation, no missing loader, no missing compiler**.
+
+2. **Python does *not* need “Vulkan bindings” from pip**
+
+   * You are *not* using `vulkan`, `vulkan-tools`, `pyvulkan`, etc.
+   * You already call Vulkan via **ctypes + raw handles** (or equivalent minimal wrapper)
+   * This is exactly how your existing compute code works
+
+3. **The QFeat work is at the *same abstraction level* as your existing Vulkan code**
+
+   * Same device
+   * Same queue
+   * Same SSBO model
+   * Same dispatch model
+   * Just a new shader + buffer layout
+
+4. **You already wrote everything *except* the final 20%**
+
+   * Shader: ✔️
+   * SSBO ABI: ✔️
+   * Tape abstraction: ✔️
+   * Adapter + runner integration: ✔️
+   * Parity harness: ✔️
+   * Docs/spec pinned: ✔️
+
+The **only missing thing** is:
+
+> wiring the Vulkan dispatch into `vk_qfeat.build_feature_tape()`
+> using the *same Vulkan helper code you already have elsewhere*
+
+---
+
+## What “proceed” means now (unambiguous)
+
+It means **exactly this**, in this order:
+
+---
+
+## Step 1 — Reuse your existing Vulkan helper (do NOT invent a new path)
+
+**Do not**:
+
+* add C++
+* add new bindings
+* shell out
+* re-architect
+
+**Do**:
+
+* copy/adapt the minimal Vulkan setup you already use for compute
+* put it inside `vk_qfeat.build_feature_tape()`
+
+Concretely, `build_feature_tape()` must:
+
+1. Create (or reuse) a Vulkan instance + device
+2. Load `vulkan_shaders/qfeat.spv`
+3. Create descriptor set layout for bindings **0–4** exactly as spec’d
+4. Allocate buffers:
+
+   * ParamsSSBO (64 bytes)
+   * PriceSSBO
+   * VolumeSSBO (optional)
+   * QFeatSSBO (S × T × 8 × 4 bytes)
+   * DebugSSBO (optional)
+5. Upload:
+
+   * Params struct
+   * price / volume arrays
+6. Dispatch:
+
+   ```
+   dispatch_x = ceil(S / local_size_x)
+   dispatch_y = T
+   dispatch_z = 1
+   ```
+7. Barrier
+8. Read back QFeatSSBO into the memmap
+
+That’s it. No policy, no learning, no strategy involvement.
+
+If you can run `compute_buffer.py`, you can do this.
+
+---
+
+## Step 2 — Compile shader once, deterministically
+
+Add **one** helper (or document command):
+
+```bash
+glslc vulkan_shaders/qfeat.comp -o vulkan_shaders/qfeat.spv
+```
+
+Optionally:
+
+* auto-compile if `.spv` missing
+* but *do not* recompile every run
+
+This matches how you already handle shaders.
+
+---
+
+## Step 3 — Flip the switch: CPU → GPU inside build_feature_tape
+
+Right now `build_feature_tape()` is CPU-backed.
+
+Change:
+
+```python
+# TODO: Vulkan plumbing
+```
+
+to:
+
+```python
+if use_vulkan:
+    run_vulkan_qfeat(...)
+else:
+    run_cpu_fallback(...)
+```
+
+You already designed this seam correctly.
+
+---
+
+## Step 4 — Run parity harness (this is the gate)
+
+You do **not** proceed past this until:
+
+```text
+max |CPU - GPU| ≤ 1e-4  for all 6 features
+```
+
+If it fails:
+
+* fix shader math
+* fix indexing
+* fix warmup guard
+
+Nothing else moves until parity is green.
+
+---
+
+## Step 5 — Replay trader (already wired)
+
+Once parity passes:
+
+```bash
+python scripts/run_with_vulkan_tape.py
+```
+
+Expected results (you already observed this with CPU tape):
+
+* `ell` non-NaN
+* ACT/HOLD unchanged
+* logs identical except for confidence source
+* strategy untouched
+
+---
+
+## About the C++ idea (answering your concern directly)
+
+> *“I’m weighing between ctypes vs a small C++ helper”*
+
+You **do not need C++** for correctness or capability.
+
+C++ would only make sense if:
+
+* you wanted long-lived daemon-style GPU services
+* you wanted multi-process sharing
+* Python overhead became dominant (it won’t here)
+
+For now:
+
+* Python + Vulkan (as you already do) is **strictly better**
+* fewer moving parts
+* easier parity debugging
+* stays aligned with the rest of the repo
+
+So the correct call is:
+
+> **Stay in Python. Reuse the existing Vulkan helper pattern. Finish the dispatch.**
+
+---
+
+## Final clarity statement
+
+You are **not blocked**.
+You are **not missing tooling**.
+You are **not meant to redesign anything**.
+
+You are at the **last mechanical step**:
+
+> *replace the CPU loop in `build_feature_tape()` with the Vulkan dispatch you already know how to write.*
+
+If you want, next I can:
+
+* paste a **minimal Vulkan-dispatch skeleton** tailored to your existing helper code style (no new abstractions), or
+* help you splice code directly from your existing compute module into `vk_qfeat.py`.
+
+Just say which you want.

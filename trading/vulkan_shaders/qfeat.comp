@@ -1,0 +1,223 @@
+#version 450
+
+const uint MAX_WINDOW = 1024u;
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) buffer ParamsSSBO {
+    uvec4 meta0;   // x=num_series, y=T, z=w1, w=w2
+    uvec4 meta1;   // x=price_stride, y=volume_stride, z=flags, w=reserved
+    vec4  fmeta0;  // x=eps, y=nan_squash, z=burst_clip?, w=reserved
+    vec4  fmeta1;  // optional dt/reserved
+} P;
+
+layout(std430, binding = 1) readonly buffer PriceSSBO  { float price[];  };
+layout(std430, binding = 2) readonly buffer VolumeSSBO { float volume[]; }; // optional
+layout(std430, binding = 3) writeonly buffer QFeatSSBO { float qfeat[];  };
+layout(std430, binding = 4) buffer DebugSSBO { uint dbg[]; }; // optional
+
+float squash(float x, float nan_squash) {
+    return isfinite(x) ? x : nan_squash;
+}
+
+void write_record(uint s, uint t, float f0, float f1, float f2, float f3, float f4, float f5, float r6, float r7) {
+    uint T = P.meta0.y;
+    uint rec = (s * T + t) * 8u;
+    qfeat[rec + 0u] = f0;
+    qfeat[rec + 1u] = f1;
+    qfeat[rec + 2u] = f2;
+    qfeat[rec + 3u] = f3;
+    qfeat[rec + 4u] = f4;
+    qfeat[rec + 5u] = f5;
+    qfeat[rec + 6u] = r6;
+    qfeat[rec + 7u] = r7;
+}
+
+void main() {
+    uint s = gl_GlobalInvocationID.x;
+    uint t = gl_GlobalInvocationID.y;
+
+    uint num_series = P.meta0.x;
+    uint T = P.meta0.y;
+    uint w1 = P.meta0.z;
+    uint w2 = P.meta0.w;
+    uint price_stride = P.meta1.x;
+    float eps = P.fmeta0.x;
+    float nan_squash = P.fmeta0.y;
+
+    if (s >= num_series || t >= T) {
+        return;
+    }
+
+    if (t < w2 || w2 == 0u || w2 > MAX_WINDOW) {
+        write_record(s, t, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        return;
+    }
+
+    float r[MAX_WINDOW];
+    uint price_base = s * price_stride;
+    uint start_idx = t - w2;
+    uint W = w2;
+
+    // Compute log returns r[i] = log(p[i+1]) - log(p[i]) with eps clipping.
+    for (uint i = 0u; i < W; ++i) {
+        uint idx = price_base + start_idx + i;
+        uint idx_next = idx + 1u;
+        float a = price[idx];
+        float b = price[idx_next];
+        if (a <= eps) {
+            a = eps;
+        }
+        if (b <= eps) {
+            b = eps;
+        }
+        r[i] = log(b) - log(a);
+    }
+
+    if (W == 0u) {
+        write_record(s, t, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        return;
+    }
+
+    float sum_r = 0.0;
+    float rmin = r[0];
+    float rmax = r[0];
+    for (uint i = 0u; i < W; ++i) {
+        float v = r[i];
+        sum_r += v;
+        if (v < rmin) {
+            rmin = v;
+        }
+        if (v > rmax) {
+            rmax = v;
+        }
+    }
+    float mean_r = sum_r / float(W);
+
+    float ss = 0.0;
+    for (uint i = 0u; i < W; ++i) {
+        float d = r[i] - mean_r;
+        ss += d * d;
+    }
+    float var = ss / float(W);
+    float sigma = sqrt(var + eps);
+
+    float r_range = (rmax - rmin) + eps;
+    float vol_ratio = sigma / r_range;
+
+    float curvature = 0.0;
+    if (W >= 3u) {
+        uint n = W - 2u;
+        float d2_sum = 0.0;
+        for (uint i = 1u; i < W - 1u; ++i) {
+            float d2 = r[i + 1u] - 2.0 * r[i] + r[i - 1u];
+            d2_sum += d2;
+        }
+        float d2_mean = d2_sum / float(n);
+
+        float d2_ss = 0.0;
+        for (uint i = 1u; i < W - 1u; ++i) {
+            float d2 = r[i + 1u] - 2.0 * r[i] + r[i - 1u];
+            float d = d2 - d2_mean;
+            d2_ss += d * d;
+        }
+        float d2_var = d2_ss / float(n);
+        float d2_std = sqrt(d2_var + eps);
+        curvature = log(1.0 + d2_std);
+    }
+
+    float s_acc = r[0];
+    float peak = s_acc;
+    float dd = 0.0;
+    for (uint i = 1u; i < W; ++i) {
+        s_acc += r[i];
+        if (s_acc > peak) {
+            peak = s_acc;
+        }
+        float gap = peak - s_acc;
+        if (gap > dd) {
+            dd = gap;
+        }
+    }
+    float norm = abs(s_acc - r[0]) + eps;
+    float drawdown = dd / norm;
+
+    float l1 = 0.0;
+    float l2s = 0.0;
+    for (uint i = 0u; i < W; ++i) {
+        float v = r[i];
+        l1 += abs(v);
+        l2s += v * v;
+    }
+    float l2 = sqrt(l2s) + eps;
+    float burstiness = l1 / l2;
+
+    float acorr_1 = 0.0;
+    if (W >= 2u) {
+        float s00 = 0.0;
+        float s11 = 0.0;
+        float s01 = 0.0;
+        for (uint i = 0u; i < W - 1u; ++i) {
+            float a = r[i] - mean_r;
+            float b = r[i + 1u] - mean_r;
+            s00 += a * a;
+            s11 += b * b;
+            s01 += a * b;
+        }
+        float denom = sqrt(s00 * s11);
+        if (denom > 0.0) {
+            float ac = s01 / denom;
+            if (ac > 1.0) {
+                ac = 1.0;
+            } else if (ac < -1.0) {
+                ac = -1.0;
+            }
+            acorr_1 = ac;
+        }
+    }
+
+    uint nf = (W >= w1) ? w1 : W;
+    uint ns = (W >= w2) ? w2 : W;
+    if (nf == 0u) {
+        nf = 1u;
+    }
+    if (ns == 0u) {
+        ns = 1u;
+    }
+    float sum_f = 0.0;
+    for (uint i = W - nf; i < W; ++i) {
+        sum_f += r[i];
+    }
+    float mean_f = sum_f / float(nf);
+    float ss_f = 0.0;
+    for (uint i = W - nf; i < W; ++i) {
+        float d = r[i] - mean_f;
+        ss_f += d * d;
+    }
+    float var_f = ss_f / float(nf);
+    float std_f = sqrt(var_f + eps);
+
+    float sum_s = 0.0;
+    for (uint i = W - ns; i < W; ++i) {
+        sum_s += r[i];
+    }
+    float mean_s = sum_s / float(ns);
+    float ss_s = 0.0;
+    for (uint i = W - ns; i < W; ++i) {
+        float d = r[i] - mean_s;
+        ss_s += d * d;
+    }
+    float var_s = ss_s / float(ns);
+    float std_s = sqrt(var_s + eps);
+
+    float var_ratio = std_f / (std_s + eps);
+
+    float f0 = squash(vol_ratio, nan_squash);
+    float f1 = squash(curvature, nan_squash);
+    float f2 = squash(drawdown, nan_squash);
+    float f3 = squash(burstiness, nan_squash);
+    float f4 = squash(acorr_1, nan_squash);
+    float f5 = squash(var_ratio, nan_squash);
+
+    write_record(s, t, f0, f1, f2, f3, f4, f5, 0.0, 0.0);
+}
