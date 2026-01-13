@@ -4757,3 +4757,980 @@ If you want, next I can:
 * help you splice code directly from your existing compute module into `vk_qfeat.py`.
 
 Just say which you want.
+
+
+venv ❯ python tools/parity_qfeat.py --tape logs/qfeat_tape.memmap --backend vulkan --force --vk-icd /usr/share/vulkan/icd.d/radeon_icd.x86_64.json
+worst diffs: [1.00159645e-01 1.01863407e-07 2.39456787e+01 2.74620533e-01
+ 2.01651230e-02 2.09808350e-05]
+feature 0: series=0, t=22869, cpu=8.93588924407959, gpu=9.036048889160156
+feature 1: series=0, t=31100, cpu=0.0010133786126971245, gpu=0.001013480476103723
+feature 2: series=0, t=11402, cpu=143.6970977783203, gpu=167.6427764892578
+feature 3: series=0, t=33080, cpu=2.948955535888672, gpu=3.223576068878174
+feature 4: series=0, t=15459, cpu=0.10158799588680267, gpu=0.12175311893224716
+feature 5: series=0, t=31000, cpu=1.0059363842010498, gpu=1.0059573650360107
+
+Yep — that “sandbox can’t see Vulkan devices” note is just a red herring from the other model/session. **You already ran parity on-host and pasted real diffs.** We can debug from *those*.
+
+Here’s the tight conclusion and what to change next.
+
+---
+
+## What the real parity output says
+
+Your host parity run shows:
+
+* curvature + var_ratio are basically perfect (≈1e-7, 2e-5)
+* the big offenders are:
+
+  * **drawdown** (+23.9 worst)
+  * **burstiness** (+0.275)
+  * **acorr_1** (+0.020)
+  * **vol_ratio** (+0.10)
+
+That profile is **classic “window semantics / cumulative initialization mismatch”**, not SSBO/stride/dispatch.
+
+If the ABI were wrong, you’d see garbage across all 6 features, not “two perfect, four proportionally off.”
+
+---
+
+## The two most likely causes (in priority order)
+
+### 1) Off-by-one window indexing between CPU and GPU
+
+This single issue explains the *direction and scale* of the errors: drawdown blows up the most, acorr and burstiness drift, while curvature/var_ratio barely move.
+
+Fix: make GPU use the exact same window slice as the CPU reference used by `tools/parity_qfeat.py`.
+
+**Action:** open `tools/parity_qfeat.py` and check how it builds the window. It’s going to be one of these two:
+
+* **A (inclusive end):** `prices[t-w2+1 : t+1]`
+* **B (exclusive end):** `prices[t-w2 : t]` or `prices[t-w2 : t+1]`
+
+Then enforce *that exact indexing* in `qfeat.comp`.
+
+### 2) Drawdown cumulative path initialization mismatch
+
+Even if indexing is right, drawdown can still diverge if:
+
+* CPU cumulative starts at 0 and peak starts at 0
+* GPU starts peak at `-inf` or at first cum point
+* CPU uses cum over **returns**, GPU uses cum over **log-prices** (or vice versa)
+
+Fix: implement drawdown exactly as:
+
+```c
+cum = 0
+peak = 0
+for k in 0..N-1:
+  cum += r[k]
+  peak = max(peak, cum)
+  max_dd = max(max_dd, peak - cum)
+```
+
+No other initialization.
+
+---
+
+## Concrete next step I want you to do (no guesswork)
+
+Because you already have both codepaths, the fastest way to make this mechanical is:
+
+### Step A — Print the exact CPU window semantics at the mismatch points
+
+In `tools/parity_qfeat.py`, add a temporary debug print for **one** of the failing examples (pick drawdown’s worst at `t=11402`):
+
+* print the slice start/end indices used for CPU
+* print the first/last 3 prices in that slice
+* print N (returns length)
+
+This tells us whether the GPU should be reading `[t-w2+1..t]` or `[t-w2..t-1]` etc.
+
+### Step B — Make the GPU compute those exact indices
+
+In `qfeat.comp`, set:
+
+```glsl
+uint end = t + 1u;              // if CPU uses inclusive t
+uint start = end - (w2 + 1u);   // if CPU uses w2 returns => w2+1 prices
+```
+
+(or whatever matches Step A)
+
+### Step C — Force drawdown init
+
+Make sure drawdown uses cum/peak both starting at 0.
+
+---
+
+## If you want the “surgical” fix right now
+
+Based on your symptoms, the most common specific mismatch is:
+
+> CPU uses **w2 returns**, derived from **w2+1 prices** ending at t,
+> GPU uses **w2 prices** or ends at t-1.
+
+So the GPU reads one fewer price, which shifts everything and especially hurts drawdown.
+
+**GPU indexing should typically be:**
+
+* prices: `p[t-w2] .. p[t]` (w2+1 samples)
+* returns: length w2
+
+If your shader currently loops `i = t-w2+1 .. t` and computes returns inside that loop, it’s likely missing the earliest price.
+
+---
+
+## What I need to give you an exact line-level patch
+
+You don’t need to paste everything. Paste just these two snippets:
+
+1. From `tools/parity_qfeat.py`: the exact lines that construct the CPU window for `compute_qfeat`
+2. From `vulkan_shaders/qfeat.comp`: the loop header showing how you compute the price window / returns
+
+With those two, I can tell you **exactly** whether to shift by +1 or change `(w2)` vs `(w2+1)` and where.
+
+---
+
+## One more quick check (cheap, high value)
+
+Run parity with a *tiny window* to make indexing errors obvious:
+
+```bash
+python tools/parity_qfeat.py --tape logs/qfeat_tape.memmap --backend vulkan --force \
+  --vk-icd /usr/share/vulkan/icd.d/radeon_icd.x86_64.json \
+  --w2 16 --w1 4
+```
+
+If it’s indexing, diffs will often get *worse* proportionally and be easier to reproduce.
+
+---
+
+Bottom line: your Vulkan path is working; this is a **semantic mismatch** in window/cum logic. Paste those two small snippets and I’ll return a precise “change these 3 lines” patch.
+
+
+
+
+Yep — the docs aren’t *the* problem. Your **shader math is slightly off vs the pinned CPU float32 loop semantics**, and the pattern of your diffs (esp. the “small-window stress test” with `--w2 16 --w1 4`) is exactly what you’d expect from **“eps is in the wrong place”** + **(possibly) using eps to clamp prices**.
+
+Two big tells from your output:
+
+* **Feature 4 (acorr_1) becomes 0.0 on GPU** while CPU is strongly negative (`-0.78`). That usually means **your GPU `denom` collapsed to 0** because `s00` or `s11` became ~0 (returns nearly constant / quantized), which can happen if you’re unintentionally **flattening returns** (price clamp) or injecting a floor into variance.
+* **Feature 0 / 2 / 3 blow out hard** under small windows. That’s consistent with **stddev computed as `sqrt(var + eps)`** instead of **`sqrt(var) + eps`** (the difference between adding eps *inside* sqrt vs *outside* is enormous when `var` is small).
+
+Your current shader *does* add eps **inside** sqrt in multiple places:
+
+* `sigma = sqrt(var + eps);`
+* `d2_std = sqrt(d2_var + eps);`
+* `std_f = sqrt(var_f + eps);`
+* `std_s = sqrt(var_s + eps);`
+
+If your CPU “gold” is the explicit float32 loop version, it almost certainly does **sqrt(var)** and then handles eps only in denominators / guards (or adds eps outside the sqrt). That matches the intent in the spec: eps is for *division safety*, not as an artificial noise floor.
+
+Also: you’re clamping prices using the same `eps`:
+
+```glsl
+if (a <= eps) a = eps;
+if (b <= eps) b = eps;
+```
+
+But `eps=1e-6` is a *division epsilon*, not a “safe price minimum”. If your price stream ever gets small-ish (or has 0/NaN artifacts), this clamp can **quantize** returns and destroy autocorr.
+
+---
+
+## Minimal shader patch (no new abstractions)
+
+Drop this directly into `qfeat.comp`:
+
+```glsl
+// Add near top (constants)
+const float PRICE_EPS = 1e-20;   // clamp for log(), not the same as eps
+
+// Helper: safe sqrt that matches CPU "sqrt(max(x,0))" style
+float safe_sqrt(float x) {
+    return sqrt(max(x, 0.0));
+}
+```
+
+Then make these exact edits:
+
+### 1) Log-return clamp: use PRICE_EPS, not eps
+
+Replace:
+
+```glsl
+if (a <= eps) a = eps;
+if (b <= eps) b = eps;
+```
+
+With:
+
+```glsl
+if (!(a > PRICE_EPS)) a = PRICE_EPS;  // handles <=0 and NaN
+if (!(b > PRICE_EPS)) b = PRICE_EPS;
+```
+
+### 2) Stddevs: remove eps from inside sqrt
+
+Replace:
+
+```glsl
+float var = ss / float(W);
+float sigma = sqrt(var + eps);
+```
+
+With:
+
+```glsl
+float var = ss / float(W);
+float sigma = safe_sqrt(var);
+```
+
+Replace curvature block:
+
+```glsl
+float d2_var = d2_ss / float(n);
+float d2_std = sqrt(d2_var + eps);
+curvature = log(1.0 + d2_std);
+```
+
+With:
+
+```glsl
+float d2_var = d2_ss / float(n);
+float d2_std = safe_sqrt(d2_var);
+curvature = log(1.0 + d2_std); // log1p
+```
+
+Replace var_ratio stddevs:
+
+```glsl
+float var_f = ss_f / float(nf);
+float std_f = sqrt(var_f + eps);
+
+float var_s = ss_s / float(ns);
+float std_s = sqrt(var_s + eps);
+```
+
+With:
+
+```glsl
+float var_f = ss_f / float(nf);
+float std_f = safe_sqrt(var_f);
+
+float var_s = ss_s / float(ns);
+float std_s = safe_sqrt(var_s);
+```
+
+Keep eps only where it belongs: denominators:
+
+* `r_range = (rmax - rmin) + eps;`
+* `l2 = sqrt(l2s) + eps;`
+* `var_ratio = std_f / (std_s + eps);`
+* `norm = abs(s_acc - r[0]) + eps;`
+
+That matches the written intent of the CPU spec (division guards, not a variance floor). This is consistent with the contract style you’ve documented (Params eps + NaN/Inf squashing), and with how `var_ratio` is defined in the CPU description (std/std with eps in denominator). 
+
+---
+
+## Why this should fix *your specific* parity failures
+
+* **acorr_1 = 0.0 on GPU**: if variance floors or return quantization makes `r[i]` nearly constant, then `a=r[i]-mean` becomes ~0 → `s00`, `s11` ~0 → denom 0 → you hit the “return 0” path. Removing the artificial floor + not clamping with `eps` typically restores real variance and fixes this.
+* The huge deltas in **vol_ratio / drawdown / burstiness** under small windows are exactly where `sqrt(var + eps)` deviates hardest.
+
+---
+
+## What to run next (same commands you already used)
+
+1. Recompile shader to SPIR-V and re-run the small-window stress test:
+
+```bash
+python tools/parity_qfeat.py --tape logs/qfeat_tape.memmap --backend vulkan --force \
+  --vk-icd /usr/share/vulkan/icd.d/radeon_icd.x86_64.json \
+  --w2 16 --w1 4
+```
+
+2. Then re-run your original window sizes:
+
+```bash
+python tools/parity_qfeat.py --tape logs/qfeat_tape.memmap --backend vulkan --force \
+  --vk-icd /usr/share/vulkan/icd.d/radeon_icd.x86_64.json
+```
+
+If feature 0/2/3 drop massively but **feature 4 still sticks at 0**, the next suspect is **window alignment (inclusive/exclusive of price[t])**. But your shader’s indexing (`idx_next = idx + 1`, last return uses `price[t]`) is the *usual* “returns ending at t” convention, so I’d fix the eps placement first — it’s the most “obviously wrong” relative to your pinned CPU intent.
+
+If you paste the new `worst diffs` after this patch, I’ll tell you whether the remaining error is just expected FP/FMA noise (tolerable) or a genuine semantic mismatch.
+
+
+venv ❯ python tools/parity_qfeat.py --tape logs/qfeat_tape.memmap --backend vulkan --force --vk-icd /usr/share/vulkan/icd.d/radeon_icd.x86_64.json --w2 16 --w1 4
+worst diffs: [1.00000006e+03 9.99500509e-04 1.07691460e+02 2.01613975e+00
+ 7.83349454e-01 9.99000967e-01]
+feature 0: series=0, t=5839, cpu=1000.0000610351562, gpu=0.0
+feature 1: series=0, t=31733, cpu=0.000999500509351492, gpu=0.0
+feature 2: series=0, t=3977, cpu=181.82443237304688, gpu=74.13297271728516
+feature 3: series=0, t=20623, cpu=0.6964118480682373, gpu=2.7125515937805176
+feature 4: series=0, t=21519, cpu=-0.7833494544029236, gpu=0.0
+feature 5: series=0, t=21179, cpu=0.9990009665489197, gpu=0.0
+
+~/Documents/code/dashitest/trading main*
+venv ❯ python tools/parity_qfeat.py --tape logs/qfeat_tape.memmap --backend vulkan --force --vk-icd /usr/share/vulkan/icd.d/radeon_icd.x86_64.json
+worst diffs: [8.8524923e+00 9.7862666e-04 2.3945679e+01 2.7462053e-01 2.0165123e-02
+ 9.9895811e-01]
+feature 0: series=0, t=22869, cpu=8.93588924407959, gpu=0.0833965465426445
+feature 1: series=0, t=22869, cpu=0.000999726471491158, gpu=2.1099820514791645e-05
+feature 2: series=0, t=11402, cpu=143.6970977783203, gpu=167.6427764892578
+feature 3: series=0, t=33080, cpu=2.948955535888672, gpu=3.223576068878174
+feature 4: series=0, t=15459, cpu=0.10158799588680267, gpu=0.12175311893224716
+feature 5: series=0, t=22869, cpu=0.9989581108093262, gpu=0.0
+
+
+Yep — **this looks like an ABI/stride divergence**, not “math drift”.
+
+### What your parity output is screaming
+
+When you see **some features become exactly `0.0`** (esp. feature 0/1/5) while others are plausible, that’s almost always:
+
+1. **wrong record stride (6 vs 8 floats)**, and/or
+2. **wrong flattening (1D gid vs 2D (s,t))**, so you’re reading the “right shaped” memmap but the GPU wrote with a different packing.
+
+You actually have a smoking gun in the older shader excerpt: it wrote with:
+
+* `uint base = gid * 6u;`
+* wrote `Q.qfeat[base+0..5]`
+
+…but **your Python harness allocates and interprets `(S, T, 8)`** (`qfeat_size = S*T*8*4`) and reads `:6` from each 8-float record.  
+
+If the shader is still writing **6-float records**, then reshaping as **8-float records** will “phase shift” the tape:
+
+* slots `[6,7]` of record *i* will actually be the first two floats of record *i+1*
+* any unwritten warmup windows remain zero → those zeros leak into *later* records’ features when misaligned
+
+That perfectly matches your symptoms:
+
+* with `--w2 16`, the warmup region is small, but misalignment can still yield sporadic zeros
+* your “feature 0/1/5 are 0.0” cases are consistent with reading from unwritten/reserved space after mispack
+
+---
+
+## Minimal shader fix (keep everything else the same)
+
+**Make the output stride 8 floats per window**, and write the extra two slots (ℓ + reserved/checksum).
+
+In `vulkan_shaders/qfeat.comp`:
+
+```glsl
+// OLD (bad for your tape ABI)
+uint base = gid * 6u;
+
+// NEW (matches Python tape shape (S,T,8))
+uint base = gid * 8u;
+
+Q.qfeat[base + 0] = vol_ratio;
+Q.qfeat[base + 1] = curvature;
+Q.qfeat[base + 2] = drawdown;
+Q.qfeat[base + 3] = burstiness;
+Q.qfeat[base + 4] = acorr_1;
+Q.qfeat[base + 5] = var_ratio;
+
+// slot 6: ℓ (placeholder until learner writes it)
+Q.qfeat[base + 6] = 0.0;
+
+// slot 7: reserved (I strongly recommend a debug checksum while validating)
+Q.qfeat[base + 7] = 0.0;
+```
+
+If you want a dirt-simple “did I pack correctly?” checksum during parity bring-up:
+
+```glsl
+Q.qfeat[base + 7] = float(gid);
+```
+
+Then you can assert on the CPU side that `tape[s,t,7] == series*T + t` (or whatever your flattening is).
+
+---
+
+## Minimal Python-side sanity check (before you chase math)
+
+Right after you read back the Vulkan buffer into the memmap (in `_run_vulkan_tape`), do one cheap structural check:
+
+* pick a few `(s,t)` that are **well past warmup**
+* verify **not all of `tape[s,t,:6]` are ~0**
+* if using checksum slot 7: verify it matches expected gid mapping
+
+This will tell you in 5 seconds whether you’re still mispacked.
+
+---
+
+## One more thing: confirm your flattening matches the tape indexing
+
+Your harness is shaped `(S, T, 8)` and your CPU loop writes at `[s,t]`. 
+
+So your shader must compute the same notion of `(s,t)` and flatten consistently, e.g.:
+
+* **Option A (recommended, simplest): 2D dispatch**
+
+  * `gl_GlobalInvocationID.x = t`
+  * `gl_GlobalInvocationID.y = s`
+  * `gid = s*T + t`
+
+* **Option B: 1D dispatch over `gid in [0, S*T)`**
+
+  * `s = gid / T`
+  * `t = gid % T`
+
+Either is fine — but your base indexing **must** align with how Python expects to read.
+
+If you paste the first ~60 lines of your *current* `qfeat.comp` (bindings + how you compute gid/s/t + base), I’ll point to the exact line that’s off. But given the evidence, fixing **6→8 stride** is step one.
+
+---
+
+### Why your “math diffs” changed when you set `--w2 16 --w1 4`
+
+That run producing giant diffs + zeros is exactly what you’d expect when:
+
+* the tape is being **reshaped/parsed with the wrong stride**
+* shortening windows increases the proportion of “edge / warmup / unwritten” cases, so misalignment artifacts get louder
+
+So: **don’t touch math yet**. Fix the packing/stride first, re-run parity, then we’ll address any remaining numeric differences (like drawdown peak init, acorr mean reuse, etc.).
+
+
+Good — your `--debug-feature` output is the missing piece, and it points to a very specific failure mode:
+
+### What the debug window shows
+
+For the worst `feature 0` case:
+
+* prices are essentially *flat* over the 17-sample window:
+
+  * head: `[87476.91, 87476.9, 87476.9]`
+  * tail: `[87476.91, 87476.9, 87476.91]`
+
+That means returns are **tiny**, often near the noise floor of float32.
+
+Now look at the parity pattern again:
+
+* `acorr_1` GPU = **0.0** for a case where CPU is **-0.783**
+* other features still produce nonzero results
+
+That combination is not stride/ABI anymore (your debug window confirms the CPU window is well-defined, and earlier you noted the shader writes 8-float records and 2D dispatch). The issue is:
+
+> **Your GPU return computation is collapsing many tiny returns to exact zero in float32**, which makes the autocorrelation denominator go to ~0 and triggers the “return 0” path.
+
+That can also distort vol_ratio and burstiness (which depend on std/range and |Δr| aggregates) and drawdown (which is cumsum of r).
+
+### Why CPU sees it and GPU doesn’t
+
+On CPU, even if you store arrays as float32, your `math.log` typically operates in double precision internally and the division may be done at higher precision before casting back, so the tiny deltas survive. On GPU, `log()` is float32 math and `log(b) - log(a)` is a **catastrophic cancellation** when `a≈b`.
+
+So your instinct to switch to a “log1p form” is right — but do it in a way that matches your CPU semantics as closely as possible.
+
+---
+
+## The correct shader-side fix (do this, not plain `log(1 + ratio)`)
+
+Use `log1p(x)` if available; otherwise use `log(1.0 + x)` but clamp `x` safely.
+
+Also: compute the ratio as `(b/a) - 1`, not `(b-a)/a` (they’re algebraically identical, but `b/a - 1` is often better behaved in float because the division happens before subtraction; which is beneficial when a and b are close but representable).
+
+### Patch: return computation block
+
+Replace your return line:
+
+```glsl
+r[i] = log(b) - log(a);
+```
+
+with:
+
+```glsl
+float q = b / a;           // q ~ 1
+float x = q - 1.0;         // tiny
+// guard: ensure 1+x > 0
+x = max(x, -0.99999994);   // keep (1+x) positive in float32
+// prefer log1p if present; otherwise log(1+x)
+#ifdef GL_EXT_shader_explicit_arithmetic_types_float32
+    // (ignore; not needed)
+#endif
+// GLSL 450 usually has log1p on many drivers, but not guaranteed.
+// If unavailable, just use log(1.0 + x).
+r[i] = log(1.0 + x);
+```
+
+If your compiler supports `log1p`, use it:
+
+```glsl
+r[i] = log1p(x);
+```
+
+That will stop returns collapsing to 0 on nearly-flat price windows and should immediately:
+
+* fix `acorr_1` not falling to zero
+* bring `vol_ratio`, `burstiness`, and `drawdown` much closer
+
+---
+
+## One more crucial tweak: the acorr “zero path” is too aggressive
+
+Right now your shader likely does something like:
+
+```glsl
+if (denom <= eps) acorr_1 = 0.0;
+```
+
+But with flat windows, denom really can be tiny. CPU will still produce a meaningful correlation because it’s operating with more precision.
+
+Instead of returning 0, return the *signed* normalized value with a safer denom:
+
+```glsl
+float denom = sqrt(s00*s11);
+acorr_1 = s01 / (denom + eps);
+```
+
+This matches your “shared mean + eps guard” intent better than a hard 0. That hard 0 is exactly what you’re seeing.
+
+---
+
+## Why your feature 0 is still wildly off (848 vs 207)
+
+That’s consistent with return collapse:
+
+* if your range `(rmax-rmin)` becomes tiny/quantized and `std` becomes “less tiny” (or vice versa), the ratio swings hard.
+* on flat windows, you get extreme sensitivity.
+
+Once tiny returns are preserved, `std` and `range` should track together.
+
+---
+
+## Two quick “prove it” diagnostics (take 30 seconds)
+
+### 1) Add a debug checksum (one line)
+
+You don’t need it for ABI now, but it makes sanity trivial.
+
+Write in slot 7:
+
+```glsl
+Q.qfeat[base + 7] = float(t);
+```
+
+Then on CPU you can print `tape[s,t,7]` for the failing t and verify you’re reading the correct record.
+
+### 2) Record a “nonzero return count” in debug SSBO
+
+Count how many `r[i] != 0` after computing returns. If this count is near 0 on GPU for those flat windows, you’ve nailed it.
+
+---
+
+## What to run next (same as you did)
+
+After applying:
+
+* ratio-based log1p return
+* remove acorr hard-zero path
+
+Re-run:
+
+```bash
+python tools/parity_qfeat.py --tape logs/qfeat_tape.memmap --backend vulkan --force \
+  --vk-icd /usr/share/vulkan/icd.d/radeon_icd.x86_64.json \
+  --w2 16 --w1 4
+```
+
+If the fix is correct, **feature 4** should stop printing GPU=0.0, and feature 0/2/3 diffs should drop sharply.
+
+---
+
+### One caution about matching CPU exactly
+
+Even with log1p, GPU `log` implementations can differ from CPU’s libm by >1e-6 in worst cases. But your earlier “large w2” parity was already down around 1e-7 for curvature and 2e-5 for var_ratio, so you’re close — the remaining gap is primarily this cancellation regime.
+
+If you paste the updated parity output after these two tweaks, I’ll tell you whether any remaining mismatch is just acceptable float-math drift or indicates another semantic difference (like whether CPU uses `log(p)` vs `log(p+eps)` for returns).
+
+
+venv ❯ python tools/parity_qfeat.py --tape logs/qfeat_tape.memmap --backend vulkan --force --vk-icd /usr/share/vulkan/icd.d/radeon_icd.x86_64.json --w2 16 --w1 4 --debug-feature 5
+worst diffs: [4.0828003e+01 6.2980689e-08 4.6133575e+00 1.8030524e-01 6.0164690e-02
+ 2.0265579e-06]
+feature 0: series=0, t=12626, cpu=848.3093872070312, gpu=807.4813842773438
+feature 1: series=0, t=29138, cpu=0.0010043736547231674, gpu=0.001004310674034059
+feature 2: series=0, t=3977, cpu=181.82443237304688, gpu=177.21107482910156
+feature 3: series=0, t=2752, cpu=0.7594454288482666, gpu=0.9397506713867188
+feature 4: series=0, t=32617, cpu=-0.6681531071662903, gpu=-0.6079884171485901
+feature 5: series=0, t=31545, cpu=1.0060683488845825, gpu=1.0060663223266602
+debug window: series=0 t=31545 start=31529 end=31546 prices=17 returns=16
+debug prices head: [87953.25, 87962.07, 87962.06]
+debug prices tail: [88004.32, 88004.31, 88004.31]
+
+venv ❯ python tools/parity_qfeat.py --tape logs/qfeat_tape.memmap --backend vulkan --force --vk-icd /usr/share/vulkan/icd.d/radeon_icd.x86_64.json --w2 16 --w1 4 --debug-feature 5
+worst diffs: [5.8947693e+01 6.0186721e-08 1.6075943e+01 3.9441067e-01 7.8334939e-01
+ 2.7418137e-06]
+feature 0: series=0, t=9381, cpu=736.0703125, gpu=677.1226196289062
+feature 1: series=0, t=28711, cpu=0.001000559888780117, gpu=0.0010004997020587325
+feature 2: series=0, t=25289, cpu=216.45883178710938, gpu=200.3828887939453
+feature 3: series=0, t=9381, cpu=0.6398900151252747, gpu=1.034300684928894
+feature 4: series=0, t=21519, cpu=-0.7833494544029236, gpu=-6.977751354497741e-08
+feature 5: series=0, t=31545, cpu=1.0060683488845825, gpu=1.0060656070709229
+debug window: series=0 t=31545 start=31529 end=31546 prices=17 returns=16
+debug prices head: [87953.25, 87962.07, 87962.06]
+debug prices tail: [88004.32, 88004.31, 88004.31]
+
+This is a *huge* improvement — you’re basically “in the right regime” now.
+
+### What changed (and what it proves)
+
+With `--w2 16 --w1 4` you’re now at:
+
+* curvature: **6e-08** ✅
+* var_ratio: **2e-06** ✅
+* drawdown: **4.61** (was ~107) ✅ big drop
+* burstiness: **0.18** (was ~2.0) ✅
+* acorr_1: **0.060** (was ~0.78 + GPU=0) ✅ GPU no longer collapses to zero
+* vol_ratio: **40.8** (was ~640–1000) ✅ but still the main offender
+
+So the “log cancellation / tiny returns collapse” diagnosis was correct. Now we’re down to a **single semantic mismatch** that mostly affects **vol_ratio** (and a bit of burstiness).
+
+---
+
+## Why vol_ratio is still off by ~5% here (848 → 807)
+
+Remember vol_ratio is:
+
+[
+\text{vol_ratio} = \frac{\mathrm{std}(r)}{\max(r) - \min(r) + \varepsilon}
+]
+
+On short windows, **std and range are extremely sensitive** to:
+
+1. whether you compute std with **population vs sample** normalization (`/W` vs `/(W-1)`)
+2. whether `rmin/rmax` are computed over:
+
+   * the same `r[i]` used in the mean/variance pass
+   * or a slightly different pass (e.g., squashed vs raw)
+3. whether variance uses:
+
+   * `E[x^2] - E[x]^2` (two-pass stable)
+   * or direct sum of squares around mean (one-pass or two-pass)
+
+The fact that:
+
+* curvature and var_ratio are essentially perfect
+* acorr is close (and no longer 0)
+  tells us your **return stream and window indexing are now consistent**.
+
+So what’s left is almost certainly **a normalization convention mismatch in std**, not an indexing mismatch.
+
+### Most likely culprit: `/W` vs `/(W-1)`
+
+On CPU, many people implement std as sample std by default (ddof=1) without thinking. On GPU, you probably used `/W`.
+
+That mismatch changes std by factor:
+
+[
+\sqrt{\frac{W}{W-1}}
+]
+
+For W=16:
+
+* sqrt(16/15) ≈ 1.0328 (≈3.3%)
+
+Your vol_ratio diff is ~5%. That’s in the same ballpark — and the remaining ~1–2% can come from min/max differences due to float math (much smaller but still noticeable when range is tiny).
+
+---
+
+## The next exact fix to try (minimal, targeted)
+
+### 1) Make GPU variance normalization match CPU
+
+In `qfeat.comp`, find where you do:
+
+```glsl
+float var = ss / float(W);
+float sigma = sqrt(var);
+```
+
+Change to:
+
+```glsl
+float denom = (W > 1u) ? float(W - 1u) : 1.0;
+float var = ss / denom;
+float sigma = sqrt(max(var, 0.0));
+```
+
+Do the same normalization choice anywhere else you compute std for related features *only if CPU does the same* — but **start with vol_ratio std(r)** first.
+
+### 2) Keep range computed from the *same* r[i] values
+
+Make sure `rmin/rmax` are computed in the same pass, from the same `r[i]` array that variance uses (no recomputation with slightly different math).
+
+---
+
+## How to confirm it’s ddof (fast)
+
+Run parity with two `W` values:
+
+* `--w2 16`
+* `--w2 64`
+
+If it’s ddof mismatch, the relative vol_ratio error should shrink with larger W, because:
+
+* sqrt(W/(W-1)) approaches 1
+
+You’re already seeing that: your “big w2” run had vol_ratio worst diff around ~0.1 absolute (much smaller) compared to the tiny-window blowups. That’s consistent with the ddof factor becoming negligible.
+
+---
+
+## After this change, what “good” looks like
+
+For `--w2 16 --w1 4` you should get something like:
+
+* vol_ratio worst diff drops from ~40 to single digits (or less)
+* drawdown stays ~<5
+* burstiness drops further
+* acorr diffs tighten
+
+Then your original `w2=256` should likely fall under your `1e-4` target for most features except possibly vol_ratio during ultra-flat windows — where you may accept a slightly looser tolerance (because range is near machine noise).
+
+---
+
+## One more optional improvement (if you want to nail parity in flat regimes)
+
+When `rmax-rmin` is extremely tiny, vol_ratio becomes ill-conditioned. If your CPU version has a specific behavior there (e.g. clamp range to eps), mirror it exactly.
+
+Example guard:
+
+```glsl
+float rng = (rmax - rmin);
+if (rng < eps) rng = eps;
+vol_ratio = sigma / rng;
+```
+
+But only do this if CPU does it the same way.
+
+---
+
+If you upload or paste just the **vol_ratio block** from `qfeat.comp` and the matching CPU `compute_qfeat` std/range snippet (5–15 lines each), I can tell you *exactly* whether ddof is the mismatch and what the precise matching formula should be.
+
+
+
+You’ve got two different things happening in that last run:
+
+1. **Your return computation change helped earlier**, but
+2. **acorr_1 has regressed to ~0 for the worst case** (`cpu=-0.783`, `gpu≈-7e-08`) — that’s not “float noise”, that’s a logic mismatch or a denom scale issue.
+
+Also, your “worst diffs” got *worse* again vs the immediately previous good run (vol_ratio diff up, drawdown diff up, burstiness diff up). That’s a sign that one of the recent edits changed behavior in a way the CPU isn’t doing.
+
+Let’s lock this down cleanly.
+
+---
+
+## 1) The acorr_1 regression is almost certainly this: you’re using the wrong variance scale in denom
+
+Autocorr as implemented usually wants:
+
+* `s00 = Σ (r[i]-μ)^2`
+* `s11 = Σ (r[i+1]-μ)^2`
+* `s01 = Σ (r[i]-μ)(r[i+1]-μ)`
+* `corr = s01 / sqrt(s00*s11)`
+
+If your returns are tiny, `s00*s11` is tiny, but **corr should still be near ±1**, not near 0, *unless*:
+
+* `s01` is also ~0 while `s00/s11` are not, OR
+* you’re accidentally dividing by something huge (e.g. adding eps too early), OR
+* `μ` differs between CPU and GPU (mean not truly shared), causing `s01` to cancel
+
+### Your edit “soft denom + eps” can force corr → 0 in flat windows
+
+You changed:
+
+```glsl
+float denom = sqrt(s00 * s11);
+float ac = s01 / (denom + eps);
+```
+
+If `eps` is ~1e-6 and `denom` is ~1e-12 (very plausible for tiny returns), then:
+
+* CPU: `s01/denom` ≈ O(1)
+* GPU: `s01/(eps)` ≈ ~0  (because `s01` is also ~1e-12)
+
+That drives corr to ~0 exactly like you’re seeing.
+
+**So: eps belongs in the *denominator guard*, not as an additive term at that scale.**
+Your earlier behavior (`if denom > 0 then s01/denom else 0`) actually matches the intent better than `+eps`.
+
+### Correct fix
+
+Use a *relative* guard, not absolute `eps`:
+
+```glsl
+float denom = sqrt(s00 * s11);
+float acorr_1 = 0.0;
+if (denom > 0.0) {
+    acorr_1 = s01 / denom;
+}
+```
+
+…and rely on NaN/Inf squashing at the end if needed.
+
+If you must guard, guard with something proportional to the scale:
+
+```glsl
+float denom = sqrt(s00 * s11);
+float scale = max(max(s00, s11), 1e-30); // scale floor in float32 domain
+float acorr_1 = s01 / max(denom, 1e-15 * scale); // relative guard
+```
+
+But simplest: **revert to denom>0**.
+
+---
+
+## 2) Your return formula choice should match CPU, not just “numerically stable”
+
+You tried two versions:
+
+* `(b-a)/a` then `log(1+ratio)`
+* `q=b/a; x=q-1; log(1+x)`
+
+Both are algebraically fine, but the real question is: what does CPU do?
+
+If CPU computes:
+
+```python
+r[i] = math.log(b) - math.log(a)
+```
+
+then the GPU should do the same *unless cancellation is killing you*. You found cancellation *was* killing you in flat windows. So the “ratio/log1p” approach is appropriate — but then **CPU parity must also be using that form** if you want bit-level parity.
+
+Right now your CPU “oracle” is still `compute_qfeat` in Python. If it uses `math.log(b) - math.log(a)`, it will not match the GPU ratio/log1p form in the last ulps.
+
+That said: your earlier improved run (vol_ratio diff ~40, acorr diff ~0.06) shows you can get close enough even if not identical.
+
+---
+
+## 3) Immediate action plan: fix acorr guard first (this is the regression)
+
+### Patch qfeat.comp (acorr block)
+
+Change back to:
+
+```glsl
+float denom = sqrt(s00 * s11);
+float ac = 0.0;
+if (denom > 0.0) {
+    ac = s01 / denom;
+    if (ac > 1.0) ac = 1.0;
+    else if (ac < -1.0) ac = -1.0;
+}
+acorr_1 = ac;
+```
+
+**Do not** add `+eps` to denom.
+
+This should restore your earlier “GPU acorr not collapsing to 0”.
+
+---
+
+## 4) Then, debug the remaining vol_ratio/drawdown/burstiness drift
+
+Once acorr is back, you’ll likely return to roughly the previous improved state.
+
+At that point, the remaining differences will be dominated by:
+
+* std normalization (`/W` vs `/(W-1)`)
+* whether you compute range on raw returns vs squashed returns
+* any clamp/floor behavior
+
+But **don’t touch those until acorr is correct again**, because acorr being ~0 indicates you’re still in a “flat window scale” regime where tiny numeric changes blow up ratios.
+
+---
+
+## 5) One super-effective debug knob (1 minute to add)
+
+Add a debug print in the parity harness for the worst acorr case `t=21519`:
+
+* print CPU returns (first 5, last 5)
+* print CPU mean, s00, s11, s01
+* print GPU’s `r[0..]`? (hard) but you can instead write 3 debug scalars into slots 6/7 temporarily:
+
+  * slot 6: denom
+  * slot 7: s01
+
+Then you’ll see instantly if GPU denom is tiny relative to eps and why `+eps` kills it.
+
+---
+
+## What you should run after reverting acorr guard
+
+Exactly your same command:
+
+```bash
+python tools/parity_qfeat.py --tape logs/qfeat_tape.memmap --backend vulkan --force \
+  --vk-icd /usr/share/vulkan/icd.d/radeon_icd.x86_64.json --w2 16 --w1 4
+```
+
+If feature 4 stops collapsing to ~0 and returns to ~0.05–0.1 diff, we’re back on track.
+
+---
+
+If you want, paste just the **current** `acorr` block from `qfeat.comp` (lines ~150–190) and I’ll write the exact diff to apply.
+
+
+You’re in the “plumbing is solid” phase now. Next is turning the qfeat tape into an actual **learner-driven legitimacy (ℓ)** that you can replay in backtests *without touching strategy semantics*.
+
+Here’s the clean sequence I’d do.
+
+## 1) Freeze the qfeat layer
+- **Commit** the current `qfeat.comp` + `vk_qfeat.py` state with a “golden parity” note.
+- Add a tiny regression guard:
+  - `tools/parity_qfeat.py --w2 16 --w1 4` must stay under your chosen tolerances (e.g. `max_abs <= 2e-4`).
+- Optional: write a one-liner doc in `TRADER_CONTEXT2.md` saying “qfeat ABI frozen; only change with parity bump + rationale.”
+
+## 2) Make tape generation first-class
+Right now parity runs can build the tape. Next:
+- Add a CLI entry (or extend `run_trader.py`) to:
+  - build tape for a dataset (BTC intraday, etc.)
+  - save `logs/qfeat_tape.memmap`
+  - print summary stats (coverage, warmup masked count)
+- Ensure tape indexes by **dense bar index i** (not timestamp). You already know this pitfall.
+
+## 3) Lock the replay harness
+Goal: “same bars → same intents/execution; only ℓ changes”.
+- Run two backtests on the same bars:
+  1) baseline confidence_fn stub
+  2) tape-driven confidence_fn
+- Confirm:
+  - trade timestamps align
+  - only HOLD/ACT differs when ℓ crosses thresholds
+  - logs are stable (no hidden coupling)
+
+## 4) Start writing ℓ into slot 6 (still replayable)
+You’ve got qfeat[0..5]. Now define ℓ as a function of qfeat without ML first:
+- **ℓ_v0** = simple deterministic legitimacy proxy (e.g. combine drawdown risk + regime stability + acorr magnitude + burstiness penalty).
+- Write ℓ into **slot 6** during tape build (GPU or CPU post-pass).
+- This gives you an end-to-end “learned-ish” gate you can test immediately.
+
+## 5) Add the learner (ℓ_v1) while keeping GPU compute
+Once ℓ_v0 works, swap in a small model that consumes qfeat windows and outputs ℓ:
+- Start with something GPU-friendly:
+  - tiny MLP (6→16→1) or logistic regression
+  - trained on “acceptable engagement” labels you already log (stability/survivability/proportionality predicates)
+- Train offline, then:
+  - export weights
+  - evaluate ℓ on GPU in a second compute pass (or CPU first, then move)
+
+Key rule: **never let the learner change the action semantics**; it only gates.
+
+## 6) Backtest metrics that aren’t PnL-first
+Before optimizing for money, confirm the gate is “sane”:
+- HOLD% vs target band
+- trade-rate bounds
+- flip-rate/run-length improvements
+- slippage sensitivity
+- “acceptable” fraction improvement
+
+## 7) Only then tighten execution realism
+After gate looks stable:
+- slippage / volume caps
+- transaction costs
+- optionally L2 replay later
+
+---
+
+If you tell me which dataset you’re using for the first serious replay (your stooq BTC intraday vs something else), I’ll suggest a concrete ℓ_v0 formula and the exact logging lines to add so you can see whether the gate is improving regime quality *before* you train anything.

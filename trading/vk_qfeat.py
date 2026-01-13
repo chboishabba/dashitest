@@ -7,7 +7,10 @@ from typing import Optional
 
 import numpy as np
 
-from features.quotient import compute_qfeat
+try:
+    from trading.features.quotient import compute_qfeat
+except ModuleNotFoundError:
+    from features.quotient import compute_qfeat
 
 
 @dataclass
@@ -147,6 +150,13 @@ def build_feature_tape(
         )
         mm.flush()
     elif backend == "vulkan":
+        shader_root = pathlib.Path(__file__).resolve().parent
+        shader_file = pathlib.Path(shader_path)
+        spv_file = pathlib.Path(spv_path)
+        if not shader_file.is_absolute():
+            shader_file = shader_root / shader_file
+        if not spv_file.is_absolute():
+            spv_file = shader_root / spv_file
         _run_vulkan_tape(
             prices=prices,
             volumes=volumes,
@@ -156,8 +166,8 @@ def build_feature_tape(
             eps=eps,
             nan_squash=nan_squash,
             flags=flags,
-            shader_path=pathlib.Path(shader_path),
-            spv_path=pathlib.Path(spv_path),
+            shader_path=shader_file,
+            spv_path=spv_file,
             vk_icd=vk_icd,
         )
     else:
@@ -166,12 +176,21 @@ def build_feature_tape(
     return QFeatTape(str(out_path), S, T)
 
 
-def _compile_shader(shader_path: pathlib.Path, spv_path: pathlib.Path) -> None:
+def _compile_shader(
+    shader_path: pathlib.Path,
+    spv_path: pathlib.Path,
+    *,
+    defines: Optional[list[str]] = None,
+) -> None:
     if not shader_path.exists():
         raise FileNotFoundError(shader_path)
     if spv_path.exists() and spv_path.stat().st_mtime >= shader_path.stat().st_mtime:
         return
-    result = os.spawnvp(os.P_WAIT, "glslc", ["glslc", str(shader_path), "-o", str(spv_path)])
+    define_args = []
+    for define in defines or []:
+        define_args.append(f"-D{define}")
+    cmd = ["glslc", *define_args, str(shader_path), "-o", str(spv_path)]
+    result = os.spawnvp(os.P_WAIT, "glslc", cmd)
     if result != 0:
         raise RuntimeError(f"glslc failed with exit code {result}")
 
@@ -262,8 +281,6 @@ def _run_vulkan_tape(
     import vulkan as vk
     from vulkan_compute.compute_buffer import _select_physical_device, _find_queue_family_index
 
-    _compile_shader(shader_path, spv_path)
-
     prices = np.asarray(prices, dtype=np.float32, order="C")
     S, T = prices.shape
     volumes_arr = None
@@ -286,6 +303,15 @@ def _run_vulkan_tape(
 
     physical_device = _select_physical_device(instance)
     queue_family_index = _find_queue_family_index(physical_device)
+    features = vk.vkGetPhysicalDeviceFeatures(physical_device)
+    use_fp64_returns = bool(getattr(features, "shaderFloat64", False))
+    if use_fp64_returns:
+        spv_path = spv_path.with_name(f"{spv_path.stem}.fp64{spv_path.suffix}")
+        _compile_shader(shader_path, spv_path, defines=["USE_FP64_RETURNS=1"])
+        enabled_features = vk.VkPhysicalDeviceFeatures(shaderFloat64=vk.VK_TRUE)
+    else:
+        _compile_shader(shader_path, spv_path)
+        enabled_features = None
 
     queue_info = vk.VkDeviceQueueCreateInfo(
         sType=vk.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
@@ -293,11 +319,19 @@ def _run_vulkan_tape(
         queueCount=1,
         pQueuePriorities=[1.0],
     )
-    device_info = vk.VkDeviceCreateInfo(
-        sType=vk.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-        queueCreateInfoCount=1,
-        pQueueCreateInfos=[queue_info],
-    )
+    if enabled_features is None:
+        device_info = vk.VkDeviceCreateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+            queueCreateInfoCount=1,
+            pQueueCreateInfos=[queue_info],
+        )
+    else:
+        device_info = vk.VkDeviceCreateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+            queueCreateInfoCount=1,
+            pQueueCreateInfos=[queue_info],
+            pEnabledFeatures=enabled_features,
+        )
     device = vk.vkCreateDevice(physical_device, device_info, None)
     queue = vk.vkGetDeviceQueue(device, queue_family_index, 0)
 
@@ -453,7 +487,8 @@ def _run_vulkan_tape(
 
     out_bytes = _read_buffer(device, qfeat_mem, qfeat_size)
     mm = np.memmap(out_path, dtype=np.float32, mode="r+", shape=(S, T, 8))
-    mm.view(np.uint8)[:] = out_bytes
+    mm_bytes = mm.view(np.uint8).reshape(-1)
+    mm_bytes[:] = out_bytes
     mm.flush()
 
     vk.vkDestroyPipeline(device, pipeline, None)

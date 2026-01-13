@@ -7,15 +7,29 @@ from __future__ import annotations
 
 import argparse
 import pathlib
+import sys
 
 import numpy as np
 import pandas as pd
 
-from runner import run_bars
-from signals.triadic import compute_triadic_state
-from trading_io.prices import load_prices
-from vk_qfeat import build_feature_tape
-from strategy.vulkan_tape_adapter import VulkanTapeAdapter
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+PARENT = ROOT.parent
+for path in (str(ROOT), str(PARENT)):
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+try:
+    from trading.runner import run_bars
+    from trading.signals.triadic import compute_triadic_state
+    from trading.trading_io.prices import load_prices
+    from trading.vk_qfeat import build_feature_tape
+    from trading.strategy.vulkan_tape_adapter import VulkanTapeAdapter
+except ModuleNotFoundError:
+    from runner import run_bars
+    from signals.triadic import compute_triadic_state
+    from trading_io.prices import load_prices
+    from vk_qfeat import build_feature_tape
+    from strategy.vulkan_tape_adapter import VulkanTapeAdapter
 
 
 def make_ts_map(ts: np.ndarray) -> dict[int, int]:

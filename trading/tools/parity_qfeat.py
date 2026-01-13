@@ -2,12 +2,24 @@ from __future__ import annotations
 
 import argparse
 import pathlib
+import sys
 
 import numpy as np
 
-from features.quotient import compute_qfeat
-from vk_qfeat import build_feature_tape
-from trading_io.prices import find_btc_csv, load_prices
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+PARENT = ROOT.parent
+for path in (str(ROOT), str(PARENT)):
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+try:
+    from trading.features.quotient import compute_qfeat
+    from trading.vk_qfeat import build_feature_tape
+    from trading.trading_io.prices import find_btc_csv, load_prices
+except ModuleNotFoundError:
+    from features.quotient import compute_qfeat
+    from vk_qfeat import build_feature_tape
+    from trading_io.prices import find_btc_csv, load_prices
 
 
 def parity_check(
@@ -67,6 +79,26 @@ def parity_check(
     return worst, worst_idx
 
 
+def _debug_window(prices: np.ndarray, series: int, timestep: int, w2: int) -> None:
+    start = timestep - w2
+    end = timestep + 1
+    window = prices[series, start:end]
+    returns_len = max(0, window.size - 1)
+    head = window[:3].tolist()
+    tail = window[-3:].tolist()
+    print(
+        "debug window:",
+        f"series={series}",
+        f"t={timestep}",
+        f"start={start}",
+        f"end={end}",
+        f"prices={window.size}",
+        f"returns={returns_len}",
+    )
+    print("debug prices head:", head)
+    print("debug prices tail:", tail)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Parity check for qfeat tape vs CPU")
     parser.add_argument(
@@ -85,6 +117,12 @@ def main() -> None:
     parser.add_argument("--shader", type=pathlib.Path, default=pathlib.Path("vulkan_shaders/qfeat.comp"))
     parser.add_argument("--spv", type=pathlib.Path, default=pathlib.Path("vulkan_shaders/qfeat.spv"))
     parser.add_argument("--vk-icd", type=str, default=None)
+    parser.add_argument(
+        "--debug-feature",
+        type=int,
+        default=None,
+        help="Print CPU window details for the worst diff of this feature index (0-5)",
+    )
     args = parser.parse_args()
 
     price, volume, ts = load_prices(args.prices_csv, return_time=True)
@@ -110,6 +148,15 @@ def main() -> None:
             continue
         series, timestep, cpu_val, gpu_val = record
         print(f"feature {idx}: series={series}, t={timestep}, cpu={cpu_val}, gpu={gpu_val}")
+    if args.debug_feature is not None:
+        if not 0 <= args.debug_feature < 6:
+            raise ValueError("--debug-feature must be between 0 and 5")
+        record = worst_idx[args.debug_feature]
+        if record is None:
+            print("debug window: no record available for requested feature")
+        else:
+            series, timestep, _cpu_val, _gpu_val = record
+            _debug_window(prices, series, timestep, args.w2)
 
 
 if __name__ == "__main__":

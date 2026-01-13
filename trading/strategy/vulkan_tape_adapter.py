@@ -4,7 +4,10 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from vk_qfeat import QFeatTape
+try:
+    from trading.vk_qfeat import QFeatTape
+except ModuleNotFoundError:
+    from vk_qfeat import QFeatTape
 
 
 @dataclass

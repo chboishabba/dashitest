@@ -1,5 +1,9 @@
 #version 450
 
+#ifdef USE_FP64_RETURNS
+#extension GL_ARB_gpu_shader_fp64 : enable
+#endif
+
 const uint MAX_WINDOW = 1024u;
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
@@ -17,8 +21,21 @@ layout(std430, binding = 3) writeonly buffer QFeatSSBO { float qfeat[];  };
 layout(std430, binding = 4) buffer DebugSSBO { uint dbg[]; }; // optional
 
 float squash(float x, float nan_squash) {
-    return isfinite(x) ? x : nan_squash;
+    if (isnan(x) || isinf(x)) {
+        return nan_squash;
+    }
+    return x;
 }
+
+#ifdef USE_FP64_RETURNS
+double log1p_series(double x) {
+    double x2 = x * x;
+    double x3 = x2 * x;
+    double x4 = x2 * x2;
+    double x5 = x4 * x;
+    return x - 0.5 * x2 + (x3 / 3.0) - 0.25 * x4 + 0.2 * x5;
+}
+#endif
 
 void write_record(uint s, uint t, float f0, float f1, float f2, float f3, float f4, float f5, float r6, float r7) {
     uint T = P.meta0.y;
@@ -59,7 +76,7 @@ void main() {
     uint start_idx = t - w2;
     uint W = w2;
 
-    // Compute log returns r[i] = log(p[i+1]) - log(p[i]) with eps clipping.
+    // Compute log returns using a stable ratio form to reduce cancellation.
     for (uint i = 0u; i < W; ++i) {
         uint idx = price_base + start_idx + i;
         uint idx_next = idx + 1u;
@@ -71,7 +88,27 @@ void main() {
         if (b <= eps) {
             b = eps;
         }
-        r[i] = log(b) - log(a);
+        #ifdef USE_FP64_RETURNS
+        double da = double(a);
+        double db = double(b);
+        double x = (db / da) - 1.0;
+        if (x < -0.99999994) {
+            x = -0.99999994;
+        }
+        double ax = x < 0.0 ? -x : x;
+        double rr;
+        if (ax < 1e-3) {
+            rr = log1p_series(x);
+        } else {
+            rr = double(log(1.0 + float(x)));
+        }
+        r[i] = float(rr);
+        #else
+        float q = b / a;
+        float x = q - 1.0;
+        x = max(x, -0.99999994);
+        r[i] = log(1.0 + x);
+        #endif
     }
 
     if (W == 0u) {
@@ -219,5 +256,11 @@ void main() {
     float f4 = squash(acorr_1, nan_squash);
     float f5 = squash(var_ratio, nan_squash);
 
-    write_record(s, t, f0, f1, f2, f3, f4, f5, 0.0, 0.0);
+    float tag = 0.0;
+    #ifdef USE_FP64_RETURNS
+    tag = 64.0;
+    #else
+    tag = 32.0;
+    #endif
+    write_record(s, t, f0, f1, f2, f3, f4, f5, 0.0, tag);
 }
