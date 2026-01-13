@@ -48,16 +48,20 @@ def main() -> None:
     parser.add_argument("--shader", type=pathlib.Path, default=pathlib.Path("vulkan_shaders/qfeat.comp"))
     parser.add_argument("--spv", type=pathlib.Path, default=pathlib.Path("vulkan_shaders/qfeat.spv"))
     parser.add_argument("--vk-icd", type=str, default=None)
+    parser.add_argument("--no-fp64-returns", action="store_true", help="Disable FP64 log-return path")
     parser.add_argument("--force", action="store_true", help="Overwrite tape if it exists")
     parser.add_argument("--log", type=pathlib.Path, default=pathlib.Path("logs/trading_log_vulkan.csv"))
     parser.add_argument("--symbol", type=str, default="VKN")
+    parser.add_argument("--tau-on", type=float, default=0.52, help="Entry threshold for ACT")
+    parser.add_argument("--tau-off", type=float, default=0.47, help="Exit threshold for HOLD")
     args = parser.parse_args()
 
     price, volume, ts = load_prices(args.prices_csv, return_time=True)
     state = compute_triadic_state(price)
+    ts_int = pd.to_datetime(ts).astype("int64") if ts is not None else np.arange(price.size, dtype=np.int64)
     bars = pd.DataFrame(
         {
-            "ts": ts.astype(np.int64),
+            "ts": ts_int,
             "close": price,
             "state": state,
             "volume": volume,
@@ -76,6 +80,7 @@ def main() -> None:
         shader_path=str(args.shader),
         spv_path=str(args.spv),
         vk_icd=args.vk_icd,
+        fp64_returns=not args.no_fp64_returns,
     )
 
     ts_map = make_ts_map(bars["ts"].to_numpy())
@@ -90,6 +95,8 @@ def main() -> None:
         mode="bar",
         log_path=str(args.log),
         confidence_fn=confidence_fn,
+        tau_conf_enter=args.tau_on,
+        tau_conf_exit=args.tau_off,
     )
 
 

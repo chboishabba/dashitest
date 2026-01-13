@@ -6,11 +6,18 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
+import math
 
 try:
     from trading.features.quotient import compute_qfeat
 except ModuleNotFoundError:
     from features.quotient import compute_qfeat
+
+ELL_BETA_VOL = 0.15
+ELL_BETA_DD = 0.15
+ELL_BETA_BURST = 0.10
+ELL_BETA_ACORR = 0.30
+ELL_BETA_CURV = 0.10
 
 
 @dataclass
@@ -92,8 +99,45 @@ def _compute_cpu_tape(
             window = series[(t - w2) : (t + 1)]
             q = compute_qfeat(window, w1=w1, w2=w2, eps=eps)
             out_memmap[s, t, :6] = q
-            out_memmap[s, t, 6] = 0.0  # placeholder ℓ
+            ell = _ell_from_qfeat(
+                float(q[0]),
+                float(q[1]),
+                float(q[2]),
+                float(q[3]),
+                float(q[4]),
+                nan_squash,
+            )
+            out_memmap[s, t, 6] = ell
             out_memmap[s, t, 7] = 0.0
+
+
+def _ell_from_qfeat(
+    vol_ratio: float,
+    curvature: float,
+    drawdown: float,
+    burstiness: float,
+    acorr_1: float,
+    nan_squash: float,
+) -> float:
+    vol_pen = math.log1p(vol_ratio)
+    dd_pen = math.log1p(drawdown)
+    burst_pen = math.log1p(abs(burstiness - 1.0))
+    acorr_pen = 1.0 - abs(acorr_1)
+    penalty = (
+        ELL_BETA_VOL * vol_pen
+        + ELL_BETA_DD * dd_pen
+        + ELL_BETA_BURST * burst_pen
+        + ELL_BETA_ACORR * acorr_pen
+        + ELL_BETA_CURV * curvature
+    )
+    ell = math.exp(-penalty)
+    if not math.isfinite(ell):
+        return float(nan_squash)
+    if ell < 0.0:
+        return 0.0
+    if ell > 1.0:
+        return 1.0
+    return float(ell)
 
 
 def build_feature_tape(
@@ -111,6 +155,7 @@ def build_feature_tape(
     shader_path: str = "vulkan_shaders/qfeat.comp",
     spv_path: str = "vulkan_shaders/qfeat.spv",
     vk_icd: Optional[str] = None,
+    fp64_returns: bool = True,
 ) -> QFeatTape:
     """
     Build a memmap tape (S, T, 8) of qfeat records. The current
@@ -169,6 +214,7 @@ def build_feature_tape(
             shader_path=shader_file,
             spv_path=spv_file,
             vk_icd=vk_icd,
+            fp64_returns=fp64_returns,
         )
     else:
         raise ValueError(f"unknown backend: {backend}")
@@ -272,6 +318,7 @@ def _run_vulkan_tape(
     shader_path: pathlib.Path,
     spv_path: pathlib.Path,
     vk_icd: Optional[str],
+    fp64_returns: bool,
 ) -> None:
     if w2 > 1024:
         raise ValueError("w2 exceeds shader MAX_WINDOW=1024")
@@ -303,15 +350,18 @@ def _run_vulkan_tape(
 
     physical_device = _select_physical_device(instance)
     queue_family_index = _find_queue_family_index(physical_device)
-    features = vk.vkGetPhysicalDeviceFeatures(physical_device)
-    use_fp64_returns = bool(getattr(features, "shaderFloat64", False))
-    if use_fp64_returns:
-        spv_path = spv_path.with_name(f"{spv_path.stem}.fp64{spv_path.suffix}")
-        _compile_shader(shader_path, spv_path, defines=["USE_FP64_RETURNS=1"])
-        enabled_features = vk.VkPhysicalDeviceFeatures(shaderFloat64=vk.VK_TRUE)
+    enabled_features = None
+    if fp64_returns:
+        features = vk.vkGetPhysicalDeviceFeatures(physical_device)
+        use_fp64_returns = bool(getattr(features, "shaderFloat64", False))
+        if use_fp64_returns:
+            spv_path = spv_path.with_name(f"{spv_path.stem}.fp64{spv_path.suffix}")
+            _compile_shader(shader_path, spv_path, defines=["USE_FP64_RETURNS=1"])
+            enabled_features = vk.VkPhysicalDeviceFeatures(shaderFloat64=vk.VK_TRUE)
+        else:
+            _compile_shader(shader_path, spv_path)
     else:
         _compile_shader(shader_path, spv_path)
-        enabled_features = None
 
     queue_info = vk.VkDeviceQueueCreateInfo(
         sType=vk.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,

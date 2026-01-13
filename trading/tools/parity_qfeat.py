@@ -38,6 +38,7 @@ def parity_check(
     shader_path: str = "vulkan_shaders/qfeat.comp",
     spv_path: str = "vulkan_shaders/qfeat.spv",
     vk_icd: str | None = None,
+    fp64_returns: bool = True,
 ) -> tuple[np.ndarray, list[tuple[int, int, float, float] | None]]:
     prices = np.asarray(prices, dtype=np.float32, order="C")
     if prices.ndim != 2:
@@ -58,6 +59,7 @@ def parity_check(
         shader_path=shader_path,
         spv_path=spv_path,
         vk_icd=vk_icd,
+        fp64_returns=fp64_returns,
     )
 
     rng = np.random.default_rng(seed)
@@ -117,6 +119,7 @@ def main() -> None:
     parser.add_argument("--shader", type=pathlib.Path, default=pathlib.Path("vulkan_shaders/qfeat.comp"))
     parser.add_argument("--spv", type=pathlib.Path, default=pathlib.Path("vulkan_shaders/qfeat.spv"))
     parser.add_argument("--vk-icd", type=str, default=None)
+    parser.add_argument("--no-fp64-returns", action="store_true", help="Disable FP64 log-return path")
     parser.add_argument(
         "--debug-feature",
         type=int,
@@ -140,6 +143,7 @@ def main() -> None:
         shader_path=str(args.shader),
         spv_path=str(args.spv),
         vk_icd=args.vk_icd,
+        fp64_returns=not args.no_fp64_returns,
     )
 
     print("worst diffs:", worst)

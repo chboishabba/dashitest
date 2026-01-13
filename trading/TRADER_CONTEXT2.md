@@ -406,6 +406,10 @@ This stays GPU-side so you can:
 * compute rolling defect
 * expose only 1 float per instrument to CPU
 
+Parity guard (qfeat kernel):
+`python tools/parity_qfeat.py --tape logs/qfeat_tape.memmap --backend vulkan --force --w2 16 --w1 4`
+Keep worst diffs <= 2e-4 before changing `vulkan_shaders/qfeat.comp`.
+
 ---
 
 ## 3. What crosses the GPU → CPU boundary (tiny)
@@ -5734,3 +5738,296 @@ After gate looks stable:
 ---
 
 If you tell me which dataset you’re using for the first serious replay (your stooq BTC intraday vs something else), I’ll suggest a concrete ℓ_v0 formula and the exact logging lines to add so you can see whether the gate is improving regime quality *before* you train anything.
+
+Short answer: **no — not yet, and not for the gate itself.**  
+Long answer below, because this distinction matters a lot for where you are now.
+
+---
+
+## Why you **do not** need PnL to input ℓ (right now)
+
+What you’ve built is a **permission / legitimacy gate**, not a reward optimizer.
+
+ℓ answers:
+
+> *“Is the market in a state where acting is structurally justified?”*
+
+That is **orthogonal** to:
+
+> *“Did the last action make or lose money?”*
+
+Right now ℓ is doing exactly what it should:
+- suppressing action in unstable / incoherent regimes
+- allowing action in coherent regimes
+- doing so **without feedback loops**
+
+That’s a feature, not a limitation.
+
+---
+
+## When PnL becomes dangerous (early on)
+
+If you feed PnL into ℓ **too early**, you get:
+
+- regime leakage (“this lost money → market bad”)
+- reflexivity (gate closes *because* you acted)
+- delayed credit assignment bugs
+- overfitting to microstructure noise
+
+In other words: the gate stops being about *market state* and starts being about *your behavior*.
+
+You very deliberately avoided that — correctly.
+
+---
+
+## The correct separation (this is the key design win)
+
+Think in three layers:
+
+### 1️⃣ ℓ (Legitimacy / Permission) — **PnL-free**
+Inputs:
+- qfeat (vol, drawdown, burstiness, acorr, etc.)
+- regime stability
+- structural coherence
+
+Outputs:
+- ACT vs HOLD permission
+
+ℓ answers:  
+> *“Is it sane to participate?”*
+
+No PnL here.
+
+---
+
+### 2️⃣ Strategy (Direction / Size) — **still PnL-free**
+Inputs:
+- prices
+- indicators
+- intent logic
+
+Outputs:
+- buy / sell / size
+
+Strategy answers:  
+> *“What should I do, if allowed?”*
+
+Still no PnL needed for the decision itself.
+
+---
+
+### 3️⃣ Evaluation / Learning — **PnL-aware**
+This is where PnL belongs.
+
+PnL is used to:
+- evaluate whether ℓ helps
+- train ℓ_v1 *offline*
+- choose thresholds
+- compare variants
+
+PnL answers:  
+> *“Was this system configuration better than another?”*
+
+Not *“Should I act right now?”*
+
+---
+
+## When PnL *does* enter the picture (later)
+
+There are only **two safe places** to use it:
+
+### ✅ A. Offline training of ℓ_v1
+- Labels derived from:
+  - acceptable engagement predicates
+  - *optionally* smoothed PnL outcomes
+- Never fed back online in real time
+
+### ✅ B. Meta-selection
+- Choosing:
+  - tau_on / tau_off
+  - ℓ_v0 vs ℓ_v1
+  - model variants
+- Across full replays, not step-by-step
+
+---
+
+## What your current results already tell you
+
+- ℓ distribution is stable
+- HOLD ~60% is sensible
+- ACT clusters exist
+- No collapse or saturation
+
+That means:
+
+> **ℓ is already doing useful work without seeing PnL.**
+
+This is exactly where you want to be before introducing any reward signal.
+
+---
+
+## The right next questions (instead of PnL input)
+
+Much better things to ask *now*:
+
+- Does ℓ reduce flip rate?
+- Does ℓ increase average run length?
+- Does ℓ reduce exposure during volatility spikes?
+- Does ℓ stabilize execution costs?
+
+Those are **pre-PnL wins**.
+
+---
+
+## TL;DR
+
+- ❌ Do **not** input PnL into ℓ right now
+- ✅ Keep ℓ PnL-free and structural
+- ✅ Use PnL only for **offline evaluation and learning**
+- ✅ You’re at the correct stage of the pipeline
+
+If you want, next we can:
+- add a quick metric script (flip-rate, run-length, exposure)
+- sweep tau thresholds automatically
+- or sketch ℓ_v1 training **without** contaminating online behavior
+
+Just say which.
+
+
+Yep — that “sandbox can’t see Vulkan devices” note is just a red herring from the other model/session. **You already ran parity on-host and pasted real diffs.** We can debug from *those*.
+
+Here’s the tight conclusion and what to change next.
+
+---
+
+## What the real parity output says
+
+Your host parity run shows:
+
+* curvature + var_ratio are basically perfect (≈1e-7, 2e-5)
+* the big offenders are:
+
+  * **drawdown** (+23.9 worst)
+  * **burstiness** (+0.275)
+  * **acorr_1** (+0.020)
+  * **vol_ratio** (+0.10)
+
+That profile is **classic “window semantics / cumulative initialization mismatch”**, not SSBO/stride/dispatch.
+
+If the ABI were wrong, you’d see garbage across all 6 features, not “two perfect, four proportionally off.”
+
+---
+
+## The two most likely causes (in priority order)
+
+### 1) Off-by-one window indexing between CPU and GPU
+
+This single issue explains the *direction and scale* of the errors: drawdown blows up the most, acorr and burstiness drift, while curvature/var_ratio barely move.
+
+Fix: make GPU use the exact same window slice as the CPU reference used by `tools/parity_qfeat.py`.
+
+**Action:** open `tools/parity_qfeat.py` and check how it builds the window. It’s going to be one of these two:
+
+* **A (inclusive end):** `prices[t-w2+1 : t+1]`
+* **B (exclusive end):** `prices[t-w2 : t]` or `prices[t-w2 : t+1]`
+
+Then enforce *that exact indexing* in `qfeat.comp`.
+
+### 2) Drawdown cumulative path initialization mismatch
+
+Even if indexing is right, drawdown can still diverge if:
+
+* CPU cumulative starts at 0 and peak starts at 0
+* GPU starts peak at `-inf` or at first cum point
+* CPU uses cum over **returns**, GPU uses cum over **log-prices** (or vice versa)
+
+Fix: implement drawdown exactly as:
+
+```c
+cum = 0
+peak = 0
+for k in 0..N-1:
+  cum += r[k]
+  peak = max(peak, cum)
+  max_dd = max(max_dd, peak - cum)
+```
+
+No other initialization.
+
+---
+
+## Concrete next step I want you to do (no guesswork)
+
+Because you already have both codepaths, the fastest way to make this mechanical is:
+
+### Step A — Print the exact CPU window semantics at the mismatch points
+
+In `tools/parity_qfeat.py`, add a temporary debug print for **one** of the failing examples (pick drawdown’s worst at `t=11402`):
+
+* print the slice start/end indices used for CPU
+* print the first/last 3 prices in that slice
+* print N (returns length)
+
+This tells us whether the GPU should be reading `[t-w2+1..t]` or `[t-w2..t-1]` etc.
+
+### Step B — Make the GPU compute those exact indices
+
+In `qfeat.comp`, set:
+
+```glsl
+uint end = t + 1u;              // if CPU uses inclusive t
+uint start = end - (w2 + 1u);   // if CPU uses w2 returns => w2+1 prices
+```
+
+(or whatever matches Step A)
+
+### Step C — Force drawdown init
+
+Make sure drawdown uses cum/peak both starting at 0.
+
+---
+
+## If you want the “surgical” fix right now
+
+Based on your symptoms, the most common specific mismatch is:
+
+> CPU uses **w2 returns**, derived from **w2+1 prices** ending at t,
+> GPU uses **w2 prices** or ends at t-1.
+
+So the GPU reads one fewer price, which shifts everything and especially hurts drawdown.
+
+**GPU indexing should typically be:**
+
+* prices: `p[t-w2] .. p[t]` (w2+1 samples)
+* returns: length w2
+
+If your shader currently loops `i = t-w2+1 .. t` and computes returns inside that loop, it’s likely missing the earliest price.
+
+---
+
+## What I need to give you an exact line-level patch
+
+You don’t need to paste everything. Paste just these two snippets:
+
+1. From `tools/parity_qfeat.py`: the exact lines that construct the CPU window for `compute_qfeat`
+2. From `vulkan_shaders/qfeat.comp`: the loop header showing how you compute the price window / returns
+
+With those two, I can tell you **exactly** whether to shift by +1 or change `(w2)` vs `(w2+1)` and where.
+
+---
+
+## One more quick check (cheap, high value)
+
+Run parity with a *tiny window* to make indexing errors obvious:
+
+```bash
+python tools/parity_qfeat.py --tape logs/qfeat_tape.memmap --backend vulkan --force \
+  --vk-icd /usr/share/vulkan/icd.d/radeon_icd.x86_64.json \
+  --w2 16 --w1 4
+```
+
+If it’s indexing, diffs will often get *worse* proportionally and be easier to reproduce.
+
+---
+
+Bottom line: your Vulkan path is working; this is a **semantic mismatch** in window/cum logic. Paste those two small snippets and I’ll return a precise “change these 3 lines” patch.

@@ -5,6 +5,11 @@
 #endif
 
 const uint MAX_WINDOW = 1024u;
+const float ELL_BETA_VOL = 0.15;
+const float ELL_BETA_DD = 0.15;
+const float ELL_BETA_BURST = 0.10;
+const float ELL_BETA_ACORR = 0.30;
+const float ELL_BETA_CURV = 0.10;
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -25,6 +30,41 @@ float squash(float x, float nan_squash) {
         return nan_squash;
     }
     return x;
+}
+
+float log1p_series_f(float x) {
+    float x2 = x * x;
+    float x3 = x2 * x;
+    float x4 = x2 * x2;
+    float x5 = x4 * x;
+    return x - 0.5 * x2 + (x3 / 3.0) - 0.25 * x4 + 0.2 * x5;
+}
+
+float compute_ell(
+    float vol_ratio,
+    float curvature,
+    float drawdown,
+    float burstiness,
+    float acorr_1,
+    float nan_squash
+) {
+    float vol_pen = log(1.0 + vol_ratio);
+    float dd_pen = log(1.0 + drawdown);
+    float burst_pen = log(1.0 + abs(burstiness - 1.0));
+    float acorr_pen = 1.0 - abs(acorr_1);
+    float penalty = ELL_BETA_VOL * vol_pen
+        + ELL_BETA_DD * dd_pen
+        + ELL_BETA_BURST * burst_pen
+        + ELL_BETA_ACORR * acorr_pen
+        + ELL_BETA_CURV * curvature;
+    float ell = exp(-penalty);
+    ell = squash(ell, nan_squash);
+    if (ell < 0.0) {
+        ell = 0.0;
+    } else if (ell > 1.0) {
+        ell = 1.0;
+    }
+    return ell;
 }
 
 #ifdef USE_FP64_RETURNS
@@ -107,7 +147,12 @@ void main() {
         float q = b / a;
         float x = q - 1.0;
         x = max(x, -0.99999994);
-        r[i] = log(1.0 + x);
+        float ax = abs(x);
+        if (ax < 1e-3) {
+            r[i] = log1p_series_f(x);
+        } else {
+            r[i] = log(1.0 + x);
+        }
         #endif
     }
 
@@ -256,11 +301,6 @@ void main() {
     float f4 = squash(acorr_1, nan_squash);
     float f5 = squash(var_ratio, nan_squash);
 
-    float tag = 0.0;
-    #ifdef USE_FP64_RETURNS
-    tag = 64.0;
-    #else
-    tag = 32.0;
-    #endif
-    write_record(s, t, f0, f1, f2, f3, f4, f5, 0.0, tag);
+    float ell = compute_ell(vol_ratio, curvature, drawdown, burstiness, acorr_1, nan_squash);
+    write_record(s, t, f0, f1, f2, f3, f4, f5, ell, 0.0);
 }
