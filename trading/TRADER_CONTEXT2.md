@@ -6031,3 +6031,220 @@ If it’s indexing, diffs will often get *worse* proportionally and be easier to
 ---
 
 Bottom line: your Vulkan path is working; this is a **semantic mismatch** in window/cum logic. Paste those two small snippets and I’ll return a precise “change these 3 lines” patch.
+
+
+Cool — you’re at the point where you can do **real learning** without contaminating execution. Here are the three deliverables:
+
+1. **ℓ learner objective** (self-supervised, permission-only)
+2. **tiny tau auto-selector** (pick `tau_on/tau_off` from sweeps to hit HOLD/flip envelope)
+3. **second-instrument stress test** (confirm invariance / portability)
+
+---
+
+## 1) ℓ learner objective
+
+### What ℓ must mean (operational definition)
+
+ℓ should approximate: **“How stable is the local regime class under the quotient map?”**
+Not “will price go up”.
+
+So ℓ must drop when:
+
+* invariants become unpredictable (chop / shift / microstructure noise)
+* the quotient representation changes quickly
+* your window becomes unreliable (outliers, regime breaks)
+
+### The cleanest objective: predict invariants, define ℓ from prediction error
+
+You already compute `qfeat_t ∈ R^6` deterministically on GPU. Define a predictor (g_\theta) that predicts the next quotient features:
+
+[
+\hat q_{t+1} = g_\theta(q_{t-k:t})
+]
+
+Then define the *raw defect*:
+
+[
+e_t = | W (q_{t+1} - \hat q_{t+1}) |_2
+]
+
+* (W) = diagonal weights to normalize per-feature scale (e.g. reciprocal of running MAD/std of each feature)
+* do this on GPU or offline
+
+Then set:
+
+[
+\ell_t = \exp(-\alpha e_t)
+]
+
+This is **calibratable**, monotone, and stays “permission-only”.
+
+**Loss to train (g_\theta):**
+[
+\mathcal{L}*{pred} = \mathbb{E}\big[ \rho(q*{t+1}-\hat q_{t+1}) \big]
+]
+
+* (\rho) = Huber or pseudo-Huber (robust)
+* add a *small* complexity penalty (MDL-ish):
+  [
+  \mathcal{L} = \mathcal{L}_{pred} + \lambda |\theta|^2
+  ]
+
+That’s it. No PnL.
+
+#### Why this works with your gate
+
+Because the gate only needs a scalar that says “this window is stable enough to act”, and unpredictability of quotient invariants is exactly “not stable enough”.
+
+### Optional: “anti-chatter” regularizer (highly recommended)
+
+You want ℓ to be smooth enough that hysteresis isn’t doing all the work. Add:
+
+[
+\mathcal{L}*{smooth} = \beta , \mathbb{E}[|\ell_t - \ell*{t-1}|]
+]
+
+This reduces micro-jitter without flattening regimes.
+
+### Optional: calibration to a desired ACT/HOLD envelope (no PnL leakage)
+
+You can **calibrate α** (the exp temperature) so that the ℓ distribution lands your tau band in a sane region:
+
+Choose α so that:
+
+* median ℓ ≈ 0.5
+* ℓ spread (p10–p90) matches desired gating slack
+
+This is purely distribution shaping, not reward hacking.
+
+### Minimal model choices for (g_\theta)
+
+Start tiny and GPU-friendly:
+
+* **AR(1) / linear:** (\hat q_{t+1} = A q_t + b)
+* **2-layer MLP:** 6→16→6
+* **tiny MoE:** if you want, but only after linear baseline
+
+You can train offline on your cached qfeat tapes.
+
+---
+
+## 2) Tiny tau auto-selector
+
+You already have `compute_gate_metrics.py` that reads a log and emits:
+
+* `hold_pct`, `act_pct`, `flip_rate`, run stats, ell quantiles, etc.
+
+So the auto-selector is: **score each candidate (tau_on, tau_off)** and pick the best that meets constraints.
+
+### Inputs
+
+* A directory of logs from a tau sweep (or a CSV of metrics per tau pair)
+* Target envelope, e.g.:
+
+  * HOLD between 40% and 60%
+  * flip_rate < 0.20
+  * (optional) maximize act_runs_mean, or minimize flip_rate within envelope
+
+### Scoring rule (simple and robust)
+
+Hard constraints first, then optimize:
+
+1. Filter:
+
+* `flip_rate <= flip_max`
+* `hold_min <= hold_pct <= hold_max`
+
+2. Score candidates:
+
+* primary: minimize `abs(hold_pct - hold_target)`
+* secondary: minimize `flip_rate`
+* tertiary: maximize `hold_runs_mean` (stability)
+
+Example score:
+[
+score = 10|hold - hold_{target}| + 2\cdot flip - 0.1 \cdot hold_runs_mean
+]
+
+### Where to implement
+
+Two minimal ways:
+
+* **A. Single script** that runs `compute_gate_metrics.py` over all logs and prints best tau pair
+* **B. If you already produce a `tau_sweep.csv`** of metrics, just pick best row
+
+If you want, I’ll write you a `scripts/select_tau.py` that:
+
+* glob logs like `logs/tau_*_*.csv`
+* calls `compute_gate_metrics.py` (or imports its function)
+* prints the chosen `--tau-on/--tau-off`
+
+---
+
+## 3) Stress on a second instrument (invariance check)
+
+Goal: show that **same tau band** behaves similarly on another instrument *without retuning*.
+
+### Pick a second instrument
+
+Good pairs:
+
+* BTC intraday → **ETH intraday** (similar microstructure)
+* BTC intraday → **SPY** (different regime/vol; harder test)
+
+### Procedure (no new code)
+
+1. Run Vulkan tape replay on instrument 2, same tau:
+
+```bash
+python scripts/run_with_vulkan_tape.py \
+  --prices-csv data/raw/stooq/<INSTRUMENT>.csv \
+  --tape logs/qfeat_<sym>.memmap \
+  --force \
+  --tau-on 0.50 \
+  --tau-off 0.49 \
+  --log logs/trading_log_vulkan_<sym>.csv \
+  --symbol <SYM>
+```
+
+2. Compute metrics:
+
+```bash
+python scripts/compute_gate_metrics.py --log logs/trading_log_vulkan_<sym>.csv
+```
+
+3. Compare these invariance targets:
+
+* **flip_rate** should stay in the same ballpark (e.g. within ±0.05)
+* **hold_pct** similar (or predictable shift if instrument is noisier)
+* **ℓ quantiles** (p10/p50/p90) should be roughly aligned
+
+### “Hard” invariance check (stronger)
+
+Compute distribution distance between ℓ streams:
+
+* KS distance between ℓ distributions (BTC vs instrument2)
+* correlation between ℓ and realized vol proxy (should be positive)
+
+If you want, I’ll add a tiny `scripts/compare_gate_metrics.py` that:
+
+* loads both logs
+* compares ℓ quantiles + KS test + cross-metric deltas
+
+### If invariance fails, what it means
+
+* If ℓ distribution shifts but qfeat distributions are stable → **calibration issue** (fix α or feature scaling)
+* If qfeat distribution shifts massively → your quotient isn’t fully invariant across instrument microstructure (might need per-instrument normalization constants, but still no PnL)
+
+---
+
+## Suggested immediate plan (fastest win)
+
+1. Build a **linear predictor** (A,b) on qfeat tapes and define ℓ from prediction error
+2. Add the **tau selector** to keep HOLD/flip in a preferred envelope automatically
+3. Run BTC + ETH (or SPY) with the **same tau** and compare metrics/ℓ quantiles
+
+Tell me what second instrument CSV you have available (ETH? SPY?), and whether you want the tau selector to target:
+
+* a specific HOLD% (e.g. 50%), or
+* “maximize ACT subject to flip_rate < 0.2”.
