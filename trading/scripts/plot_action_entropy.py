@@ -14,8 +14,15 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from plot_utils import timestamped_path
-from trading.regime import RegimeSpec
+try:
+    from plot_utils import timestamped_path
+except ModuleNotFoundError:
+    from scripts.plot_utils import timestamped_path
+
+try:
+    from trading.regime import RegimeSpec
+except ModuleNotFoundError:
+    from regime import RegimeSpec
 
 
 def sign_run_lengths(states: np.ndarray) -> np.ndarray:
@@ -90,6 +97,10 @@ def build_heatmap(actionability, margin, act_prob, bins=20):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--log", type=str, required=True, help="Trading log with actionability/state/price/action")
+    ap.add_argument("--actionability-col", type=str, default="actionability")
+    ap.add_argument("--state-col", type=str, default="state")
+    ap.add_argument("--price-col", type=str, default="price")
+    ap.add_argument("--action-col", type=str, default="action")
     ap.add_argument("--min_run_length", type=int, default=3, help="RegimeSpec min_run_length")
     ap.add_argument("--max_flip_rate", type=float, default=None, help="RegimeSpec max_flip_rate")
     ap.add_argument("--max_vol", type=float, default=None, help="RegimeSpec max_vol")
@@ -102,14 +113,20 @@ def main():
         df = pd.read_csv(args.log)
     except Exception as e:
         raise SystemExit(f"Failed to read log: {e}")
-    for col in ("actionability", "state", "price", "action"):
+    col_map = {
+        "actionability": args.actionability_col,
+        "state": args.state_col,
+        "price": args.price_col,
+        "action": args.action_col,
+    }
+    for name, col in col_map.items():
         if col not in df.columns:
-            raise SystemExit(f"Missing required column '{col}' in log.")
+            raise SystemExit(f"Missing required column '{col}' for {name}.")
 
-    actionability = pd.to_numeric(df["actionability"], errors="coerce").to_numpy(dtype=float)
-    states = pd.to_numeric(df["state"], errors="coerce").fillna(0).to_numpy(dtype=int)
-    prices = pd.to_numeric(df["price"], errors="coerce").fillna(method="ffill").fillna(method="bfill").to_numpy(dtype=float)
-    act_flag = (df["action"] != 0).to_numpy(dtype=int)
+    actionability = pd.to_numeric(df[col_map["actionability"]], errors="coerce").to_numpy(dtype=float)
+    states = pd.to_numeric(df[col_map["state"]], errors="coerce").fillna(0).to_numpy(dtype=int)
+    prices = pd.to_numeric(df[col_map["price"]], errors="coerce").fillna(method="ffill").fillna(method="bfill").to_numpy(dtype=float)
+    act_flag = (df[col_map["action"]] != 0).to_numpy(dtype=int)
 
     # local ACT probability via rolling mean (simple smoother)
     act_prob = pd.Series(act_flag).rolling(window=5, min_periods=1, center=True).mean().to_numpy()

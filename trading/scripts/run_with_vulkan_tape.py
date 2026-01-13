@@ -22,13 +22,13 @@ try:
     from trading.runner import run_bars
     from trading.signals.triadic import compute_triadic_state
     from trading.trading_io.prices import load_prices
-    from trading.vk_qfeat import build_feature_tape
+    from trading.vk_qfeat import QFeatTape, build_feature_tape
     from trading.strategy.vulkan_tape_adapter import VulkanTapeAdapter
 except ModuleNotFoundError:
     from runner import run_bars
     from signals.triadic import compute_triadic_state
     from trading_io.prices import load_prices
-    from vk_qfeat import build_feature_tape
+    from vk_qfeat import QFeatTape, build_feature_tape
     from strategy.vulkan_tape_adapter import VulkanTapeAdapter
 
 
@@ -50,11 +50,25 @@ def main() -> None:
     parser.add_argument("--vk-icd", type=str, default=None)
     parser.add_argument("--no-fp64-returns", action="store_true", help="Disable FP64 log-return path")
     parser.add_argument("--force", action="store_true", help="Overwrite tape if it exists")
+    parser.add_argument("--reuse-tape", action="store_true", help="Reuse existing tape instead of rebuilding")
     parser.add_argument("--log", type=pathlib.Path, default=pathlib.Path("logs/trading_log_vulkan.csv"))
     parser.add_argument("--symbol", type=str, default="VKN")
     parser.add_argument("--tau-on", type=float, default=0.52, help="Entry threshold for ACT")
     parser.add_argument("--tau-off", type=float, default=0.47, help="Exit threshold for HOLD")
     args = parser.parse_args()
+
+    if args.force and args.reuse_tape:
+        raise SystemExit(
+            "Invalid flags: --force and --reuse-tape cannot be used together. "
+            "--force rebuilds and overwrites the tape; --reuse-tape preserves learned ell."
+        )
+
+    if args.force:
+        print(
+            "WARNING: --force will rebuild and overwrite the qfeat tape. "
+            "Any learned ell in slot 6 will be LOST.",
+            file=sys.stderr,
+        )
 
     price, volume, ts = load_prices(args.prices_csv, return_time=True)
     state = compute_triadic_state(price)
@@ -68,20 +82,30 @@ def main() -> None:
         }
     )
 
-    tape = build_feature_tape(
-        prices=price[np.newaxis, :],
-        out_path=str(args.tape),
-        w1=args.w1,
-        w2=args.w2,
-        eps=args.eps,
-        nan_squash=args.nan_squash,
-        force=args.force,
-        backend=args.backend,
-        shader_path=str(args.shader),
-        spv_path=str(args.spv),
-        vk_icd=args.vk_icd,
-        fp64_returns=not args.no_fp64_returns,
-    )
+    if args.reuse_tape:
+        if not args.tape.exists():
+            raise SystemExit(f"{args.tape} not found for reuse")
+        tape = QFeatTape.from_existing(str(args.tape))
+        if tape.T != price.size:
+            raise SystemExit(
+                f"Tape length (T={tape.T}) does not match prices length (T={price.size}). "
+                "Refuse to replay with --reuse-tape."
+            )
+    else:
+        tape = build_feature_tape(
+            prices=price[np.newaxis, :],
+            out_path=str(args.tape),
+            w1=args.w1,
+            w2=args.w2,
+            eps=args.eps,
+            nan_squash=args.nan_squash,
+            force=args.force,
+            backend=args.backend,
+            shader_path=str(args.shader),
+            spv_path=str(args.spv),
+            vk_icd=args.vk_icd,
+            fp64_returns=not args.no_fp64_returns,
+        )
 
     ts_map = make_ts_map(bars["ts"].to_numpy())
     adapter = VulkanTapeAdapter(tape=tape, series_index=0, ts_to_index=ts_map)

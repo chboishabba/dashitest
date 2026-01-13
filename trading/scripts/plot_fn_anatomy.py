@@ -20,8 +20,15 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from plot_utils import timestamped_path
-from trading.regime import RegimeSpec
+try:
+    from plot_utils import timestamped_path
+except ModuleNotFoundError:
+    from scripts.plot_utils import timestamped_path
+
+try:
+    from trading.regime import RegimeSpec
+except ModuleNotFoundError:
+    from regime import RegimeSpec
 
 
 def sign_run_lengths(states: np.ndarray) -> np.ndarray:
@@ -144,6 +151,11 @@ def plot_stacked(bin_centers, reason_counts, reason_names, title, save=None):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--log", type=str, required=True, help="Trading log CSV with acceptable/action/actionability/state/price")
+    ap.add_argument("--acceptable-col", type=str, default="acceptable")
+    ap.add_argument("--action-col", type=str, default="action")
+    ap.add_argument("--actionability-col", type=str, default="actionability")
+    ap.add_argument("--state-col", type=str, default="state")
+    ap.add_argument("--price-col", type=str, default="price")
     ap.add_argument("--tau_on", type=float, default=0.5, help="Entry threshold (for low_actionability reason)")
     ap.add_argument("--tau_off", type=float, default=0.3, help="Exit threshold (unused directly, for reference)")
     ap.add_argument("--cooldown", type=int, default=5, help="Cooldown bars after ACT counts as cooldown reason")
@@ -161,9 +173,16 @@ def main():
         df = pd.read_csv(args.log)
     except Exception as e:
         raise SystemExit(f"Failed to read log: {e}")
-    for col in ("acceptable", "action", "actionability", "state", "price"):
+    col_map = {
+        "acceptable": args.acceptable_col,
+        "action": args.action_col,
+        "actionability": args.actionability_col,
+        "state": args.state_col,
+        "price": args.price_col,
+    }
+    for name, col in col_map.items():
         if col not in df.columns:
-            raise SystemExit(f"Missing required column '{col}' in log.")
+            raise SystemExit(f"Missing required column '{col}' for {name}.")
 
     spec = RegimeSpec(
         min_run_length=args.min_run_length,
@@ -172,7 +191,7 @@ def main():
         window=args.window,
     )
     res = fn_anatomy(
-        df,
+        df.rename(columns={v: k for k, v in col_map.items()}),
         spec=spec,
         tau_on=args.tau_on,
         cooldown_bars=args.cooldown,
