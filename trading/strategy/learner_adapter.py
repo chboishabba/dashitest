@@ -143,7 +143,8 @@ class LearnerAdapter:
         hist_fast = np.stack(list(self._q_hist_fast))
         hist_slow = np.stack(list(self._q_hist_slow))
         centroid_slow = np.nanmean(hist_slow, axis=0)
-        diff_q = np.nan_to_num(qvec - centroid_slow, nan=0.0, posinf=0.0, neginf=0.0)
+        scale = np.abs(centroid_slow) + 1e-6
+        diff_q = np.nan_to_num((qvec - centroid_slow) / scale, nan=0.0, posinf=0.0, neginf=0.0)
         dist_q = np.linalg.norm(diff_q)
 
         var_pen = math.log1p(float(np.nanstd(rets))) if rets.size > 1 else 0.0

@@ -32,6 +32,7 @@ except ModuleNotFoundError:
     from strategy.triadic_strategy import TriadicStrategy
     from strategy.learner_adapter import LearnerAdapter
     from regime import RegimeSpec, check_regime
+import math
 import pandas as pd
 import pathlib
 import numpy as np
@@ -71,13 +72,31 @@ def run_bars(
 
     adapter = None
     current_price = None
+    last_ell = float("nan")
     if confidence_fn is None and use_stub_adapter:
         adapter = LearnerAdapter(**(adapter_kwargs or {}))
 
         def confidence_fn(ts, state):
+            nonlocal last_ell
             payload = {"state": state, "price": current_price}
             ell, _qfeat = adapter.update(ts, payload)
+            last_ell = float(ell)
             return ell
+
+    if confidence_fn is not None:
+        orig_conf_fn = confidence_fn
+
+        def confidence_fn(ts, state):
+            nonlocal last_ell
+            out = orig_conf_fn(ts, state)
+            ell_val = out[0] if isinstance(out, tuple) and len(out) >= 1 else out
+            try:
+                ell_f = float(ell_val)
+                if math.isfinite(ell_f):
+                    last_ell = ell_f
+            except (TypeError, ValueError):
+                pass
+            return out
 
     # strategy emits intents from triadic state
     strategy = TriadicStrategy(
@@ -100,12 +119,14 @@ def run_bars(
     rets = np.diff(price_arr, prepend=price_arr[0])
     vols = pd.Series(rets).rolling(50).std().to_numpy()
     spec = RegimeSpec()  # defaults; adjust if needed
-    acceptable = check_regime(bars["state"].to_numpy(), vols, spec)
-    for _, row in bars.iterrows():
-        ts = int(row["ts"])
-        state = int(row["state"])
-        price = float(row["close"])
-        volume = float(row["volume"]) if "volume" in row else np.nan
+    acceptable = np.asarray(check_regime(bars["state"].to_numpy(), vols, spec), dtype=bool)
+    if acceptable.shape[0] != len(bars):
+        raise ValueError(f"acceptable length {acceptable.shape[0]} != bars length {len(bars)}")
+    for i, row in enumerate(bars.itertuples(index=False)):
+        ts = int(getattr(row, "ts"))
+        state = int(getattr(row, "state"))
+        price = float(getattr(row, "close"))
+        volume = float(getattr(row, "volume")) if hasattr(row, "volume") else np.nan
         current_price = price
         # mark-to-market on previous exposure
         if prev_price is not None:
@@ -119,12 +140,13 @@ def run_bars(
                 "t": ts,  # dashboard-friendly
                 "ts": ts,
                 "symbol": symbol,
-                "acceptable": bool(acceptable[_]),
+                "acceptable": bool(acceptable[i]),
                 "state": state,
                 "intent_direction": intent.direction,
                 "intent_target": intent.target_exposure,
                 "urgency": intent.urgency,
                 "actionability": intent.actionability,
+                "ell": last_ell,
                 "fill": result["filled"],
                 "fill_price": result["fill_price"],
                 "fee": result["fee"],

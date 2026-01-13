@@ -8,6 +8,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import json
 
 import pandas as pd
 
@@ -37,6 +38,12 @@ def main():
     parser.add_argument("--theta-on", dest="theta_on", default=0.7, type=float, help="ell threshold to begin ACT persistence")
     parser.add_argument("--theta-off", dest="theta_off", default=0.3, type=float, help="ell threshold to begin HOLD persistence")
     parser.add_argument(
+        "--adapter-kwargs",
+        type=str,
+        default="{}",
+        help='JSON dict of kwargs passed to LearnerAdapter (e.g., \'{"ell_beta":1.0}\')',
+    )
+    parser.add_argument(
         "--plots",
         dest="plots",
         action=argparse.BooleanOptionalAction,
@@ -54,6 +61,11 @@ def main():
     if pd.api.types.is_datetime64_any_dtype(bars["ts"]):
         bars["ts"] = pd.to_datetime(bars["ts"]).astype("int64") // 1_000_000_000
 
+    try:
+        cli_kwargs = json.loads(args.adapter_kwargs)
+    except Exception as exc:
+        raise SystemExit(f"Invalid JSON for --adapter-kwargs: {exc}")
+
     df = run_bars(
         bars=bars,
         symbol=args.csv.stem.upper(),
@@ -66,6 +78,7 @@ def main():
         adapter_kwargs={
             "stub_mode": args.stub_mode,
             "stub_constant": args.stub_constant,
+            **(cli_kwargs or {}),
         },
     )
     print(f"[done] wrote {len(df)} rows to {args.log}")

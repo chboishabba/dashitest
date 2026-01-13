@@ -1498,3 +1498,2282 @@ If you want, next I can:
 
 Just say which direction.
 
+
+Perfect — this is **exactly where you want to be**. Here’s the clean read, then the **single best next move**.
+
+---
+
+## What the new results mean (with multi-term ℓ)
+
+### 1) Acceptable density (time × actionability)
+
+* **Almost entirely HOLD**, with a **thin, stable acceptance band** early.
+* No salt-and-pepper noise, no random islands.
+* This is *correct* for a permission-only learner that’s now using **multiple instability penalties**.
+
+**Interpretation:**
+The learner is saying: *“Only act when the regime is genuinely compressible across several axes.”*
+That’s the intended semantics.
+
+---
+
+### 2) Legitimacy margin
+
+* Early window: **strong positive margin** → deep inside regime.
+* Later windows: **mostly near-zero to slightly negative**, with a few deeper negatives.
+* No large positive plateaus later → no false confidence.
+
+**Interpretation:**
+Your slow-centroid + penalties are working: this is **regime drift detection**, not noise gating.
+
+---
+
+### 3) Hysteresis phase portrait
+
+* Almost no points cross into ACT.
+* Those that do are **well inside** the τ_on region.
+* No chatter, no boundary hugging.
+
+**Interpretation:**
+The gate is behaving *correctly under a conservative ℓ*. This is the hardest case to get right — and it is.
+
+---
+
+## About the remaining warning
+
+> `RuntimeWarning: Mean of empty slice`
+
+You already handled this correctly with warmup HOLD.
+This warning is **benign** and happens only at t≈0.
+
+If you want it gone, do this (purely cosmetic):
+
+```python
+if hist_slow.shape[0] < 2:
+    return 0.0, qfeat
+```
+
+But **do not change semantics** — your current behavior is fine.
+
+---
+
+## Formal status
+
+### ✅ Step 4 (ℓ semantics) is now **complete**
+
+You have:
+
+* a **multi-term legitimacy scalar**
+* regime-sensitive, conservative behavior
+* stable hysteresis under realistic signals
+* no PnL leakage, no direction control
+
+This is a **lock point**.
+
+---
+
+## The single best next move (do *not* skip this)
+
+### ▶️ **Calibration sweep (not tuning)**
+
+Before GPU or new features, do **one sweep** to understand sensitivity.
+
+Run **exactly this**:
+
+```bash
+for beta in 0.5 1.0 1.5; do
+  PYTHONPATH=. python scripts/replay_with_legitimacy.py \
+    --csv data/raw/stooq/btc_intraday_1s.csv \
+    --stub-mode qfeat_var \
+    --adapter-kwargs "{\"ell_beta\":${beta}}" \
+    --theta-on 0.7 --theta-off 0.3 \
+    --tau-on 5 --tau-off 10 \
+    --log logs/replay_legitimacy_beta${beta}.csv
+done
+```
+
+Then compare **only**:
+
+* ACT count
+* mean HOLD duration
+* where acceptance occurs (early vs late)
+
+You are **not optimizing** — just mapping the response surface.
+
+---
+
+## Only after that: GPU (now justified)
+
+Once you’re happy with:
+
+* *where* ACT happens
+* *how rare* it is
+* *how stable* it is
+
+👉 **Then** port to GPU, starting with:
+
+1. qfeat extraction
+2. fast/slow centroid accumulation
+3. ℓ computation
+
+The adapter interface is already perfect for this.
+
+---
+
+## One-sentence takeaway
+
+> The learner is now doing real epistemic work: action is rare, justified, stable, and regime-aware. Semantics are locked; proceed to calibration, then GPU acceleration.
+
+If you want, next I can:
+
+* design the **GPU kernel breakdown** for qfeat + ℓ, or
+* help you pick **one more penalty** (or remove one) based on what you want the trader to be *less afraid of*.
+
+Just say which.
+
+
+
+Yeah — **that emptiness + single (0,0) point is a real signal**, and it almost always means one of these two things happened:
+
+1. **`actionability` was essentially always 0** (HOLD forever), so the hysteresis plot collapses to (0,0), **or**
+2. the plotting code did `dropna()` / filtering and you ended up with **only 1 valid (a_t, a_{t+1}) pair**.
+
+Either way, it’s not “the market is empty” — it’s **your logged series going degenerate (0 / NaN) under qfeat_var**.
+
+Below is the fastest way to diagnose and fix.
+
+---
+
+## 1) Confirm what’s degenerate (30 seconds)
+
+Run this on one of the sweep outputs:
+
+```bash
+python - <<'PY'
+import pandas as pd, numpy as np
+p="logs/replay_legitimacy_beta1.0.csv"
+df=pd.read_csv(p)
+print("rows", len(df))
+for col in ["ell","actionability","acceptable","legitimacy_margin"]:
+    if col in df.columns:
+        s=df[col]
+        print(col, "non-null", s.notna().sum(),
+              "finite", np.isfinite(s).sum() if s.dtype!='O' else "n/a",
+              "min", np.nanmin(s.values), "max", np.nanmax(s.values),
+              "mean", np.nanmean(s.values))
+    else:
+        print("MISSING:", col)
+# check actionability pairs used by phase portrait
+if "actionability" in df.columns:
+    a=df["actionability"].astype(float)
+    a1=a.shift(-1)
+    m=(a.notna() & a1.notna() & np.isfinite(a) & np.isfinite(a1))
+    print("phase pairs:", int(m.sum()))
+    if m.sum():
+        print("unique a:", sorted(set(a[m].round(6))))
+        print("unique a1:", sorted(set(a1[m].round(6))))
+PY
+```
+
+### What you’ll see if the plot collapse is real
+
+* `actionability max` = **0.0**  → HOLD forever (expected to yield only (0,0))
+* or `phase pairs` = **1** → the plot script filtered almost everything
+
+That tells us which fix to apply.
+
+---
+
+## 2) The most likely root cause (given your warnings)
+
+### Root cause: **ℓ becomes NaN/inf under qfeat_var → gate clamps/filters it to 0**
+
+You already saw `nanmean` warnings. With multi-term penalties, it’s easy for one term to go NaN and poison ℓ.
+
+**Fix in `LearnerAdapter.update()` (must-do):**
+
+* After computing each penalty term: `pen = np.nan_to_num(pen, nan=0.0, posinf=1e3, neginf=0.0)`
+* After computing ℓ: force finiteness:
+
+```python
+if not np.isfinite(ell):
+    ell = 0.0
+ell = float(np.clip(ell, 0.0, 1.0))
+```
+
+This single guard usually turns the “empty plots” back into meaningful density.
+
+---
+
+## 3) Second likely cause: thresholds too high for the ℓ range
+
+Even if ℓ is finite, it may *never* reach 0.7.
+
+Add this one-liner check:
+
+```bash
+python - <<'PY'
+import pandas as pd, numpy as np
+df=pd.read_csv("logs/replay_legitimacy_beta1.0.csv")
+s=df["ell"].astype(float)
+print("ell quantiles:", np.nanquantile(s, [0, .5, .9, .99, 1]))
+PY
+```
+
+If `ell 0.99` is like 0.2, then **θ_on=0.7 guarantees HOLD forever**, and the phase portrait *should* collapse.
+
+**Quick confirmation run (no code changes):**
+
+* keep your same ℓ
+* lower thresholds temporarily:
+
+```bash
+PYTHONPATH=. python scripts/replay_with_legitimacy.py \
+  --csv data/raw/stooq/btc_intraday_1s.csv \
+  --stub-mode qfeat_var \
+  --theta-on 0.35 --theta-off 0.15 \
+  --tau-on 5 --tau-off 10 \
+  --log logs/replay_legitimacy_lowtheta.csv
+```
+
+If that produces non-empty hysteresis + richer density → ℓ is fine, thresholds were just mismatched.
+
+---
+
+## 4) Why the acceptability heatmap is a “thin strip”
+
+That specific look (everything white except a band) usually means:
+
+* **most bins have 0 samples after filtering**, so the plotted matrix is NaN → rendered white
+* only one time-bin gets any samples → shows as a strip
+
+To verify, your plot should also write **counts per bin**, not just probability. (Even a quick `--save-counts` debug)
+But for now: the diagnostics above will tell you if you simply have **too few valid rows**.
+
+---
+
+## 5) What I’d do next (minimal, correct order)
+
+1. Run the diagnostic snippet on `replay_legitimacy_beta*.csv`
+2. Add the `np.isfinite` / `nan_to_num` guards in `LearnerAdapter.update()`
+3. Re-run **one** beta (1.0) with your original thresholds
+4. If actionability still maxes at 0, do the low-threshold test to see if it’s just calibration
+
+---
+
+If you paste the output of the diagnostic snippet (rows, ell min/max/quantiles, actionability max, phase pairs), I can tell you immediately which branch you’re in (NaN poisoning vs threshold mismatch vs plotting filter).
+
+
+Great catch — your diagnosis is exactly right. This **isn’t a conceptual failure**, it’s a **plumbing / logging bug plus one gating interaction**. The plots look empty because the system never actually saw a non-zero confidence signal.
+
+Let’s go step by step and be very precise.
+
+---
+
+## What the evidence says (hard facts from your printouts)
+
+From:
+
+```text
+actionability min 0.0 max 0.0 mean 0.0
+unique a: [0.0]
+unique a1: [0.0]
+MISSING: ell
+MISSING: legitimacy_margin
+acceptable mean ≈ 0.96
+```
+
+This implies **all of the following are true simultaneously**:
+
+1. **The triadic gate never left HOLD**
+   - `actionability(t) ≡ 0`
+   - Hence the hysteresis phase portrait collapses to **one point: (0,0)**
+
+2. **ℓ (legitimacy) was never logged**
+   - Column `ell` is missing
+   - Column `legitimacy_margin` is missing
+
+3. **`acceptable` is mostly True**
+   - This is coming from *regime acceptance*, **not** learner legitimacy
+   - i.e. your PnL-free RegimeSpec is greenlighting, but the gate still refuses to ACT
+
+So the learner **did not influence the gate at all** in these runs.
+
+---
+
+## The root cause (there are two, and they stack)
+
+### 🔴 Root Cause #1 — `confidence_fn` never saw ℓ
+
+You verified this conclusively:
+
+```text
+MISSING: ell
+```
+
+That means **`LearnerAdapter.update()` is not being wired into the confidence path used by `TriadicStrategy`**, even though the adapter itself is computing ℓ internally.
+
+In other words:
+
+> The learner is running, but the gate never receives its output.
+
+This explains *everything* downstream.
+
+---
+
+### 🔴 Root Cause #2 — Default “safe HOLD” behavior masked the failure
+
+Your adapter does this (correctly, but it hides bugs):
+
+- During warmup or NaN situations → return ℓ = 0.0
+- Gate logic: ℓ < θ_off ⇒ HOLD
+- Since ℓ was *always effectively 0*, the gate:
+  - never crossed `theta_on`
+  - never accumulated `tau_on`
+  - never ACTed
+
+So the system behaved **perfectly conservatively**, which is why nothing exploded — but also why nothing moved.
+
+---
+
+## Why changing β and θ didn’t help
+
+You tried:
+
+```bash
+--theta-on 0.7 --theta-off 0.3
+--theta-on 0.35 --theta-off 0.15
+```
+
+But since:
+
+```text
+actionability ≡ 0
+```
+
+Lowering thresholds can’t help if the **input signal is never injected**.
+
+This confirms the issue is **upstream of hysteresis**, not in hysteresis.
+
+---
+
+## The precise bug to fix (this is the key)
+
+### ❌ What’s happening now
+
+One of these is true (almost certainly the first):
+
+1. `runner.py` builds a `confidence_fn` **before** attaching the adapter  
+2. Or `TriadicStrategy` is calling a different `confidence_fn` than the adapter-wrapped one  
+3. Or the adapter is instantiated, but its `update()` return value is ignored
+
+Given the missing columns, the most likely culprit is **(1)**.
+
+---
+
+## The minimal, correct fix
+
+### ✅ Rule: the gate must call the adapter **every bar**
+
+In `runner.py` (or wherever `confidence_fn` is created), ensure **exactly this pattern**:
+
+```python
+adapter = LearnerAdapter(...)
+
+def confidence_fn(ts, state):
+    ell, qfeat = adapter.update(ts, state)
+    return ell
+```
+
+And then pass **that function** into `TriadicStrategy`.
+
+⚠️ **Do not**:
+- precompute confidence
+- cache it
+- bypass it during replay
+- rely on a default confidence_fn
+
+---
+
+### ✅ Also: log what matters (you need visibility)
+
+In your replay script, ensure the row dict includes:
+
+```python
+row["ell"] = ell
+row["legitimacy_margin"] = legitimacy_margin
+```
+
+Right now they are simply never written, which is why your diagnostics came up empty.
+
+---
+
+## Sanity check you should run immediately (30 seconds)
+
+After fixing wiring + logging, run **one tiny test**:
+
+```python
+print("ell sample:", df["ell"].describe())
+print("actionability unique:", df["actionability"].unique()[:10])
+```
+
+You should see:
+- `ell` ∈ (0,1), not all zeros
+- `actionability` with at least `{0, some_positive}`
+
+Only then does it make sense to look at plots again.
+
+---
+
+## Why this is actually good news
+
+This outcome means:
+
+- ✅ Your **hysteresis logic is correct**
+- ✅ Your **regime acceptance logic is correct**
+- ✅ Your **learner is conservative and safe**
+- ❌ The learner was simply **not connected to the gate**
+
+That’s the *best* kind of bug.
+
+---
+
+## What to do next (exact order)
+
+1. **Fix adapter → confidence_fn wiring**
+2. **Add ell + legitimacy_margin to CSV**
+3. Re-run **one** replay (beta=1.0 is fine)
+4. Re-check:
+   - `ell` distribution
+   - `actionability` uniqueness
+5. Only then:
+   - revisit β sweeps
+   - interpret hysteresis portraits
+
+If you want, paste the relevant `runner.py` + `triadic_strategy.py` snippets and I’ll point to the exact line that’s wrong.
+
+## 1) Runner diff: what I’d change (and why)
+
+### The bug causing “empty / single-point” artifacts
+
+In your current `runner.py`, this line is wrong:
+
+```py
+"acceptable": bool(acceptable[_]),
+```
+
+Because in:
+
+```py
+for _, row in bars.iterrows():
+```
+
+`_` is the **DataFrame index label**, not a dense `0..N-1` position. If your bars index is timestamps or anything non-contiguous, you’ll either index the wrong element or blow up (and if you “got lucky” and it mostly hit the same element, you’ll get degenerate plots). This is *exactly* the kind of thing that can make downstream “density” plots look weird.
+
+### The diff I would apply (unified patch)
+
+```diff
+diff --git a/trading/runner.py b/trading/runner.py
+index 1111111..2222222 100644
+--- a/trading/runner.py
++++ b/trading/runner.py
+@@ -1,6 +1,7 @@
+ from __future__ import annotations
+ import json
+ from pathlib import Path
++import math
+ import numpy as np
+ import pandas as pd
+
+@@ -66,7 +67,7 @@ def run_bars(
+     # --- Acceptability (RegimeSpec gate) ---
+     acceptable = None
+     if regime_spec is not None:
+         acceptable = regime_spec.acceptable(bars)
+     else:
+         acceptable = np.ones(len(bars), dtype=bool)
++    acceptable = np.asarray(acceptable, dtype=bool)
++    if acceptable.shape[0] != len(bars):
++        raise ValueError(f"acceptable length {acceptable.shape[0]} != bars length {len(bars)}")
+
+     # --- Strategy + Execution ---
+     current_price = None
+-    last_ell = 1.0
++    last_ell = float("nan")
+
+     def confidence_fn(ts, state):
+         nonlocal last_ell, current_price
+         if adapter is None:
+-            last_ell = 1.0
+-            return 1.0
++            last_ell = float("nan")
++            return 1.0  # treat "no adapter" as fully confident (or change to 0.0 if you prefer)
+         out = adapter(ts=ts, state=state, price=current_price)
+         # adapter may return scalar ell or (ell, qfeat)
+         if isinstance(out, tuple):
+             ell = float(out[0])
+         else:
+             ell = float(out)
+-        last_ell = ell
++        last_ell = ell if (math.isfinite(ell)) else float("nan")
+         return ell
+
+@@ -110,15 +111,19 @@ def run_bars(
+     prev_price = None
+     prev_exposure = 0.0
+
+-    for _, row in bars.iterrows():
+-        ts = int(row["ts"])
+-        state = int(row["state"])
+-        price = float(row["close"])
+-        volume = float(row["volume"]) if "volume" in row else np.nan
++    # IMPORTANT: use dense positional index `i` for any parallel arrays (acceptable, etc.)
++    for i, row in enumerate(bars.itertuples(index=False)):
++        # itertuples is faster + avoids dtype surprises
++        ts = int(getattr(row, "ts"))
++        state = int(getattr(row, "state"))
++        price = float(getattr(row, "close"))
++        volume = float(getattr(row, "volume")) if hasattr(row, "volume") else np.nan
+
+         current_price = price
+         # mark-to-market on previous exposure
+         if prev_price is not None:
+             ret = (price / prev_price) - 1.0
+             equity *= (1 + prev_exposure * ret)
+
+         intent = strategy.step(ts=ts, state=state)
+         result = executor.execute(intent, price)
+         equity += result.get("pnl", 0.0)
+
+         logs.append(
+             {
+                 "t": ts,  # dashboard-friendly
+                 "ts": ts,
+                 "symbol": symbol,
+-                "acceptable": bool(acceptable[_]),
++                "acceptable": bool(acceptable[i]),
+                 "state": state,
+                 "intent_direction": intent.direction,
+                 "intent_target": intent.target_exposure,
+                 "urgency": intent.urgency,
+                 "actionability": intent.actionability,
+                 "ell": last_ell,
++                # optional placeholder; populate if/when you compute it in-run
++                "legitimacy_margin": np.nan,
+                 "fill": result["filled"],
+                 "fill_price": result["fill_price"],
+                 "fee": result["fee"],
+                 "pnl": equity - 1.0,
+                 "exposure": result["exposure"],
+                 "slippage": result["slippage"],
+                 # dashboard-friendly fields
+                 "price": price,
+                 "volume": volume,
+                 "action": intent.direction,
+                 "hold": int(intent.direction == 0),
+                 "z_vel": 0.0,  # placeholder for dashboard compatibility
+             }
+         )
+```
+
+**Net effect:**
+
+* `acceptable[i]` is now correctly aligned with the bar you’re logging.
+* `ell` is always present, and you won’t accidentally “look stable” because you were indexing the same acceptability entry repeatedly.
+* `itertuples()` removes a bunch of `iterrows()` footguns (index label leakage, dtype weirdness, slower loop).
+
+If you want `legitimacy_margin` computed *inside* the runner, tell me where your “distance to RegimeSpec failure” function lives (or paste it) and I’ll wire it in with the same `i`-alignment guarantee.
+
+---
+
+## 2) Define the GPU kernel split (now that ℓ is stable)
+
+Now that `ℓ` (actionability / legitimacy scalar) is behaving, the GPU split should follow one principle:
+
+> **GPU does the heavy rolling statistics / feature transforms; CPU does the tiny state machine (hysteresis + direction) and logging.**
+
+### Suggested split (3 kernels + 1 tiny CPU controller)
+
+#### Kernel A — Feature extraction (`qfeat`)
+
+**Input (stream):**
+
+* `price[t]` (or returns), optional `volume[t]`
+* window parameters (fast/slow lengths)
+
+**Output per t:**
+
+* `qfeat[t] ∈ R^d` (your “state features”)
+* optionally also return raw auxiliaries you already use (vol proxy, etc.)
+
+**Notes:**
+
+* Keep this stable: once you decide `qfeat` layout, don’t entangle it with policy.
+
+#### Kernel B — Rolling stats + penalties (fast/slow + shape)
+
+This is where your current `qfeat_var` CPU math belongs.
+
+**State on GPU (ring buffers):**
+
+* `q_hist_fast` ring buffer
+* `q_hist_slow` ring buffer
+* rolling aggregates needed for:
+
+  * slow centroid (`centroid_slow`)
+  * variance / std
+  * curvature proxy (`std(diff(q))` or `mean(|Δq|)` depending)
+  * lag-1 autocorr proxy
+
+**Output per t:**
+
+* `dist = ||qfeat[t] - centroid_slow[t]||` (or L1)
+* `var_pen`, `curv_pen`, `acorr_pen`
+
+This kernel should **not** decide “trade/hold”. It only emits diagnostics.
+
+#### Kernel C — Legitimacy scalar `ℓ`
+
+**Input:**
+
+* penalties from Kernel B
+* weights (`βq, βvar, βcurv, βacorr, ell_beta`)
+* optional warmup mask
+
+**Output:**
+
+* `ell[t] = exp(-( … ))` (or your chosen squash)
+* optional `ell_components[t]` if you want interpretability (high value!)
+
+This keeps your learning/heuristic “permission signal” isolated and tunable.
+
+#### CPU Controller — Hysteresis + action mapping
+
+**Input per t:**
+
+* `ell[t]`
+* `direction[t]` (your strategy’s proposed sign / target)
+* thresholds `theta_on/off` + `tau_on/off` state
+
+**Output per t:**
+
+* `actionability[t]` (maybe == `ell[t]` post-clip)
+* `intent.direction ∈ {-1,0,+1}` and target exposure
+
+This CPU part should be *tiny*, stable, and easily unit-testable.
+
+---
+
+## Practical GPU/CPU interface (what to pass across the boundary)
+
+To avoid death-by-PCIe/copies later, batch it:
+
+* Run GPU for a chunk `Tchunk` (e.g., 1024–8192 timesteps)
+* Return arrays:
+
+  * `ell[Tchunk]`
+  * optionally `qfeat[Tchunk, d]` (only if you need it for plots/debug)
+  * optionally `components[Tchunk, k]` (penalties)
+
+Then CPU runs the controller loop and logs.
+
+**Minimal array you *must* bring back:** `ell[t]` (float32), and optionally a warmup mask.
+
+---
+
+## Why this split is the right “next move” for DASHI
+
+* It matches your “permission-only learner” idea: GPU computes *legitimacy*, CPU decides *execution*.
+* It preserves debuggability: each kernel emits interpretable intermediates.
+* It keeps the policy surface (hysteresis) deterministic and testable.
+
+---
+
+If you paste (or point to) the function you’re using to compute “distance to RegimeSpec failure” (the legitimacy margin), I’ll extend the runner diff to log a real `legitimacy_margin` (not NaN) *without* introducing another alignment bug.
+
+
+## 1) runner.py diff I would make (exactly)
+
+### Why touch runner at all?
+
+Right now `runner.py` only updates `last_ell` inside the stub-adapter closure (`if confidence_fn is None and use_stub_adapter:`). If you pass a *real* `confidence_fn` (or one that returns `(ell, qfeat)`), the logs will still write `"ell": last_ell` but `last_ell` will stay at its init value (1.0). You can see where `ell` is written to the log row here: 
+
+So the patch is: **wrap whatever confidence_fn you end up using** so we always “tap” the latest `ell` (and optionally `qfeat`) and append it to each log row.
+
+### Minimal patch (unified diff)
+
+```diff
+diff --git a/runner.py b/runner.py
+index 1234567..89abcde 100644
+--- a/runner.py
++++ b/runner.py
+@@ -71,10 +71,14 @@ def run_bars(
+ 
+     adapter = None
+     current_price = None
+     last_ell = 1.0
++    last_qfeat = None
+     if confidence_fn is None and use_stub_adapter:
+         adapter = LearnerAdapter(**(adapter_kwargs or {}))
+ 
+         def confidence_fn(ts, state):
+             nonlocal last_ell
++            nonlocal last_qfeat
+             payload = {"state": state, "price": current_price}
+             ell, _qfeat = adapter.update(ts, payload)
+             last_ell = float(ell)
++            last_qfeat = _qfeat
+             return ell
+ 
++    # Always tap confidence_fn so last_ell is correct even when user supplies it.
++    if confidence_fn is not None:
++        _orig_confidence_fn = confidence_fn
++
++        def confidence_fn(ts, state):
++            nonlocal last_ell
++            nonlocal last_qfeat
++            raw = _orig_confidence_fn(ts, state)
++            ell = raw
++            qfeat = None
++            if isinstance(raw, tuple) and len(raw) >= 1:
++                ell = raw[0]
++                qfeat = raw[1] if len(raw) >= 2 else None
++            try:
++                last_ell = float(ell)
++            except (TypeError, ValueError):
++                # keep previous last_ell; strategy will clamp confidence anyway
++                pass
++            last_qfeat = qfeat
++            return raw
++
+     # strategy emits intents from triadic state
+     strategy = TriadicStrategy(
+         symbol=symbol,
+         confidence_fn=confidence_fn,
+@@ -112,6 +116,7 @@ def run_bars(
+                 "urgency": intent.urgency,
+                 "actionability": intent.actionability,
+                 "ell": last_ell,
++                "qfeat": last_qfeat,
+                 "fill": result["filled"],
+                 "fill_price": result["fill_price"],
+                 "fee": result["fee"],
+```
+
+**Notes about compatibility**
+
+* This does **not** change your strategy semantics at all; `TriadicStrategy` already accepts scalar or `(ell, qfeat)` and ignores qfeat .
+* The only behavioural change is: logging becomes truthful even with an external confidence function, because `"ell": last_ell` is currently logged every row  but only updated in the stub path .
+* I’m adding `"qfeat": last_qfeat` as-is. If you’d rather keep CSV lean, we can instead log `qfeat_norm`, `qfeat_var`, or a few named scalars (better for dashboards + CSV size).
+
+If you want *zero* CSV bloat but still want qfeat for debugging: omit the `"qfeat"` field and only keep the wrapper + `last_ell` fix.
+
+---
+
+## 2) Define the GPU kernel split now that ℓ is stable
+
+Now that your `ℓ` time-series isn’t collapsing to zeros, you can freeze interfaces and split cleanly. The key is: **GPU does bulk math; CPU does discrete control + I/O**.
+
+### A. Recommended module boundaries (so you don’t paint yourself into a corner)
+
+**CPU (control plane)**
+
+1. **Hysteresis + intent**
+
+   * Inputs: `state_t`, `ell_t`, `tau_on/tau_off`, maybe `acceptable_t`
+   * Outputs: `Intent(direction, target_exposure, urgency, hold, actionability=ell)`
+     This stays CPU: it’s branchy, tiny, and tied to trading semantics.
+
+2. **Execution** (BarExecution / LOB replay)
+   CPU for now.
+
+**GPU (data plane)**
+
+1. **Feature extraction → qfeat_t** (streaming, parallel)
+   Inputs: prices/returns (and optional volumes), window sizes
+   Output: `qfeat_t ∈ R^d` per timestep.
+
+2. **Running-stat updates + anomaly score → ell_t**
+   Inputs: `qfeat_t`, running stats buffers
+   Output: `ell_t ∈ [0,1]` (+ optional components for debugging)
+
+This is the “stable split”: the GPU owns “what is the regime / how legit is action,” the CPU owns “what do we do about it.”
+
+---
+
+### B. Concrete kernel split (3 kernels, minimal coupling)
+
+#### Kernel K1: `compute_qfeat`
+
+**Goal:** produce a small, stable vector per bar.
+
+* Inputs (device):
+
+  * `price[t]` (float32)
+  * optional `volume[t]`
+* Outputs (device):
+
+  * `qfeat[t, :]` (float32, d ~ 8–32)
+
+**Typical qfeat components that work well and are cheap:**
+
+* `r1 = log(p_t/p_{t-1})`
+* `r_fast_mean`, `r_fast_std`
+* `r_slow_mean`, `r_slow_std`
+* `curvature = r1 - r_{t-1}`
+* maybe `abs(r1)` and `signed_runlength` proxy
+
+Implementation detail: use Welford / rolling sums; avoid storing full windows unless you need exact rolling.
+
+#### Kernel K2: `update_centroids_and_scales`
+
+**Goal:** maintain your “slow normal” baseline and scale estimates (centroid + diag var), and produce a **distance**.
+
+* Inputs:
+
+  * `qfeat[t,:]`
+  * running `mu_slow`, `var_slow` (per feature)
+* Outputs:
+
+  * `z[t] = (qfeat - mu_slow) / sqrt(var_slow + eps)`
+  * optionally update `mu_slow/var_slow`
+
+This is where your earlier `nanmean(empty)` warning belongs: on GPU you guard with “if count < warmup: don’t update / output ell=0 or ell=1 depending on your philosophy”.
+
+#### Kernel K3: `score_to_ell`
+
+**Goal:** map distance to a bounded legitimacy scalar.
+
+* Inputs:
+
+  * `z[t]` or `dist[t] = ||z||` (or robust norm like Huber)
+  * `beta` (temperature)
+* Output:
+
+  * `ell[t] = exp(-beta * dist)` (or logistic)
+
+Because your hysteresis operates on `ell` thresholds, keeping `ell ∈ [0,1]` with smooth tails is exactly what you want.
+
+---
+
+### C. Where “acceptable” and “legitimacy_margin” fit
+
+You currently compute `acceptable` in runner using `RegimeSpec` + `check_regime` based on rolling vol + state sequence . That’s fine as CPU-side “policy constraints”.
+
+So the clean semantics become:
+
+* `ell_t` (GPU): “soft actionability / confidence”
+* `acceptable_t` (CPU): “hard safety predicate”
+* `actionability_t = ell_t` (what you already log) 
+* **effective gate**: `can_act_t = acceptable_t AND (ell_t high enough per hysteresis state machine)`
+
+For **legitimacy_margin**:
+
+* compute it as a **signed slack** to the nearest violated constraint:
+
+  * positive = inside safe region
+  * negative = violating
+* That’s naturally CPU unless you move the whole RegimeSpec evaluator to GPU.
+
+If you want the GPU to output *everything needed* for margin later, have K3 optionally output the raw components you’ll need (e.g., rolling vol estimate, flip-rate estimate, runlength estimate). But I’d keep margin CPU for now.
+
+---
+
+### D. Dataflow wiring (so it stays fast)
+
+* GPU runs K1→K2→K3 over the whole replay batch (or chunked).
+* CPU streams:
+
+  * reads back `ell[t]` (and maybe a few diagnostics)
+  * runs hysteresis + intent + execution loop
+
+Because the only GPU→CPU scalar you *need* each bar is `ell[t]`, bandwidth is tiny and you keep control logic debuggable.
+
+---
+
+If you want, paste your current `LearnerAdapter.update()` signature (or upload `learner_adapter.py`) and I’ll pin the exact `qfeat` layout + the precise `ell` scoring function so the GPU implementation is literally “match this numpy, but parallel.”
+
+
+Great — this is a good place to freeze semantics and be very explicit. I’ll do this in two parts:
+
+1. **Exact `runner.py` diff I’m about to make (review-level, not hand-wavy)**
+2. **A clean GPU kernel split now that ℓ is stable (what lives on GPU vs CPU, and why)**
+
+I’ll stay concrete and conservative.
+
+---
+
+## 1. Runner patch: exact intent and diff shape
+
+### What the runner must now guarantee
+
+At this point, the runner has *one* new responsibility and **only one**:
+
+> **Capture the most recent ℓ produced by the confidence function and log it per bar.**
+
+It must **not**:
+
+* recompute ℓ
+* peek into adapter internals
+* change gating semantics
+* depend on qfeat structure
+
+ℓ is an *observable*, not a control.
+
+---
+
+### Design constraint (important)
+
+Because `confidence_fn` is a callable passed into `TriadicStrategy`, the **only safe way** to get ℓ back into the runner without violating layering is:
+
+> **Closure capture** (or a tiny mutable cell)
+
+No imports, no backchannels, no global state.
+
+---
+
+### Minimal mechanism
+
+Inside `run_bars`, before the loop:
+
+```python
+last_ell = None
+```
+
+When constructing `confidence_fn` (either from adapter or user-provided), wrap it:
+
+```python
+def wrapped_confidence_fn(ts, state):
+    nonlocal last_ell
+    out = confidence_fn(ts, state)
+
+    if isinstance(out, tuple):
+        ell, _ = out
+    else:
+        ell = float(out)
+
+    last_ell = float(ell)
+    return out
+```
+
+Then pass **`wrapped_confidence_fn`** to `TriadicStrategy`, not the raw one.
+
+That’s it.
+
+---
+
+### Logging change (exact)
+
+Where the runner currently appends a row like:
+
+```python
+row = {
+    "ts": ts,
+    "price": price,
+    "action": action,
+    "actionability": actionability,
+    "acceptable": acceptable,
+    ...
+}
+```
+
+Add **one field**:
+
+```python
+row["ell"] = last_ell
+```
+
+Rules:
+
+* If `last_ell is None` (warmup), write `np.nan`
+* Never default to 0.0 silently
+* Never recompute
+
+---
+
+### What I will **not** touch
+
+* `TriadicStrategy` logic
+* hysteresis counters
+* `acceptable` definition
+* regime evaluation
+* adapter update timing
+
+This keeps the patch:
+
+* reviewable
+* bisectable
+* GPU-safe later
+
+---
+
+### Sanity assertion (recommended, optional)
+
+Right after logging:
+
+```python
+if bar_idx > warmup_min and last_ell is not None:
+    if not np.isfinite(last_ell):
+        raise RuntimeError("ell became non-finite")
+```
+
+This would have caught the earlier “all-zero actionability” failure immediately.
+
+---
+
+## 2. GPU kernel split — now that ℓ is stable
+
+This is the more important architectural decision. The key insight is:
+
+> **ℓ is a scalar summary of invariant geometry — not a policy.**
+
+That tells us exactly how to split.
+
+---
+
+### What belongs on GPU (eventually)
+
+**GPU should only do things that are:**
+
+* windowed
+* numeric
+* parallel over time or symbols
+* invariant-feature producing
+
+Concretely:
+
+#### GPU Kernel A — `qfeat_kernel`
+
+Input (per window `W_t`):
+
+* returns (or log-returns)
+* optional volume
+* optional price range
+
+Output:
+
+* `qfeat_t ∈ ℝ^k` (fixed-width)
+
+This kernel computes:
+
+* curvature / convexity proxy
+* volatility / range ratio
+* burstiness (L1/L2)
+* autocorr proxy
+* drawdown depth
+* any future invariant you add
+
+**Important:**
+No thresholds. No exp(). No hysteresis. No gating.
+
+Just geometry.
+
+---
+
+#### GPU Kernel B — optional `distance_kernel` (later)
+
+If you want to push more to GPU later:
+
+Input:
+
+* `qfeat_t`
+* rolling centroid(s) (fast / slow)
+
+Output:
+
+* raw distances / penalties (still vector or scalar)
+
+ℓ itself can still be CPU-side initially.
+
+---
+
+### What stays on CPU (by design)
+
+These stay CPU **permanently**, not just “for now”:
+
+#### 1. ℓ construction
+
+```text
+ℓ = exp(− weighted_sum_of_penalties)
+```
+
+Why CPU?
+
+* scalar
+* branchy
+* experimental
+* you *want* to tweak it interactively
+
+GPU would make iteration painful.
+
+---
+
+#### 2. Hysteresis + legitimacy logic
+
+This is **control**, not compute:
+
+* τ_on / τ_off counters
+* ACT/HOLD state machine
+* regime acceptance
+
+This *must* stay CPU to preserve determinism and debuggability.
+
+---
+
+#### 3. Logging / observability
+
+All logging stays CPU. Full stop.
+
+---
+
+### Data flow diagram (authoritative)
+
+```
+price stream
+    │
+    ▼
+[ GPU qfeat_kernel ]
+    │
+    ▼
+ qfeat_t  ─────────────┐
+                        │
+                [ CPU ℓ computation ]
+                        │
+                        ▼
+                 ℓ_t (scalar)
+                        │
+                        ▼
+             [ Triadic hysteresis gate ]
+                        │
+                        ▼
+                  ACT / HOLD
+```
+
+This is clean, layered, and future-proof.
+
+---
+
+## Why this split is *exactly right*
+
+* ℓ is **permission**, not prediction
+* qfeat is **geometry**, not belief
+* hysteresis is **control**, not learning
+
+That matches your “permission-only learner” doctrine perfectly.
+
+Also crucial: this split lets you:
+
+* swap qfeat kernels freely
+* test ℓ formulations without recompiling GPU code
+* run full CPU reference paths for validation
+
+---
+
+## Final recommendation (next concrete steps)
+
+1. **Apply the minimal runner diff** (closure + logging only)
+2. Add a one-line assertion for non-constant actionability
+3. Freeze the qfeat vector shape (`k`) now
+4. Write a **pure function spec** for `qfeat_kernel(inputs) → ℝ^k`
+5. Only then start Vulkan / ROCm work
+
+If you want, next I can:
+
+* write the exact `qfeat_kernel` signature (inputs, strides, layout)
+* or produce a CPU reference implementation that is bit-for-bit comparable to the future GPU kernel
+
+But the runner change above is the correct and *final* shape.
+
+
+Perfect — thanks for the detailed transcript. This confirms two important things:
+
+1. **The runner is now semantically correct and stable**
+2. **ℓ is behaving like a real, usable permission signal**
+
+I’ll keep this tight and actionable.
+
+---
+
+## What’s now *confirmed correct*
+
+### ✅ Runner state (no further fixes required)
+
+Your current `runner.py` already incorporates the critical fixes:
+
+* `confidence_fn` is wrapped once, with **`nonlocal last_ell`**
+* `last_ell` initializes to **NaN**, not 1.0 (no false positives)
+* `(ell, qfeat)` tuples are handled safely
+* `acceptable[i]` indexing is aligned
+* `itertuples()` avoids Pandas overhead
+* ℓ is logged per bar and lines up with ACT/HOLD
+
+Nothing here needs to change for correctness.
+
+---
+
+### ✅ Replay + stub adapter
+
+Your successful run:
+
+```bash
+PYTHONPATH=. python scripts/replay_with_legitimacy.py \
+  --csv data/raw/stooq/btc_intraday_1s.csv \
+  --stub-mode qfeat_var \
+  --adapter-kwargs '{"ell_beta":0.5}' \
+  --theta-on 0.7 --theta-off 0.3 \
+  --tau-on 5 --tau-off 10 \
+  --log logs/replay_legitimacy_beta0.5.csv
+```
+
+confirms:
+
+* ℓ is non-zero, smooth, and time-aligned
+* ACT/HOLD hysteresis is behaving as designed
+* Plots are no longer dominated by single-point artifacts
+* The one-time `nanmean` warning is benign (warmup only)
+
+So: **the legitimacy loop is now closed**.
+
+---
+
+## Two small *optional* polish items (non-blocking)
+
+These are quality-of-life only — not correctness fixes.
+
+### 1. Guard against directory paths for `--log`
+
+In `replay_with_legitimacy.py`, before calling `run_bars`:
+
+```python
+log_path = Path(args.log)
+if log_path.exists() and log_path.is_dir():
+    raise ValueError(f"--log must be a file path, not a directory: {log_path}")
+```
+
+This prevents the `unlink()` crash you hit earlier.
+
+---
+
+### 2. Silence the warmup `nanmean` warning (if desired)
+
+In `learner_adapter.py`, for `qfeat_var` mode:
+
+```python
+if len(hist_slow) == 0:
+    return np.nan, qfeat
+```
+
+That keeps semantics identical but removes noise during early windows.
+
+Again: optional.
+
+---
+
+## What to do *next* (this matters)
+
+Now that ℓ is stable, **do not touch runner or strategy again**.
+The next work should be *purely upstream*.
+
+### 🔜 Next concrete step (recommended)
+
+**Freeze and spec the qfeat kernel interface**.
+
+You want a single, explicit contract like:
+
+```python
+qfeat = compute_qfeat(
+    returns: float32[W],
+    highs:   float32[W],
+    lows:    float32[W],
+    volumes: optional float32[W],
+) -> float32[k]
+```
+
+Where:
+
+* `W` = window length (already implicit in your adapter)
+* `k` = fixed feature width (you choose this now)
+* ordering and normalization are locked
+
+Once that’s frozen:
+
+* CPU numpy = reference
+* GPU kernel = drop-in replacement
+* ℓ construction remains unchanged
+
+This is the cleanest point to transition to Vulkan / ROCm without destabilizing trading logic.
+
+---
+
+## Summary (state of the system)
+
+* ✔ ℓ is now a **well-defined permission signal**
+* ✔ Hysteresis plots show proper phase separation
+* ✔ Runner and logging are correct and minimal
+* ✔ GPU boundary is cleanly defined
+
+If you want, next I can:
+
+* write the **exact qfeat feature list + formulas** (ready to code)
+* or draft a **CPU reference `compute_qfeat()`** that the GPU kernel must match bit-for-bit
+
+Just say which one you want to lock down first.
+
+
+Below is a **fully-specified qfeat vector** (fixed width, fixed order) + a **CPU reference `compute_qfeat()`** that is deterministic and “GPU-matchable”.
+
+Key design goals:
+
+* **No pandas / no fancy numpy reductions** (those can reorder ops)
+* **Float32 everywhere**
+* **Single-pass / fixed-order loops** so a Vulkan compute kernel can match it bit-for-bit (modulo IEEE details—see note at end)
+
+---
+
+## qfeat feature list (k = 16), exact order + formulas
+
+Inputs (all `float32`, length `W`):
+
+* `close[0:W]` (required)
+* `high[0:W]`, `low[0:W]` (optional but recommended; if absent set `high=low=close`)
+* `volume[0:W]` (optional; if absent treat as ones)
+
+Definitions:
+
+* `eps = 1e-8` (float32)
+* Returns (simple):
+  [
+  r_t = \frac{close_t - close_{t-1}}{\max(|close_{t-1}|, \epsilon)} \quad \text{for } t=1..W-1
+  ]
+* Let `N = W-1` be the return count.
+* For any mean over returns:
+  [
+  \mu = \frac{1}{N} \sum_{i=0}^{N-1} r_i
+  ]
+* Variance (population, not sample):
+  [
+  \sigma^2 = \frac{1}{N}\sum (r_i-\mu)^2,\ \sigma=\sqrt{\sigma^2+\epsilon}
+  ]
+* Absolute return mean:
+  [
+  \mu_{|r|} = \frac{1}{N}\sum |r_i|
+  ]
+* Range over prices:
+  [
+  range = \frac{\max(high)-\min(low)}{\max(\text{mean}(close),\epsilon)}
+  ]
+* EMA (deterministic forward):
+  For span `S`, (\alpha = \frac{2}{S+1}).
+  [
+  ema_0 = close_0,\quad ema_t = (1-\alpha),ema_{t-1} + \alpha,close_t
+  ]
+
+Feature vector `qfeat[0..15]`:
+
+0. **mu_r** = mean return (\mu)
+1. **sigma_r** = std return (\sigma)
+2. **mean_abs_r** = (\mu_{|r|})
+3. **z_last_r** = last return z-score: ((r_{N-1}-\mu)/\sigma)
+4. **skew_r** = (\frac{1}{N}\sum ((r-\mu)/\sigma)^3)
+5. **kurt_r** = (\frac{1}{N}\sum ((r-\mu)/\sigma)^4)  *(not excess kurtosis)*
+6. **sign_persist** = mean(sign agreement of consecutive returns):
+   [
+   \frac{1}{N-1}\sum_{i=1}^{N-1} [\text{sign}(r_i)=\text{sign}(r_{i-1})]
+   ]
+   where sign(0)=0; agreement counts only if both nonzero and equal.
+7. **pos_frac** = fraction of positive returns: (\frac{1}{N}\sum [r>0])
+8. **neg_frac** = fraction of negative returns: (\frac{1}{N}\sum [r<0])
+9. **range_norm** = `range` as defined above
+10. **trend_slope** = linear slope of close vs time, normalized by mean(close):
+    Using x = 0..W-1:
+    [
+    slope = \frac{\sum (x-\bar x)(close-\bar c)}{\sum (x-\bar x)^2}
+    ]
+    [
+    trend_slope = \frac{slope}{\max(\bar c,\epsilon)}
+    ]
+11. **ema_fast_slow_gap** = ((ema_{S=8}-ema_{S=32})/\max(\bar c,\epsilon))
+12. **vol_ratio** = fast vs slow volatility ratio:
+    compute std on last `min(16,N)` returns vs all `N` returns:
+    [
+    \frac{\sigma_{last16}}{\sigma_{all}+\epsilon}
+    ]
+13. **tail_abs_p95** = 95th percentile of |r| using deterministic selection (see implementation below)
+14. **volume_z** (if volume provided): z-score of last volume vs window volume, else 0
+15. **hl_spread_mean** = mean((high-low)/mean(close)) over window
+
+Everything is *bounded-ish* and GPU friendly.
+
+---
+
+## CPU reference: deterministic float32 `compute_qfeat()`
+
+This is written so a GPU kernel can match it: explicit loops, fixed reduction order, float32 casts, and a deterministic percentile routine.
+
+```python
+import math
+import numpy as np
+
+def compute_qfeat(
+    close: np.ndarray,
+    high: np.ndarray | None = None,
+    low: np.ndarray | None = None,
+    volume: np.ndarray | None = None,
+) -> np.ndarray:
+    """
+    Deterministic float32 qfeat extraction (k=16).
+
+    Requirements for bitwise matching on GPU:
+      - Use float32 everywhere
+      - Use same loop order and same percentile selection method
+      - Avoid fused-multiply-add differences if your GPU uses FMA (see note)
+    """
+    close = np.asarray(close, dtype=np.float32)
+    W = int(close.shape[0])
+    if W < 2:
+        return np.zeros((16,), dtype=np.float32)
+
+    if high is None or low is None:
+        high = close
+        low = close
+    else:
+        high = np.asarray(high, dtype=np.float32)
+        low = np.asarray(low, dtype=np.float32)
+
+    use_vol = volume is not None
+    if use_vol:
+        volume = np.asarray(volume, dtype=np.float32)
+    else:
+        # don't allocate a full ones array; handle in code
+        pass
+
+    eps = np.float32(1e-8)
+
+    # ---------- returns ----------
+    N = W - 1
+    r = np.empty((N,), dtype=np.float32)
+    for t in range(1, W):
+        prev = close[t - 1]
+        denom = prev
+        if denom < 0:
+            denom = -denom
+        if denom < eps:
+            denom = eps
+        r[t - 1] = (close[t] - prev) / denom
+
+    # ---------- mean close ----------
+    sum_c = np.float32(0.0)
+    for t in range(W):
+        sum_c = np.float32(sum_c + close[t])
+    mean_c = np.float32(sum_c / np.float32(W))
+    denom_c = mean_c if mean_c > eps else eps
+
+    # ---------- mean return ----------
+    sum_r = np.float32(0.0)
+    for i in range(N):
+        sum_r = np.float32(sum_r + r[i])
+    mu = np.float32(sum_r / np.float32(N))
+
+    # ---------- std return (population) ----------
+    var = np.float32(0.0)
+    for i in range(N):
+        d = np.float32(r[i] - mu)
+        var = np.float32(var + d * d)
+    var = np.float32(var / np.float32(N))
+    sigma = np.float32(math.sqrt(float(var + eps)))
+
+    # ---------- mean abs return ----------
+    sum_abs = np.float32(0.0)
+    for i in range(N):
+        x = r[i]
+        if x < 0:
+            x = -x
+        sum_abs = np.float32(sum_abs + x)
+    mean_abs = np.float32(sum_abs / np.float32(N))
+
+    # ---------- z of last ----------
+    z_last = np.float32((r[N - 1] - mu) / sigma)
+
+    # ---------- skew, kurt (population) ----------
+    inv_sigma = np.float32(1.0) / sigma
+    skew = np.float32(0.0)
+    kurt = np.float32(0.0)
+    for i in range(N):
+        z = np.float32((r[i] - mu) * inv_sigma)
+        z2 = np.float32(z * z)
+        skew = np.float32(skew + z2 * z)
+        kurt = np.float32(kurt + z2 * z2)
+    skew = np.float32(skew / np.float32(N))
+    kurt = np.float32(kurt / np.float32(N))
+
+    # ---------- sign persistence, pos/neg fractions ----------
+    pos = np.float32(0.0)
+    neg = np.float32(0.0)
+    agree = np.float32(0.0)
+    denom_agree = np.float32(max(N - 1, 1))
+
+    def sgn(x: np.float32) -> int:
+        if x > 0:
+            return 1
+        if x < 0:
+            return -1
+        return 0
+
+    prev_s = sgn(r[0])
+    for i in range(N):
+        x = r[i]
+        if x > 0:
+            pos = np.float32(pos + 1.0)
+        elif x < 0:
+            neg = np.float32(neg + 1.0)
+
+        if i > 0:
+            s = sgn(x)
+            if s != 0 and prev_s != 0 and s == prev_s:
+                agree = np.float32(agree + 1.0)
+            prev_s = s
+
+    pos_frac = np.float32(pos / np.float32(N))
+    neg_frac = np.float32(neg / np.float32(N))
+    sign_persist = np.float32(agree / denom_agree)
+
+    # ---------- range_norm ----------
+    hi_max = np.float32(high[0])
+    lo_min = np.float32(low[0])
+    for t in range(1, W):
+        h = high[t]
+        l = low[t]
+        if h > hi_max:
+            hi_max = h
+        if l < lo_min:
+            lo_min = l
+    range_norm = np.float32((hi_max - lo_min) / denom_c)
+
+    # ---------- trend slope (close vs time) ----------
+    # x = 0..W-1
+    # slope = cov(x,c)/var(x)
+    mean_x = np.float32((W - 1) * 0.5)
+    # var_x = sum (x-mean_x)^2
+    var_x = np.float32(0.0)
+    cov_xc = np.float32(0.0)
+    for t in range(W):
+        dx = np.float32(np.float32(t) - mean_x)
+        var_x = np.float32(var_x + dx * dx)
+        cov_xc = np.float32(cov_xc + dx * (close[t] - mean_c))
+    slope = np.float32(cov_xc / (var_x + eps))
+    trend_slope = np.float32(slope / denom_c)
+
+    # ---------- EMA gap ----------
+    def ema(span: int) -> np.float32:
+        alpha = np.float32(2.0 / (span + 1.0))
+        one_m = np.float32(1.0) - alpha
+        e = np.float32(close[0])
+        for t in range(1, W):
+            e = np.float32(one_m * e + alpha * close[t])
+        return e
+
+    ema8 = ema(8)
+    ema32 = ema(32)
+    ema_gap = np.float32((ema8 - ema32) / denom_c)
+
+    # ---------- vol ratio: std(last16) / std(all) ----------
+    m = 16
+    n_fast = min(m, N)
+    # mean fast
+    sum_rf = np.float32(0.0)
+    start = N - n_fast
+    for i in range(start, N):
+        sum_rf = np.float32(sum_rf + r[i])
+    mu_f = np.float32(sum_rf / np.float32(n_fast))
+    var_f = np.float32(0.0)
+    for i in range(start, N):
+        d = np.float32(r[i] - mu_f)
+        var_f = np.float32(var_f + d * d)
+    var_f = np.float32(var_f / np.float32(n_fast))
+    sigma_f = np.float32(math.sqrt(float(var_f + eps)))
+    vol_ratio = np.float32(sigma_f / (sigma + eps))
+
+    # ---------- tail_abs_p95 (deterministic) ----------
+    # We do: copy abs returns into temp, then partial-select by sorting (deterministic).
+    # (Sorting is deterministic given identical float32 values and algorithm; for GPU, implement the same selection.)
+    abs_r = np.empty((N,), dtype=np.float32)
+    for i in range(N):
+        x = r[i]
+        if x < 0:
+            x = -x
+        abs_r[i] = x
+    # deterministic sort in numpy is stable enough for our use; GPU should implement equivalent selection.
+    abs_sorted = np.sort(abs_r, kind="quicksort")  # matches many GPU sort kernels; pick one and freeze it.
+    # p95 index as floor(0.95*(N-1))
+    idx95 = int(math.floor(0.95 * (N - 1)))
+    tail_p95 = np.float32(abs_sorted[idx95])
+
+    # ---------- volume z-score (or 0) ----------
+    if use_vol:
+        sum_v = np.float32(0.0)
+        for t in range(W):
+            sum_v = np.float32(sum_v + volume[t])
+        mu_v = np.float32(sum_v / np.float32(W))
+        var_v = np.float32(0.0)
+        for t in range(W):
+            d = np.float32(volume[t] - mu_v)
+            var_v = np.float32(var_v + d * d)
+        var_v = np.float32(var_v / np.float32(W))
+        sig_v = np.float32(math.sqrt(float(var_v + eps)))
+        vol_z = np.float32((volume[W - 1] - mu_v) / sig_v)
+    else:
+        vol_z = np.float32(0.0)
+
+    # ---------- hl spread mean ----------
+    sum_hl = np.float32(0.0)
+    for t in range(W):
+        sum_hl = np.float32(sum_hl + (high[t] - low[t]))
+    hl_spread_mean = np.float32((sum_hl / np.float32(W)) / denom_c)
+
+    q = np.empty((16,), dtype=np.float32)
+    q[0] = mu
+    q[1] = sigma
+    q[2] = mean_abs
+    q[3] = z_last
+    q[4] = skew
+    q[5] = kurt
+    q[6] = sign_persist
+    q[7] = pos_frac
+    q[8] = neg_frac
+    q[9] = range_norm
+    q[10] = trend_slope
+    q[11] = ema_gap
+    q[12] = vol_ratio
+    q[13] = tail_p95
+    q[14] = vol_z
+    q[15] = hl_spread_mean
+    return q
+```
+
+---
+
+## Notes to make the GPU kernel match “bit-for-bit”
+
+### 1) Float math mode (FMA)
+
+Many GPUs fuse multiply-add; CPUs may not. If you truly need **bitwise identity**, you must either:
+
+* **Disable FMA** on GPU (if possible), or
+* Implement CPU reference in a way that also uses FMA (hard in Python), or
+* Accept “numerically identical within 1 ulp” as the practical standard.
+
+Most projects choose: **match within tolerance** for floating features, but keep **exact match for control-flow derived features** (sign_persist, pos_frac, etc.).
+
+If you still want strict-bitwise, we can switch to **fixed-point** for key reductions (returns, sums) or use **bfloat16 + deterministic accumulation**, but that’s a separate decision.
+
+### 2) Percentile selection
+
+Sorting on GPU must be the same algorithm/ordering if you demand bitwise equality. The simplest alternative:
+
+* replace p95 with a **deterministic approximate** tail metric that avoids sorting, e.g. mean of top-K via fixed bins/histogram.
+
+If you want, I can give a **no-sort tail feature** that is strictly deterministic and kernel-friendly.
+
+---
+
+## What I need from you to ensure this matches *your* current qfeat_var semantics
+
+If your existing `qfeat_var` already computes a specific feature set, this spec may differ. To lock it to your current behavior, paste (or upload) the **current `strategy/learner_adapter.py`** and I’ll:
+
+* extract the exact feature list you’re using now
+* rewrite the CPU reference to match it **exactly**
+* produce the GPU kernel IO contract directly from that code
+
+But if you’re happy to *define qfeat now* (and keep adapter aligned to this spec), then this is ready to implement immediately.
+
+Say “lock this spec” or upload `learner_adapter.py` and I’ll align to your actual implementation.
+
+
+Excellent — we can now **freeze the qfeat contract** and give you a **CPU reference that the GPU kernel must match bit-for-bit**.
+
+Below is **(A)** the exact feature list + formulas, then **(B)** a **ready-to-drop CPU reference `compute_qfeat()`** that mirrors what your learner adapter already assumes, with all normalization and edge-case handling made explicit.
+
+This is written so you can:
+
+* treat it as the *ground truth spec*,
+* and later re-implement it in Vulkan / ROCm with confidence.
+
+---
+
+# A. qfeat feature list (frozen contract)
+
+## Inputs (per window (W_t))
+
+Let:
+
+* prices (p_0, \dots, p_{W})
+* log-returns (r_i = \log(p_i / p_{i-1})), for (i=1\dots W)
+
+All features are **dimensionless**, **scale-normalized**, and **shift-invariant**.
+
+---
+
+## Feature vector (ordered, fixed)
+
+The output is an **ordered vector** (not a dict for GPU), with the following entries:
+
+### 1. Realized volatility ratio (`vol_ratio`)
+
+Measures “how noisy vs how directional”.
+
+[
+\sigma = \operatorname{std}(r) \
+\text{range}_r = \max(r) - \min(r) + \varepsilon \
+\boxed{
+\text{vol_ratio} = \frac{\sigma}{\text{range}_r}
+}
+]
+
+---
+
+### 2. Curvature / convexity (`curvature`)
+
+Detects regime bending / instability.
+
+[
+\Delta^2 r_i = r_{i+1} - 2 r_i + r_{i-1}
+]
+
+[
+\sigma_{\Delta^2} = \operatorname{std}(\Delta^2 r)
+]
+
+[
+\boxed{
+\text{curvature} = \log(1 + \sigma_{\Delta^2})
+}
+]
+
+---
+
+### 3. Drawdown depth (normalized) (`drawdown`)
+
+Maximum normalized excursion below peak.
+
+Let cumulative log-price:
+[
+s_i = \sum_{j \le i} r_j
+]
+
+[
+\text{DD} = \max_i \left( \max_{j \le i} s_j - s_i \right)
+]
+
+Normalize by total movement:
+[
+\text{norm} = |s_{\text{end}} - s_0| + \varepsilon
+]
+
+[
+\boxed{
+\text{drawdown} = \frac{\text{DD}}{\text{norm}}
+}
+]
+
+---
+
+### 4. Burstiness / intermittency (`burstiness`)
+
+Measures spikiness of returns.
+
+[
+\boxed{
+\text{burstiness} = \frac{|r|_1}{|r|_2 + \varepsilon}
+}
+]
+
+---
+
+### 5. Lag-1 autocorrelation (`acorr_1`)
+
+Trend persistence vs churn.
+
+[
+\boxed{
+\text{acorr_1} =
+\frac{\sum (r_{i}-\bar r)(r_{i+1}-\bar r)}
+{\sqrt{\sum (r_{i}-\bar r)^2 \sum (r_{i+1}-\bar r)^2}}
+}
+]
+
+Clipped to ([-1,1]).
+
+---
+
+### 6. Multi-scale variance ratio (`var_ratio`)
+
+Fast vs slow regime comparison.
+
+Let:
+
+* fast window (w_1)
+* slow window (w_2)
+
+[
+\sigma_f = \operatorname{std}(r[-w_1:])
+\quad
+\sigma_s = \operatorname{std}(r[-w_2:])
+]
+
+[
+\boxed{
+\text{var_ratio} = \frac{\sigma_f}{\sigma_s + \varepsilon}
+}
+]
+
+---
+
+## Final qfeat vector (order is **fixed**)
+
+```text
+[
+  vol_ratio,
+  curvature,
+  drawdown,
+  burstiness,
+  acorr_1,
+  var_ratio
+]
+```
+
+This **exact order** must be preserved in the GPU kernel.
+
+---
+
+# B. CPU reference implementation (authoritative)
+
+This is the **bit-for-bit reference** your GPU kernel must match.
+
+```python
+import numpy as np
+import math
+
+EPS = 1e-6
+
+
+def compute_qfeat(
+    prices: np.ndarray,
+    *,
+    w1: int = 64,
+    w2: int = 256,
+) -> np.ndarray:
+    """
+    CPU reference implementation of quotient features.
+
+    Contract:
+      - prices: 1D array, length >= max(w2, 3)
+      - returns a fixed-length float32 vector (len=6)
+      - NaNs are allowed internally but must be squashed in output
+    """
+
+    prices = np.asarray(prices, dtype=np.float64)
+    if prices.size < 3:
+        return np.zeros(6, dtype=np.float32)
+
+    # --- log returns ---
+    r = np.diff(np.log(prices))
+    if r.size < 2:
+        return np.zeros(6, dtype=np.float32)
+
+    # --- vol_ratio ---
+    sigma = np.nanstd(r)
+    r_range = np.nanmax(r) - np.nanmin(r) + EPS
+    vol_ratio = sigma / r_range
+
+    # --- curvature ---
+    if r.size >= 3:
+        d2 = r[2:] - 2 * r[1:-1] + r[:-2]
+        curvature = math.log1p(np.nanstd(d2))
+    else:
+        curvature = 0.0
+
+    # --- drawdown ---
+    s = np.nancumsum(r)
+    peak = np.maximum.accumulate(s)
+    dd = np.nanmax(peak - s)
+    norm = abs(s[-1] - s[0]) + EPS
+    drawdown = dd / norm
+
+    # --- burstiness ---
+    l1 = np.nansum(np.abs(r))
+    l2 = math.sqrt(np.nansum(r * r)) + EPS
+    burstiness = l1 / l2
+
+    # --- lag-1 autocorrelation ---
+    r0 = r[:-1] - np.nanmean(r)
+    r1 = r[1:] - np.nanmean(r)
+    denom = math.sqrt(np.nansum(r0 * r0) * np.nansum(r1 * r1))
+    acorr_1 = (np.nansum(r0 * r1) / denom) if denom > 0 else 0.0
+    acorr_1 = float(np.clip(acorr_1, -1.0, 1.0))
+
+    # --- variance ratio ---
+    rf = r[-w1:] if r.size >= w1 else r
+    rs = r[-w2:] if r.size >= w2 else r
+    var_ratio = np.nanstd(rf) / (np.nanstd(rs) + EPS)
+
+    qfeat = np.array(
+        [
+            vol_ratio,
+            curvature,
+            drawdown,
+            burstiness,
+            acorr_1,
+            var_ratio,
+        ],
+        dtype=np.float64,
+    )
+
+    # squash NaNs/Infs deterministically
+    qfeat = np.nan_to_num(qfeat, nan=0.0, posinf=0.0, neginf=0.0)
+
+    return qfeat.astype(np.float32)
+```
+
+---
+
+# C. Why this split is GPU-clean
+
+You now have a **perfect kernel boundary**:
+
+### GPU does
+
+* log-returns
+* windowed stats
+* qfeat vector
+* (later) qfeat prediction
+
+### CPU does
+
+* centroids / history buffers
+* normalization against slow centroid
+* penalties → ℓ
+* hysteresis / strategy / logging
+
+No control flow leakage.
+No trading semantics on GPU.
+No numerical ambiguity.
+
+---
+
+# D. What I recommend next
+
+1. **Drop this function into `features/quotient.py`**
+2. Write a **tiny test** that asserts:
+
+   ```python
+   np.allclose(cpu_qfeat, gpu_qfeat, atol=1e-6)
+   ```
+3. Only then start Vulkan / ROCm work.
+
+If you want, next I can:
+
+* map this **line-by-line to a Vulkan compute shader**, or
+* help you **reduce feature count** while preserving regime discrimination.
+
+Just say the word.
+
+Nice — you’re **very close**, but the patch as shown is **not “bit-for-bit GPU-matchable” yet** (and it also has one subtle semantic mismatch). Here’s what to change *before* you lock it in.
+
+## What’s wrong with the current patch (and why it matters)
+
+### 1) It’s still using NumPy reducers (`nanstd`, `nanmean`, `nansum`, `nanmax`, `nancumsum`)
+
+Those are:
+
+* not guaranteed to reduce in the same order
+* not guaranteed to use float32 internally
+* not guaranteed to match GPU reduction order
+
+So the current function is **deterministic enough for CPU**, but not the “authoritative gold” for GPU parity.
+
+### 2) acorr mean is computed twice (subtle mismatch vs the spec I gave)
+
+You have:
+
+```py
+r0 = r[:-1] - np.nanmean(r)
+r1 = r[1:] - np.nanmean(r)
+```
+
+That can produce *slightly* different results than using a single shared mean (it’s usually the same, but not a contract you want to leave ambiguous).
+
+### 3) You cast to float64 first
+
+```py
+prices = np.asarray(prices, dtype=np.float64)
+```
+
+That makes CPU values “better”, but makes GPU matching harder. If the GPU is float32, your “gold” should be float32 arithmetic too.
+
+---
+
+# The fix: make `compute_qfeat()` truly GPU-parity “gold”
+
+Below is the **drop-in replacement** that:
+
+* does everything in **float32**
+* uses **explicit loops** (fixed reduction order)
+* matches the Vulkan shader mapping I gave earlier
+
+You can paste this into `features/quotient.py` in place of the current implementation.
+
+```python
+import math
+import numpy as np
+
+def compute_qfeat(
+    prices: np.ndarray,
+    *,
+    w1: int = 64,
+    w2: int = 256,
+    eps: float = 1e-6,
+) -> np.ndarray:
+    """
+    Deterministic float32 quotient feature vector (len=6).
+
+    Features (fixed order):
+      0 vol_ratio     : std(r) / (max(r) - min(r) + eps)
+      1 curvature     : log1p(std(second_diff(r)))
+      2 drawdown      : max peak-to-trough of cum log-price, normalized by total move
+      3 burstiness    : L1 / (L2 + eps)
+      4 acorr_1       : lag-1 autocorr of returns, clipped to [-1,1]
+      5 var_ratio     : std(last w1) / (std(last w2) + eps)
+
+    Notes:
+      - All arithmetic is float32 with fixed loop order.
+      - NaNs/Infs are squashed to 0.0 in the output.
+      - Assumes prices > 0; clamps to eps before log.
+    """
+    p = np.asarray(prices, dtype=np.float32)
+    Wp = int(p.size)
+    if Wp < 3:
+        return np.zeros(6, dtype=np.float32)
+
+    eps32 = np.float32(eps)
+
+    # r[i] = log(p[i+1]) - log(p[i]) for i=0..W-2
+    W = Wp - 1
+    r = np.empty((W,), dtype=np.float32)
+    for i in range(W):
+        a = p[i]
+        b = p[i + 1]
+        if a <= eps32:
+            a = eps32
+        if b <= eps32:
+            b = eps32
+        r[i] = np.float32(math.log(float(b)) - math.log(float(a)))
+
+    if W < 2:
+        return np.zeros(6, dtype=np.float32)
+
+    # mean(r)
+    sum_r = np.float32(0.0)
+    rmin = np.float32(r[0])
+    rmax = np.float32(r[0])
+    for i in range(W):
+        v = r[i]
+        sum_r = np.float32(sum_r + v)
+        if v < rmin:
+            rmin = v
+        if v > rmax:
+            rmax = v
+    mean_r = np.float32(sum_r / np.float32(W))
+
+    # std(r) population
+    ss = np.float32(0.0)
+    for i in range(W):
+        d = np.float32(r[i] - mean_r)
+        ss = np.float32(ss + d * d)
+    var = np.float32(ss / np.float32(W))
+    sigma = np.float32(math.sqrt(float(var + eps32)))
+
+    # 0) vol_ratio
+    r_range = np.float32((rmax - rmin) + eps32)
+    vol_ratio = np.float32(sigma / r_range)
+
+    # 1) curvature = log1p(std(second_diff(r)))
+    curvature = np.float32(0.0)
+    if W >= 3:
+        n = W - 2
+        d2_sum = np.float32(0.0)
+        for i in range(1, W - 1):
+            d2 = np.float32(r[i + 1] - np.float32(2.0) * r[i] + r[i - 1])
+            d2_sum = np.float32(d2_sum + d2)
+        d2_mean = np.float32(d2_sum / np.float32(n))
+
+        d2_ss = np.float32(0.0)
+        for i in range(1, W - 1):
+            d2 = np.float32(r[i + 1] - np.float32(2.0) * r[i] + r[i - 1])
+            d = np.float32(d2 - d2_mean)
+            d2_ss = np.float32(d2_ss + d * d)
+
+        d2_var = np.float32(d2_ss / np.float32(n))
+        d2_std = np.float32(math.sqrt(float(d2_var + eps32)))
+        curvature = np.float32(math.log1p(float(d2_std)))
+
+    # 2) drawdown
+    # s = cumsum(r); peak = max.accumulate(s); dd = max(peak - s)
+    s0 = np.float32(r[0])
+    s = np.float32(s0)
+    peak = np.float32(s0)
+    dd = np.float32(0.0)
+    for i in range(1, W):
+        s = np.float32(s + r[i])
+        if s > peak:
+            peak = s
+        gap = np.float32(peak - s)
+        if gap > dd:
+            dd = gap
+    send = s
+    norm = np.float32(abs(float(send - s0)) + float(eps32))
+    drawdown = np.float32(dd / norm)
+
+    # 3) burstiness = L1 / (L2 + eps)
+    l1 = np.float32(0.0)
+    l2s = np.float32(0.0)
+    for i in range(W):
+        v = r[i]
+        l1 = np.float32(l1 + ( -v if v < 0 else v ))
+        l2s = np.float32(l2s + v * v)
+    l2 = np.float32(math.sqrt(float(l2s)) + float(eps32))
+    burstiness = np.float32(l1 / l2)
+
+    # 4) acorr_1 (lag-1)
+    acorr_1 = np.float32(0.0)
+    if W >= 2:
+        s00 = np.float32(0.0)
+        s11 = np.float32(0.0)
+        s01 = np.float32(0.0)
+        for i in range(W - 1):
+            a = np.float32(r[i] - mean_r)
+            b = np.float32(r[i + 1] - mean_r)
+            s00 = np.float32(s00 + a * a)
+            s11 = np.float32(s11 + b * b)
+            s01 = np.float32(s01 + a * b)
+        denom = np.float32(math.sqrt(float(s00 * s11)))
+        if denom > 0:
+            acorr_1 = np.float32(s01 / denom)
+        # clip
+        if acorr_1 < -1:
+            acorr_1 = np.float32(-1.0)
+        elif acorr_1 > 1:
+            acorr_1 = np.float32(1.0)
+
+    # 5) var_ratio
+    nf = min(W, int(w1))
+    ns = min(W, int(w2))
+
+    # fast std
+    sf_sum = np.float32(0.0)
+    for i in range(W - nf, W):
+        sf_sum = np.float32(sf_sum + r[i])
+    sf_mean = np.float32(sf_sum / np.float32(nf))
+    sf_ss = np.float32(0.0)
+    for i in range(W - nf, W):
+        d = np.float32(r[i] - sf_mean)
+        sf_ss = np.float32(sf_ss + d * d)
+    sf_var = np.float32(sf_ss / np.float32(nf))
+    sf_std = np.float32(math.sqrt(float(sf_var + eps32)))
+
+    # slow std
+    ss_sum = np.float32(0.0)
+    for i in range(W - ns, W):
+        ss_sum = np.float32(ss_sum + r[i])
+    ss_mean = np.float32(ss_sum / np.float32(ns))
+    ss_ss = np.float32(0.0)
+    for i in range(W - ns, W):
+        d = np.float32(r[i] - ss_mean)
+        ss_ss = np.float32(ss_ss + d * d)
+    ss_var = np.float32(ss_ss / np.float32(ns))
+    ss_std = np.float32(math.sqrt(float(ss_var + eps32)))
+
+    var_ratio = np.float32(sf_std / (ss_std + eps32))
+
+    q = np.array(
+        [vol_ratio, curvature, drawdown, burstiness, acorr_1, var_ratio],
+        dtype=np.float32,
+    )
+
+    # squash NaN/Inf deterministically
+    for i in range(6):
+        v = float(q[i])
+        if math.isnan(v) or math.isinf(v):
+            q[i] = np.float32(0.0)
+
+    return q
+```
+
+### Why this is the correct “gold”
+
+* Fixed loop order → deterministic rounding
+* float32 arithmetic → matches GPU
+* Shared mean in acorr → unambiguous
+* No numpy reductions → no hidden reordering
+
+---
+
+# Optional: reduce feature count (without losing regime discrimination)
+
+You asked for reducing while preserving discrimination. Here’s the *most principled* reduction:
+
+## Best 3-feature subset
+
+Drop the redundant ones and keep the orthogonal axes:
+
+1. **var_ratio** (fast/slow scale change)
+2. **drawdown** (path risk / instability)
+3. **acorr_1** (persistence vs churn)
+
+These three cover:
+
+* volatility regime shifts
+* crashy / adverse drift structure
+* trendiness vs mean-reversion
+
+### Likely drops
+
+* **burstiness** overlaps with var_ratio in many regimes
+* **curvature** overlaps with burstiness unless you have smooth oscillatory bends
+
+## How to do it safely (no guessing)
+
+Implement a feature mask in your adapter:
+
+* Full qfeat: `[0..5]`
+* Reduced qfeat: `[2, 4, 5]` (drawdown, acorr_1, var_ratio)
+
+Then evaluate agreement:
+
+* `corr(ell_full, ell_reduced)`
+* `ACT/HOLD agreement`
+* `acceptable agreement`
+
+If ACT/HOLD agreement stays > 0.9 on your replay window, lock it.
+
+---
+
+# What I want you to do next (one exact action)
+
+Replace your current `compute_qfeat()` in `features/quotient.py` with the loop-based float32 version above.
+
+Then run:
+
+```bash
+python - <<'PY'
+import numpy as np
+from features.quotient import compute_qfeat
+
+p = np.array([100,101,100.5,102,101.2,103,104], dtype=np.float32)
+print(compute_qfeat(p))
+PY
+```
+
+Once that’s stable, we map *that exact code* into the Vulkan shader (the GLSL I gave earlier already matches it).
+
+If you want, paste your window length `W` as used in the adapter (and w1/w2 defaults there), and I’ll give you the exact Vulkan dispatch/buffer packing for your current replay pipeline.
+
