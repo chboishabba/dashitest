@@ -25,6 +25,25 @@ layout(std430, binding = 2) readonly buffer VolumeSSBO { float volume[]; }; // o
 layout(std430, binding = 3) writeonly buffer QFeatSSBO { float qfeat[];  };
 layout(std430, binding = 4) buffer DebugSSBO { uint dbg[]; }; // optional
 
+struct WeightsSSBO {
+    float cvar_alpha;
+    float hazard_threshold;
+    float tau_on;
+    float tau_off;
+    float epsilon;
+    uint hazard_veto;
+    uint _pad0;
+    uint _pad1;
+    float score_weights[8];
+    float opt_tenor_weights[5];
+    float opt_mny_weights[5];
+    uint schema_version;
+};
+
+layout(std430, binding = 5) readonly buffer WeightsSSBOBuf {
+    WeightsSSBO weights;
+};
+
 float squash(float x, float nan_squash) {
     if (isnan(x) || isinf(x)) {
         return nan_squash;

@@ -1,0 +1,86 @@
+# ============================
+# Competition / ranking
+# ============================
+competition:
+  ell_gain: 0.8
+  hazard_penalty: 0.7
+  tail_penalty: 1.5
+  carry_gain: 0.6
+  pnl_gain: 0.5
+  score_margin_min: 0.05
+
+# ============================
+# Direction head
+# ============================
+direction:
+  deadzone: 0.0
+  loss: "cross_entropy"
+  class_weights:
+    short: 1.0
+    flat: 0.5
+    long: 1.0
+
+# ============================
+# Instrument head
+# ============================
+instrument:
+  classes: ["spot", "perp", "option"]
+  teacher_mix: 0.5
+  loss: "kl_divergence"
+  heuristics:
+    perp:
+      funding_weight: 1.0
+      basis_weight: 0.5
+    option:
+      iv_penalty: 1.0
+      oi_penalty: 0.5
+      expiry_penalty: 0.3
+
+# ============================
+# Option head
+# ============================
+option:
+  expiry_bins:
+    - [1, 3]
+    - [4, 7]
+    - [8, 21]
+    - [22, 60]
+    - [61, 180]
+  moneyness_bins:
+    - [-inf, -0.20]
+    - [-0.20, -0.05]
+    - [-0.05, 0.05]
+    - [0.05, 0.20]
+    - [0.20, inf]
+  loss: "kl_divergence"
+  temperature: 1.0
+
+# ============================
+# Size head
+# ============================
+size:
+  bins: [0.0, 0.5, 1.0, 2.0]
+  max_size: 2.0
+  teacher:
+    ell_exp: 1.0
+    dir_exp: 0.5
+    hazard_exp: 1.0
+    tail_exp: 1.5
+
+# ============================
+# PnL-aware shaping (no grads)
+# ============================
+pnl:
+  reweight_min: 0.5
+  reweight_max: 1.5
+  zscore_clip: 2.0
+
+# ============================
+# Veto
+# ============================
+veto:
+  mode: "cvar"
+  alpha: 0.10
+  min_samples: 50
+  cooldown: 25
+  hazard_threshold: 2.0

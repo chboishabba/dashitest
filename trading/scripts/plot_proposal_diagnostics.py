@@ -169,6 +169,55 @@ def _print_veto_summary(df: pd.DataFrame, alpha: float) -> None:
         print(summary.to_string(index=False, float_format=lambda x: f"{x: .6f}"))
 
 
+def _plot_instrument_by_decile(df: pd.DataFrame, col: str, bins: int, title: str, save_path: Path | None) -> None:
+    df = df[np.isfinite(df[col]) & df["instrument_pred"].notna()].copy()
+    if df.empty:
+        return
+    df["decile"] = pd.qcut(df[col], bins, duplicates="drop")
+    counts = df.groupby(["decile", "instrument_pred"], observed=False).size().unstack(fill_value=0)
+    centers = [float(x.mid) for x in counts.index]
+    plt.figure(figsize=(7.5, 4.8))
+    bottom = np.zeros(len(centers), dtype=float)
+    for name in counts.columns:
+        vals = counts[name].to_numpy(dtype=float)
+        plt.bar(centers, vals, bottom=bottom, width=0.8 * (centers[1] - centers[0]) if len(centers) > 1 else 0.05, label=name)
+        bottom += vals
+    plt.xlabel(f"{col} decile center")
+    plt.ylabel("count")
+    plt.title(title)
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=200)
+        print(f"Saved {save_path}")
+    plt.show()
+
+
+def _plot_size_by_hazard(df: pd.DataFrame, bins: int, save_path: Path | None) -> None:
+    if "size_pred" not in df.columns or "hazard" not in df.columns:
+        return
+    df = df[np.isfinite(df["hazard"])].copy()
+    if df.empty:
+        return
+    size_map = {"0": 0.0, "0.5": 0.5, "1": 1.0, "2": 2.0}
+    df["size_val"] = df["size_pred"].map(size_map).fillna(0.0)
+    df["decile"] = pd.qcut(df["hazard"], bins, duplicates="drop")
+    stats = df.groupby("decile", observed=False)["size_val"].mean().reset_index()
+    centers = [float(x.mid) for x in stats["decile"]]
+    plt.figure(figsize=(7.5, 4.8))
+    plt.plot(centers, stats["size_val"], "o-", color="tab:purple")
+    plt.xlabel("hazard decile center")
+    plt.ylabel("mean size_pred")
+    plt.title("Size vs hazard deciles")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=200)
+        print(f"Saved {save_path}")
+    plt.show()
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Diagnostics for proposal logs.")
     ap.add_argument("--log", type=Path, required=True, help="Proposal log CSV.")
@@ -192,17 +241,39 @@ def main() -> None:
         prefix.parent.mkdir(parents=True, exist_ok=True)
 
     mean_path = hit_path = veto_path = tail_path = None
+    iv_path = hazard_path = size_hazard_path = None
     if prefix is not None:
         mean_path = prefix.with_name(f"{prefix.name}_decile_mean.png")
         hit_path = prefix.with_name(f"{prefix.name}_hit_rate.png")
         veto_path = prefix.with_name(f"{prefix.name}_veto_hist.png")
         tail_path = prefix.with_name(f"{prefix.name}_left_tail.png")
+        iv_path = prefix.with_name(f"{prefix.name}_instrument_by_iv.png")
+        hazard_path = prefix.with_name(f"{prefix.name}_instrument_by_hazard.png")
+        size_hazard_path = prefix.with_name(f"{prefix.name}_size_by_hazard.png")
 
     _plot_decile_mean(stats, mean_path)
     _plot_hit_rate(hit, hit_path)
     _plot_veto_hist(df, veto_path)
     _plot_left_tail(df, args.tail_alpha, tail_path)
     _print_veto_summary(df, args.tail_alpha)
+
+    if "instrument_pred" in df.columns and "opt_mark_iv_p50" in df.columns:
+        _plot_instrument_by_decile(
+            df,
+            "opt_mark_iv_p50",
+            args.bins,
+            "Instrument selection by IV decile",
+            iv_path,
+        )
+    if "instrument_pred" in df.columns and "hazard" in df.columns:
+        _plot_instrument_by_decile(
+            df,
+            "hazard",
+            args.bins,
+            "Instrument selection by hazard decile",
+            hazard_path,
+        )
+    _plot_size_by_hazard(df, args.bins, size_hazard_path)
 
 
 if __name__ == "__main__":

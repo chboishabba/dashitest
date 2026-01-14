@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import ctypes
 from dataclasses import dataclass
 from typing import Optional
 
@@ -18,6 +19,44 @@ ELL_BETA_DD = 0.15
 ELL_BETA_BURST = 0.10
 ELL_BETA_ACORR = 0.30
 ELL_BETA_CURV = 0.10
+
+SCHEMA_VERSION = 1
+
+
+class WeightsSSBO(ctypes.Structure):
+    _fields_ = [
+        ("cvar_alpha", ctypes.c_float),
+        ("hazard_threshold", ctypes.c_float),
+        ("tau_on", ctypes.c_float),
+        ("tau_off", ctypes.c_float),
+        ("epsilon", ctypes.c_float),
+        ("hazard_veto", ctypes.c_uint),
+        ("_pad0", ctypes.c_uint),
+        ("_pad1", ctypes.c_uint),
+        ("score_weights", ctypes.c_float * 8),
+        ("opt_tenor_weights", ctypes.c_float * 5),
+        ("opt_mny_weights", ctypes.c_float * 5),
+        ("schema_version", ctypes.c_uint),
+    ]
+
+
+def _default_weights_ssbo(*, eps: float) -> WeightsSSBO:
+    w = WeightsSSBO()
+    w.cvar_alpha = 0.10
+    w.hazard_threshold = 2.0
+    w.tau_on = 0.5
+    w.tau_off = 0.49
+    w.epsilon = float(eps)
+    w.hazard_veto = 1
+    w._pad0 = 0
+    w._pad1 = 0
+    for i in range(8):
+        w.score_weights[i] = 0.0
+    for i in range(5):
+        w.opt_tenor_weights[i] = 0.0
+        w.opt_mny_weights[i] = 0.0
+    w.schema_version = SCHEMA_VERSION
+    return w
 
 
 @dataclass
@@ -301,6 +340,11 @@ def _write_buffer(device, memory, offset: int, data: np.ndarray) -> None:
     vkUnmapMemory(device, memory)
 
 
+def _write_buffer_bytes(device, memory, offset: int, data: bytes) -> None:
+    arr = np.frombuffer(data, dtype=np.uint8)
+    _write_buffer(device, memory, offset, arr)
+
+
 def _read_buffer(device, memory, size: int) -> np.ndarray:
     from vulkan import vkMapMemory, vkUnmapMemory
     from vulkan_compute.compute_buffer import _mapped_buffer
@@ -401,6 +445,9 @@ def _run_vulkan_tape(
     qfeat_size = S * T * 8 * 4
     qfeat_buf, qfeat_mem, _ = _create_buffer(device, physical_device, qfeat_size)
     dbg_buf, dbg_mem, _ = _create_buffer(device, physical_device, 4)
+    weights_buf, weights_mem, weights_size = _create_buffer(
+        device, physical_device, ctypes.sizeof(WeightsSSBO)
+    )
 
     meta0 = np.array([S, T, w1, w2], dtype=np.uint32)
     meta1 = np.array([T, T, flags, 0], dtype=np.uint32)
@@ -414,6 +461,9 @@ def _run_vulkan_tape(
     _write_buffer(device, price_mem, 0, prices)
     if volumes_arr is not None:
         _write_buffer(device, volume_mem, 0, volumes_arr)
+    weights = _default_weights_ssbo(eps=eps)
+    weights_bytes = ctypes.string_at(ctypes.addressof(weights), ctypes.sizeof(weights))
+    _write_buffer_bytes(device, weights_mem, 0, weights_bytes)
 
     shader_code = spv_path.read_bytes()
     shader_info = vk.VkShaderModuleCreateInfo(
@@ -424,7 +474,7 @@ def _run_vulkan_tape(
     shader_module = vk.vkCreateShaderModule(device, shader_info, None)
 
     bindings = []
-    for binding in range(5):
+    for binding in range(6):
         bindings.append(
             vk.VkDescriptorSetLayoutBinding(
                 binding=binding,
@@ -462,7 +512,7 @@ def _run_vulkan_tape(
 
     pool_size = vk.VkDescriptorPoolSize(
         type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-        descriptorCount=5,
+        descriptorCount=6,
     )
     descriptor_pool_info = vk.VkDescriptorPoolCreateInfo(
         sType=vk.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -489,6 +539,7 @@ def _run_vulkan_tape(
         ),
         vk.VkDescriptorBufferInfo(buffer=qfeat_buf, offset=0, range=qfeat_size),
         vk.VkDescriptorBufferInfo(buffer=dbg_buf, offset=0, range=4),
+        vk.VkDescriptorBufferInfo(buffer=weights_buf, offset=0, range=weights_size),
     ]
     writes = []
     for binding, info in enumerate(buffer_infos):
@@ -558,11 +609,13 @@ def _run_vulkan_tape(
     vk.vkDestroyBuffer(device, volume_buf, None)
     vk.vkDestroyBuffer(device, qfeat_buf, None)
     vk.vkDestroyBuffer(device, dbg_buf, None)
+    vk.vkDestroyBuffer(device, weights_buf, None)
     vk.vkFreeMemory(device, params_mem, None)
     vk.vkFreeMemory(device, price_mem, None)
     vk.vkFreeMemory(device, volume_mem, None)
     vk.vkFreeMemory(device, qfeat_mem, None)
     vk.vkFreeMemory(device, dbg_mem, None)
+    vk.vkFreeMemory(device, weights_mem, None)
     vk.vkDestroyCommandPool(device, command_pool, None)
     vk.vkDestroyDevice(device, None)
     vk.vkDestroyInstance(instance, None)

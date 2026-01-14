@@ -7746,3 +7746,4420 @@ That’s enough to start stress-testing invariance across instruments and symbol
    * chosen instrument counts vs hazard deciles
 
 If you want, paste a few column names from `market_meta_features_btc.csv` (especially anything skew-ish), and I’ll write the exact formulas matching your current schema.
+
+
+Perfect — that schema is *exactly* enough. Below is a **concrete, implementable sketch** that plugs straight into what you already have, using only those columns.
+
+I’ll keep this at the level where you can drop it into `train_instrument_head.py` / `run_proposals.py` without refactors.
+
+---
+
+## 1️⃣ Instrument head loss (finalized, concrete)
+
+### Outputs
+
+From the instrument head, at each timestep (t):
+
+```text
+p_inst = softmax([logit_spot, logit_perp, logit_option])
+```
+
+Inputs:
+
+```text
+x = [qfeat, ell, direction_conf, market_meta_features]
+```
+
+### Teacher distribution q(inst | x)
+
+We **do not** use realized PnL. We use *regime desirability* + *known tail risk*.
+
+Final loss:
+[
+\mathcal{L}*{inst} =
+\underbrace{\mathrm{KL}(q*{teacher};|;p_{inst})}_{\text{regime imitation}}
+
+* \lambda_{tail},\underbrace{\sum_i p_i \cdot \mathrm{TailPenalty}*i}*{\text{risk shaping}}
+* \lambda_H,\underbrace{H(p_{inst})}_{\text{anti-collapse}}
+  ]
+
+Where:
+
+* `TailPenalty_i = max(0, -CVaR_i - ε)`
+* CVaR is read from your rolling bucket tables (already implemented)
+
+No feedback loop. Fully offline.
+
+---
+
+## 2️⃣ Option vs Perp vs Spot heuristics (using your exact columns)
+
+We build **scores**, then softmax → `q_teacher`.
+
+### Derived signals (explicit formulas)
+
+```python
+# volatility regime
+IV = opt_mark_iv_p50
+IV_z = zscore(IV)
+
+# convexity demand / instability
+haz = qfeat_hazard           # already computed
+haz_z = zscore(haz)
+
+# funding / carry
+fund = premium_funding_rate
+fund_abs_z = zscore(abs(fund))
+
+# basis / dislocation
+basis = premium_mark_price - premium_index_price
+basis_abs_z = zscore(abs(basis))
+
+# options market activity
+opt_oi_z = zscore(opt_open_interest_sum)
+opt_vol_z = zscore(opt_volume_sum)
+
+# structure of options universe
+opt_put_call_imbalance = (opt_put_count - opt_call_count) / max(opt_count, 1)
+
+# legitimacy
+leg = ell - tau_on
+```
+
+---
+
+### 🟣 Option score (convexity regime)
+
+Options should win when **volatility, hazard, or structural stress** is high.
+
+```python
+S_opt =
+  + 1.4 * IV_z
+  + 1.0 * haz_z
+  + 0.6 * fund_abs_z
+  + 0.6 * basis_abs_z
+  + 0.5 * opt_oi_z
+  + 0.3 * opt_vol_z
+  + 0.4 * opt_put_call_imbalance
+  + 0.5 * leg
+```
+
+Interpretation:
+
+* IV + hazard → convexity pays
+* funding/basis instability → perps dangerous
+* OI/volume → options market is “live”
+* leg ensures we don’t buy convexity in junk regimes
+
+---
+
+### 🔵 Perp score (linear trend regime)
+
+Perps should win when **direction is stable and cheap to hold**.
+
+```python
+carry = -fund * direction   # positive if we get paid
+
+S_perp =
+  + 1.2 * direction_conf
+  + 0.8 * zscore(carry)
+  + 0.6 * zscore(oi_sum_open_interest_value)
+  - 1.0 * IV_z
+  - 0.8 * haz_z
+  + 0.4 * leg
+```
+
+Interpretation:
+
+* strong direction confidence
+* positive carry
+* growing participation
+* explicitly *penalize* high IV and hazard
+
+---
+
+### 🟢 Spot score (baseline / safety valve)
+
+Spot wins when derivatives look toxic or noisy.
+
+```python
+S_spot =
+  + 0.3                      # base prior
+  - 0.8 * fund_abs_z
+  - 0.8 * basis_abs_z
+  - 0.6 * haz_z
+```
+
+Spot is the “do nothing fancy” fallback.
+
+---
+
+### Teacher distribution
+
+```python
+q_teacher = softmax([S_spot, S_perp, S_opt] / T)
+```
+
+Use:
+
+* `T = 1.0` initially
+* decay to `T ≈ 0.5` later to sharpen
+
+---
+
+## 3️⃣ Proposal competition / ranking layer (clean + extensible)
+
+At each timestep (t), generate candidates:
+
+```text
+C_t = {
+  (dir ∈ {-1,+1},
+   inst ∈ {spot, perp, option},
+   size ∈ {small, medium})
+}
+```
+
+### Candidate score (deterministic v0)
+
+This is what you should implement **now**:
+
+```python
+score =
+  + log(p_dir)
+  + log(p_inst[inst])
+  + log(p_size[size])
+  + 0.8 * (ell - tau_on)
+  - 0.7 * hazard
+  + 0.6 * carry(inst, dir)
+  - 1.5 * tail_penalty(inst, dir, ell_bin)
+```
+
+Where:
+
+* `carry(spot)=0`
+* `carry(perp)= -fund * dir`
+* `carry(option)=0` (premium already embedded in option choice)
+* `tail_penalty` is exactly your CVaR / hazard veto signal
+
+### Selection logic
+
+```python
+valid = [c for c in C_t if not vetoed(c)]
+
+if not valid:
+    HOLD
+else:
+    choose argmax(score)
+```
+
+### What gets logged (important)
+
+For each timestep:
+
+* best candidate
+* second-best score
+* margin
+* veto reasons per candidate
+* tail stats per candidate
+
+This gives you *explainability* and makes future learning trivial.
+
+---
+
+## 4️⃣ Why this works with your plots
+
+Your diagnostics already show:
+
+* ℓ deciles separate **direction correctness**
+* hazard veto removes left-tail mass
+* high-ℓ regimes still differ in *instrument suitability*
+
+This design:
+
+* lets ℓ gate **whether** to act
+* lets instrument head decide **how** to express risk
+* lets veto shape **where not to go**
+* keeps execution unchanged
+
+---
+
+## 5️⃣ Minimal next patch (recommended order)
+
+**Implement in this order:**
+
+1. Add the **instrument teacher scores** above into `train_instrument_head.py`
+2. Add deterministic **candidate competition scoring** into `run_proposals.py`
+3. Add one diagnostic:
+
+   * instrument choice vs `opt_mark_iv_p50` deciles
+   * instrument choice vs `hazard` deciles
+
+After that, you’ll be in a position to:
+
+* safely introduce *PnL-aware reweighting* later
+* extend to **options selection (strike/expiry)** as a second-stage head
+* or generalize to non-crypto underlyings
+
+If you want, next I can:
+
+* write the exact Python code blocks for the score computation, or
+* design the **option sub-head** (call/put, tenor, moneyness) using the same regime logic.
+### Safely introduce PnL-aware reweighting (without “learning on PnL”)
+
+You can use PnL only as a **post-hoc reliability weight** on *already teacher-labelled* samples, and only through **bucketed, robust stats**. Three safe patterns:
+
+#### A) Importance reweighting on *teacher loss* (recommended v0)
+
+Keep the same supervised targets (direction labels, instrument teacher softmax). Multiply the per-sample loss by a weight (w_t) computed from an **out-of-sample** signed-future-return proxy *for that same candidate* (or from your existing “delta_pnl_signed”).
+
+Example weight (robust, bounded):
+[
+w_t=\mathrm{clip}\Big(1 + k\cdot \tanh(\frac{\mu_{bucket}}{\sigma_{bucket}+\epsilon}),\ w_{min},\ w_{max}\Big)
+]
+Where bucket = (instrument, dir, ℓ-bin, hazard-bin).
+Use **rolling** stats with a **buffer** and **cooldown** like your veto.
+
+Effect: you still train to imitate the teacher, but you upweight regimes where the teacher’s choices historically weren’t awful.
+
+#### B) “Reject option” label smoothing (safer than weights)
+
+If a bucket is consistently bad, don’t change labels—just **soften confidence**:
+
+* raise temperature (T) for that bucket
+* or mix teacher with uniform:
+  [
+  q' = (1-\alpha)q_{teacher} + \alpha,\text{Uniform}
+  ]
+  with (\alpha) increasing when bucket CVaR < (-\epsilon).
+
+#### C) Veto-as-constraint during training
+
+Any sample/candidate that would be vetoed gets **masked** from the loss (or assigned target prob 0). That keeps the model from learning to propose doomed trades.
+
+Key safety rule: **compute bucket stats on a previous window** (walk-forward), never on the same bars you’re training on.
+
+---
+
+### Extend to options selection (strike/expiry) as a second-stage head
+
+Treat “option” as a branch with its own decision tree:
+
+**Stage 1:** choose instrument (z \in {\text{spot, perp, option}}) and direction.
+
+**Stage 2 (only if option):** choose a *contract* (c=(\text{call/put},\ \text{tenor},\ \text{moneyness bucket}))
+
+Because you don’t have per-strike chain snapshots in your CSV yet (only summary aggregates), design the head now to work with **coarse buckets** and upgrade later when you ingest the option chain.
+
+#### Option contract parameterization (coarse, works now)
+
+* `type`: call vs put
+  teacher from `opt_put_call_imbalance` plus direction:
+
+  * if dir=+1 → prefer calls unless put-heavy regime says “hedge”
+  * if dir=-1 → prefer puts
+* `tenor_bucket`: {7d, 14d, 30d, 60d}
+  teacher from hazard + IV:
+
+  * higher hazard → shorter tenor
+  * high IV but stable trend → longer tenor may be better
+    Use your `opt_expiry_days_p50` as anchor.
+* `moneyness_bucket`: {ATM, 25Δ, 10Δ} (proxy)
+  teacher from hazard/IV:
+
+  * high hazard → ATM (gamma)
+  * low hazard but strong conviction → OTM (cheaper, convex bet)
+    Without chain, this is a “desired moneyness” target; execution later maps it to available strikes.
+
+#### Second-stage loss
+
+Same recipe as instrument head: distill from teacher.
+[
+\mathcal{L}_{opt} = \mathrm{CE}(q(type),p(type))+\mathrm{CE}(q(tenor),p(tenor))+\mathrm{CE}(q(mny),p(mny))
+]
+Plus tail penalty by bucket once you have enough samples.
+
+#### When you ingest real chain data
+
+Add an extra “picker”:
+
+* given desired (type, tenor, mny), choose the best contract among available strikes/expiries at (t) by a deterministic score:
+
+  * liquidity proxy (OI/volume if available)
+  * mid price sanity
+  * IV relative to median (avoid egregious)
+  * tail stats bucketed by (tenor,mny,type)
+
+---
+
+### Do we have anything for moderating magnitude (how much it should spend)?
+
+Yes—add a **sizing head** that outputs *risk budget* rather than dollar amount. Keep it proposal-only.
+
+#### Sizing targets (safe, non-PnL)
+
+Pick one of these as the “action” variable:
+
+1. **Notional fraction** bins: `{0, 0.25R, 0.5R, 1.0R}`
+2. **Risk units** (preferred): `{0, 0.5, 1, 2}` where 1 unit = fixed % of equity at a reference volatility
+3. **Leverage cap** bins for perps: `{0x, 1x, 2x, 3x}`
+
+#### Teacher for size (uses hazard/vol + legitimacy)
+
+A simple, sane teacher:
+
+* Define instantaneous risk proxy:
+
+  * `risk = a*vol_ratio + b*curvature + c*burstiness` (your qfeat already has these)
+  * or use `hazard` directly
+* Define confidence proxy:
+
+  * `conf = ell_margin = max(0, ell - tau_on)`
+  * and direction confidence
+
+Then:
+[
+size_score = \frac{conf \cdot dir_conf}{1 + risk}
+]
+Map to bins by thresholds.
+
+#### Loss
+
+[
+\mathcal{L}_{size} = \mathrm{CE}(q(size), p(size))
+]
+Add a hard constraint: if vetoed → target size = 0.
+
+#### Optional: PnL-aware sizing without feedback
+
+Use the same bucketed stats idea, but only to **cap** size:
+
+* maintain per-bucket downside (CVaR)
+* enforce `max_size(bucket)` that shrinks when tail risk is bad
+  This is safer than “learn bigger size when PnL good.”
+
+---
+
+### Minimal next steps (implementation order)
+
+1. Add **size head** with teacher from `(ell, hazard, dir_conf)` and integrate into candidate competition score as `+ log(p_size)` and as a cap.
+2. Add **PnL-aware reweighting** as bounded importance weights on the existing supervised losses (walk-forward).
+3. Add **option second-stage head** using coarse `(type, tenor, mny)` targets from your existing meta summary; later swap to chain-driven picker.
+
+If you tell me whether you prefer size as **risk units** or **notional fraction bins**, I’ll pin the exact bin thresholds and the scoring term to slot into `run_proposals.py` (and it’ll stay GPU-friendly because the heavy features remain qfeat+meta).
+
+
+Here’s a coherent “next formal layer” that keeps your current discipline (proposal-only, no execution changes, no PnL gradients), but lets you (a) choose **instrument**, (b) choose **option contract** when instrument=option, (c) **rank/compete** proposals, and (d) introduce **PnL-aware reweighting safely**.
+
+---
+
+## 1) Instrument-head loss (spot vs perp vs option)
+
+Let the instrument head output logits (z^{(inst)}_t \in \mathbb{R}^3) over ({\text{spot},\text{perp},\text{option}}) given features
+[
+x_t = [qfeat_t,\ \ell_t,\ \text{meta}_t]
+]
+(where meta includes your columns like funding/premium/OI/options stats).
+
+### A. Supervised label: “best instrument by realized utility”
+
+You need a *teacher* to define which instrument would’ve been best **conditional on direction** (and possibly conditional on “allowed” gate). The simplest is to define a per-instrument realized utility proxy over a horizon (H):
+
+* **spot**: (U^{spot}*t = s_t \cdot r*{t\to t+H})
+* **perp**: (U^{perp}*t = s_t \cdot r*{t\to t+H} - \lambda_f \cdot \text{funding_cost}_t)
+* **option**: (U^{opt}*t = \text{option_proxy}(s_t, r*{t\to t+H}, \text{IV}*t, \text{tenor}) - \lambda*{slip})
+
+Where (s_t \in {-1,0,+1}) is the direction decision (or direction label), and (r) is future return. (For now, option_proxy can be very crude; the second-stage head will improve it.)
+
+Then define a **soft teacher distribution**:
+[
+\pi^{(inst)}_t = \text{softmax}\left(\frac{U^{spot}_t, U^{perp}_t, U^{opt}_t}{T}\right)
+]
+
+### B. Loss: distillation + entropy regularization + regime gating
+
+Use KL distillation (stable and doesn’t require hard heuristics):
+[
+\mathcal{L}_{inst} = \sum_t w_t \cdot \text{KL}\Big(\pi^{(inst)}_t\ |\ \text{softmax}(z^{(inst)}_t)\Big)
+]
+Add:
+
+* **gating**: only apply this loss when (\ell_t) is “active enough” (or use a weight that ramps with (\ell_t)’s margin over (\tau_{on})).
+* **calibration**: optionally add entropy penalty to avoid overconfident collapse:
+  [
+  \mathcal{L} \leftarrow \mathcal{L} + \beta \sum_t H(\text{softmax}(z_t))
+  ]
+
+This gives you a clean instrument head that learns from realized outcomes but is still “teacher-shaped”.
+
+---
+
+## 2) Option vs perp regime heuristics (lightweight, interpretable, *and* usable as a teacher prior)
+
+Even if you distill from utility, you still want **interpretable heuristics** that:
+
+* seed the teacher when data is thin
+* act as veto/guardrails
+* help debugging
+
+Using the columns you already have:
+
+### Perp-friendly regime (carry + trend)
+
+Prefer **perp** when:
+
+* funding is favorable **in the direction** (carry helps)
+* options market isn’t screaming convexity
+
+Heuristic score:
+[
+S_{perp} = a_1 \cdot (s_t \cdot (-\text{premium_funding_rate}_t))\ +\ a_2 \cdot \text{oi_sum_open_interest_value}_t^\uparrow\ -\ a_3 \cdot \text{opt_mark_iv_p50}_t
+]
+Interpretation:
+
+* if funding is positive and you’re long, that’s a drag → (s_t\cdot(-funding)) goes negative
+* high OI/value often correlates with liquid perp conditions (not always, but decent prior)
+* high IV pushes you toward options (convexity)
+
+### Option-friendly regime (high IV + skew + “eventy”)
+
+Prefer **options** when:
+
+* IV is elevated or rising
+* put/call imbalance suggests strong skew / crash convexity demand
+* options OI/volume are non-trivial (market is “alive”)
+
+Heuristic score:
+[
+S_{opt} = b_1 \cdot \text{opt_mark_iv_p50}_t + b_2 \cdot \log(1+\text{opt_volume_sum}_t) + b_3 \cdot \log(1+\text{opt_open_interest_sum}_t) + b_4 \cdot \left|\frac{\text{opt_put_count}-\text{opt_call_count}}{\max(1,\text{opt_count})}\right|
+]
+
+### Spot-friendly regime (simple, low-friction)
+
+Prefer **spot** when:
+
+* funding/IV signals are weak/noisy
+* hazard is high (you want simplest exposure or none)
+* liquidity proxies are low
+
+Heuristic score:
+[
+S_{spot} = c_1 \cdot (1 - \text{meta_quality}_t) - c_2 \cdot \text{opt_mark_iv_p50}_t - c_3 \cdot |\text{premium_funding_rate}_t|
+]
+
+**Use**: these (S)’s can either directly define a teacher softmax, or be mixed with realized-utility teacher when available:
+[
+U^{inst}_t \leftarrow \lambda U^{realized}_t + (1-\lambda)S^{heur}_t
+]
+
+---
+
+## 3) Proposal competition / ranking layer (winner-take-best, margin-aware)
+
+You’ll want multiple candidates at each (t): different instruments, (later) different option contracts, and different size bins. Then you pick the best **proposal** with a single scalar score.
+
+### Candidate definition
+
+A candidate (k) at time (t) is:
+[
+c_{t,k} = (\text{dir}=s,\ \text{instrument}=i,\ \text{contract}=j,\ \text{size}=m)
+]
+
+### Score decomposition (additive, debug-friendly)
+
+A good default:
+[
+\text{Score}(c_{t,k}) =
+\underbrace{\alpha \log p(s\mid x_t)}*{\text{direction confidence}}
++
+\underbrace{\beta \log p(i\mid x_t)}*{\text{instrument head}}
++
+\underbrace{\gamma \log p(j\mid x_t,i=\text{opt})}*{\text{option head (stage 2)}}
++
+\underbrace{\delta \log p(m\mid x_t)}*{\text{size head}}
++
+\underbrace{\eta \cdot \text{EdgeProxy}(c_{t,k})}_{\text{carry / convexity proxy}}
+----------------------------------------------------------------------------------
+
+\underbrace{\lambda \cdot \text{RiskProxy}(c_{t,k})}_{\text{hazard / tail / CVaR}}
+]
+
+Where:
+
+* EdgeProxy can include funding carry for perp (signed), and “convexity desirability” for options (high IV, skew, etc).
+* RiskProxy uses your hazard + CVaR buckets (+ instrument-specific tail stats).
+
+### Margin + veto integration
+
+Pick winner (k^*) and keep a margin:
+[
+k^* = \arg\max_k \text{Score}(c_{t,k}), \quad
+\text{margin} = \text{Score}*{best} - \text{Score}*{2nd}
+]
+
+Then apply vetoes (your existing hazard/CVaR) **after** scoring, so veto is explainable:
+
+* If veto triggers for (k^*), drop it and choose next-best.
+* Log “why vetoed” with (dir, ell_bin, instrument, maybe size) bucket stats.
+
+This gives you an *auction* where heads compete but risk controls remain external and monotone.
+
+---
+
+## 4) Safely introduce PnL-aware reweighting (no feedback loops / leakage)
+
+The failure mode you’re avoiding: the model learning to “game” the weighting by pushing itself into regions that get upweighted, or leaking future returns into the features/labels.
+
+### Safe recipe: walk-forward bucket weights, frozen per block
+
+1. Choose a bucketing key based only on **present-time info**:
+
+   * ((\text{dir}, \ell_bin)) for direction head
+   * ((\text{dir}, \ell_bin, \text{instrument})) for instrument head
+   * later ((\text{dir}, \ell_bin, \text{instrument}, \text{size}))
+
+2. Maintain running estimates **using only past samples**:
+
+   * mean and left-tail (or CVaR) of realized signed future return:
+     [
+     \mu_b,\ \text{CVaR}_{\alpha,b}
+     ]
+
+3. Define a bounded weight multiplier (clipped, slow-moving):
+   [
+   w_b = \text{clip}\left( \exp(\kappa \cdot \text{SharpeProxy}*b),\ w*{min}, w_{max} \right)
+   ]
+   or even simpler:
+   [
+   w_b = \text{clip}(1 + \kappa\cdot \mu_b,\ w_{min}, w_{max})
+   ]
+
+4. **Freeze weights per training chunk** (e.g., per day/week/window) so gradients can’t chase a moving target inside the same block.
+
+5. **Never** compute weights from the same samples you’re currently training on (strict walk-forward).
+
+This is “PnL-aware” but not PnL-optimizing in a RL sense; it’s just *importance weighting* derived from the past.
+
+---
+
+## 5) Extend to options selection: strike/expiry as a second-stage head
+
+Once instrument=option, you need contract parameters. Don’t try to do it with a single giant softmax over all listed instruments; you’ll get churn. Do it in two steps:
+
+### Stage 1: discrete bins (tenor × moneyness × type)
+
+Define bins like:
+
+* **type**: call/put (2)
+* **tenor**: ({7d, 14d, 30d, 60d}) (4)
+* **moneyness**: ({\text{ATM}, 5% \text{OTM}, 10% \text{OTM}, 5% \text{ITM}}) (4)
+
+Total 2×4×4 = 32 classes. Manageable.
+
+Head outputs (p(j \mid x_t)) over these bins.
+
+### Teacher for options bin
+
+Use a proxy payoff under realized (r_{t\to t+H}) with IV penalty:
+[
+U^{optbin}_{t,j} \approx \text{ExpectedPayoffProxy}(r, \text{mny}_j, \text{tenor}*j) - \lambda*{iv}\cdot \text{IV}_t
+]
+Then distill with KL as above.
+
+### Stage 2: map bin → actual listed contract
+
+Given the bin, pick the nearest available listed strike/expiry from the Deribit instruments universe:
+
+* expiry closest to tenor target
+* strike closest to moneyness target relative to underlying
+* optional liquidity tie-break using (OI, volume) if you have it per-contract later
+
+This keeps the model stable even if the listed set changes.
+
+---
+
+## 6) Moderating magnitude (how much to spend / sizing)
+
+Yes — and you can do it **without changing execution** by adding a *size head* that only affects proposal logs.
+
+Two good “v0” sizing schemes:
+
+### A. Risk units (clean + compatible with hazard)
+
+Bins: ({0,\ 0.5R,\ 1R,\ 2R})
+
+Teacher could be based on a simple *edge vs risk* ratio:
+[
+\text{size_score} \sim \frac{\text{EdgeProxy}}{\epsilon + \text{RiskProxy}}
+]
+then quantize into bins.
+
+### B. Notional fraction bins (account-centric)
+
+Bins: ({0,\ 0.25,\ 0.5,\ 1.0}) of some max-notional cap.
+
+**I’d start with Risk units** because it composes nicely with your hazard/CVaR veto: hazard can naturally cap size even when direction/instrument look good.
+
+Loss is again distillation or cross-entropy:
+[
+\mathcal{L}_{size} = \sum_t w_t \cdot \text{CE}(\text{teacher_bin}_t,\ p(m\mid x_t))
+]
+and size participates in proposal ranking via (\log p(m\mid x_t)) plus explicit risk penalty.
+
+---
+
+## Practical “what to implement next” (minimal but powerful)
+
+If you want the smallest patch sequence that unlocks everything:
+
+1. **Competition/ranking layer** (pure proposal-time): implement score composition + margin logging + “drop vetoed, take next-best”.
+2. **Instrument head loss (distill)** using your meta features + a crude utility teacher (even if option teacher is crude).
+3. **Size head (risk units)** as proposal-only, with hazard-capped teacher.
+4. **Option bin head** (tenor×mny×type) behind instrument=option; map bin → actual contract.
+
+That gives you: direction + instrument + size + (option parameters) with a single competition mechanism, and keeps your veto as an external governor.
+
+If you want, I can write the exact formulas for the initial **option payoff proxy** (so it’s consistent and not too gameable) in the same “teacher → KL distill → proposal score” style you’ve been using.
+
+
+Yep — here’s a clean, “patchable” sketch of the **instrument head**, **option vs perp heuristics (teacher)**, and the **proposal competition/ranking layer**, plus how to **safely add PnL-aware reweighting**, extend to **option strike/expiry**, and **moderate magnitude (sizing)**.
+
+---
+
+## 1) Instrument head: what it predicts and the loss
+
+### Output space
+
+Let instrument class be:
+
+* `SPOT`, `PERP`, `OPTION`  (3-way)
+
+Head outputs logits (z \in \mathbb{R}^3), probs (p_\theta = \mathrm{softmax}(z)).
+
+### Teacher (soft targets, not hard rules)
+
+Compute **teacher scores** (s \in \mathbb{R}^3) from meta+hazard+legitimacy margin and convert to a distribution:
+[
+q = \mathrm{softmax}(s / T)
+]
+where (T) is a temperature (e.g. 0.5–2.0) to control “softness”.
+
+### Loss (distillation-first, stable)
+
+Use KL distillation (equivalently cross-entropy on soft labels):
+[
+\mathcal{L}*\text{inst}(\theta)= \mathrm{KL}(q ,|, p*\theta)
+= \sum_k q_k \log\frac{q_k}{p_{\theta,k}}
+]
+Optionally mix with hard labels later (when you have a clean labeling scheme):
+[
+\mathcal{L} = \lambda ,\mathrm{KL}(q|p_\theta) + (1-\lambda),\mathrm{CE}(y, p_\theta)
+]
+but **start with pure KL** until the pipeline stabilizes.
+
+Why this is safe: it avoids “hard threshold artifacts” and lets the head learn smooth boundaries.
+
+---
+
+## 2) Option vs perp regime heuristics (teacher scores)
+
+You already have meta columns that are perfect for a first-pass teacher:
+
+**Premium / funding / basis**
+
+* `premium_funding_rate`
+* `premium_mark_price`, `premium_index_price` (basis proxy = mark-index)
+* `premium_interest_rate`, `premium_estimated_settle`
+
+**Options surface / crowding**
+
+* `opt_mark_iv_mean`, `opt_mark_iv_p50`
+* `opt_open_interest_sum`, `opt_volume_sum`
+* `opt_put_count`, `opt_call_count`, `opt_count`
+* `opt_strike_mean`
+* `opt_expiry_days_mean`, `opt_expiry_days_p50`
+
+**Crowding / leverage proxy**
+
+* `oi_sum_open_interest_value` (+ plain `oi_sum_open_interest`)
+
+**Your internal**
+
+* `hazard` (from qfeat/regime)
+* (\ell) margin: ((\ell - \tau_\text{on})_+)
+
+### Define a few derived features
+
+* **basis**: (b = \text{premium_mark_price} - \text{premium_index_price})
+* **iv**: (iv = \text{opt_mark_iv_p50}) (fallback to mean if p50 is NaN/flat)
+* **put-call imbalance**:
+  [
+  pc = \frac{\text{opt_put_count}-\text{opt_call_count}}{\text{opt_count}+\epsilon}
+  ]
+* **options activity** (log scaled):
+  [
+  oa = \log(1+\text{opt_open_interest_sum}) + \log(1+\text{opt_volume_sum})
+  ]
+* **crowding**:
+  [
+  cr = \log(1+\text{oi_sum_open_interest_value})
+  ]
+
+### Teacher scores (intuitive, monotone, debuggable)
+
+**Perp score** (prefer when carry is attractive and hazard is low):
+[
+s_\text{perp} =
++w_f \cdot \text{carry(dir)} ;+; w_b \cdot \text{basis(dir)} ;+; w_\ell \cdot (\ell-\tau_\text{on})
+;-; w_h \cdot hazard
+;-; w_{iv}\cdot iv
+;-; w_{cr}\cdot cr
+]
+
+Where “carry(dir)” is something like:
+
+* if dir=LONG: carry = (-)funding_rate (you *pay* if funding positive)
+* if dir=SHORT: carry = (+)funding_rate (you *receive* if funding positive)
+
+And “basis(dir)” uses sign similarly (long prefers mark below index less, etc.). Keep it simple: reward carry that benefits your direction.
+
+**Option score** (prefer in high-IV/high-hazard/eventy regimes; also when options market is active):
+[
+s_\text{opt} =
++w_{iv}\cdot iv
++w_{oa}\cdot oa
++w_h \cdot hazard
++w_{pc}\cdot |pc|
+;-; w_\text{decay}\cdot \text{expiry_days_p50_penalty}
+]
+
+(Expiry penalty keeps you away from weird illiquid tails if needed.)
+
+**Spot score** (default baseline; prefer when everything else is “meh”):
+[
+s_\text{spot} =
++w_\ell\cdot(\ell-\tau_\text{on})
+;-; w_h\cdot hazard
+;-; w_{cr}\cdot cr
+]
+and/or simply define it as a constant baseline and let softmax handle it.
+
+**Important practical rule:** multiply *all* aggressive instrument scores by a smooth “permission” term:
+[
+perm = \sigma!\left(\alpha(\ell-\tau_\text{on})\right)
+]
+so when legitimacy is barely on, teacher becomes conservative automatically.
+
+---
+
+## 3) Proposal competition / ranking layer
+
+### Candidate generation
+
+At each time (t), build a small set of candidates, e.g.:
+
+* directions: ({-1,+1}) (or include HOLD as “no proposal”)
+* instruments: {SPOT, PERP, OPTION}
+* sizes: {0, 0.5, 1, 2} risk-units (or your preferred bins)
+* if OPTION: add a few (tenor × moneyness) combos (see §5)
+
+This stays tiny (like 2×3×4 = 24, plus option variants).
+
+### Competition score (log-prob + constraints)
+
+Each candidate (c) has:
+
+* model probs (p_\text{dir}, p_\text{inst}, p_\text{size})
+* veto stats (bucket CVaR, hazard veto etc.)
+* penalties (hazard, tail risk, carry sanity)
+
+A good default scoring functional:
+[
+Score(c)=
+\log p_\text{dir}(d)
++\log p_\text{inst}(i)
++\log p_\text{size}(s)
++\beta_\ell(\ell-\tau_\text{on})
+-\beta_h , hazard
++\beta_{carry},carry(i,d)
+-\beta_{tail},TailPenalty(bucket)
+-\beta_{fees},Cost(i,s)
+]
+
+Pick best = argmax Score among **non-vetoed** candidates.
+
+### What to log (for debugging + future learning)
+
+Log:
+
+* top-1 candidate fields (dir, inst, size, option params)
+* `score_best`, `score_second`, `score_margin = best - second`
+* bucket stats used (bucket_n, bucket_q, bucket_cvar)
+* hazard, ell, carry proxy, tail penalty, fees proxy
+
+Score margin becomes *really useful* later for “confidence gating” and for training the sizing head.
+
+---
+
+## 4) Safely introduce PnL-aware reweighting (without turning it into a PnL-chaser)
+
+You want PnL to *shape learning* but not to create runaway feedback or leak future info.
+
+### The safe pattern: **walk-forward weighting**, clipped, and only for training
+
+For each training example (t), you already can compute a realized signed future return (r_t) for a fixed horizon.
+
+Define a bounded weight:
+[
+w_t = \mathrm{clip}\big(1 + \gamma \cdot \mathrm{rank}(r_t),; w_{\min},; w_{\max}\big)
+]
+or more simply:
+[
+w_t = \mathrm{clip}( \exp(\gamma \cdot \tanh(r_t/\sigma)),; w_{\min},; w_{\max})
+]
+
+Then train heads with weighted loss:
+[
+\mathcal{L} = \frac{\sum_t w_t , \mathcal{L}_t}{\sum_t w_t}
+]
+
+**Safety knobs (strongly recommended):**
+
+* compute weights using only *past* window (rolling / walk-forward), not full dataset
+* clip (w_t) (e.g. [0.5, 2.0])
+* use rank/tanh so single outliers can’t dominate
+* apply only to **examples that pass basic “permission”** (e.g. ell close to/above tau_on), otherwise you teach noise
+
+This gives you “PnL-aware emphasis” without directly optimizing PnL or creating brittle policies.
+
+---
+
+## 5) Extend to options selection: strike/expiry as a second-stage head
+
+Treat options as conditional routing:
+
+### Stage 1
+
+Choose instrument = OPTION.
+
+### Stage 2 (only if OPTION)
+
+Choose a discrete contract bucket:
+
+* expiry bin: {7d, 14d, 30d, 60d} (or from your `opt_expiry_days_*`)
+* moneyness/delta bin: e.g. {ATM, 25Δ, 10Δ} (proxy if you don’t have delta: distance from `opt_strike_mean` vs underlying mean)
+* structure: {call, put} (or tie to direction)
+
+Head outputs:
+[
+p_\theta(\text{expiry}, \text{mny}, \text{side}\mid x)
+]
+
+### Teacher for (expiry, mny)
+
+Use what you already have:
+
+* high hazard / high IV → shorter tenor (less vega bleed uncertainty)
+* lower hazard → longer tenor if you want convexity
+* high put-call imbalance → bias toward the crowded side *only if* you’re fading it; otherwise penalize
+
+A simple teacher score:
+[
+s(\text{tenor}) = a_0 - a_1 \cdot tenor + a_2 \cdot hazard - a_3 \cdot \text{illiquidity}(tenor)
+]
+[
+s(\text{mny}) = b_0 + b_1\cdot hazard - b_2 \cdot \text{premium_cost}(mny, iv)
+]
+
+Loss is again KL distillation for stability.
+
+---
+
+## 6) Moderating magnitude: “how much should it spend?”
+
+Three sane, implementable options.
+
+### A) Discrete size head (recommended first)
+
+Bins like {0, 0.5, 1, 2} risk units.
+
+Teacher signal:
+[
+u_t = \frac{(\ell-\tau_\text{on})_+}{1 + hazard} \times \text{dir_confidence}
+]
+Map (u_t) into bins with soft targets (e.g. sigmoid ramps), then KL distill.
+
+This is the simplest way to keep magnitude bounded.
+
+### B) Risk-budget scaling (continuous but capped)
+
+Compute a raw desired fraction:
+[
+f^* = k \cdot \frac{(\ell-\tau_\text{on})*+}{1+hazard}
+]
+Then cap and quantize:
+[
+f = \mathrm{clip}(f^*, 0, f*{\max}) \rightarrow {0,0.25,0.5,1.0}
+]
+
+### C) “One-trade-at-a-time” exposure governor (execution safety)
+
+Even before fancy sizing: enforce max concurrent exposure and cooldown/hysteresis. This prevents magnitude blowups via frequency rather than size.
+
+---
+
+## What I’d optimize next (given your plots)
+
+Your recent diagnostics look *sample-starved* (the left-tail plots are basically collapsed), so the highest ROI next step is:
+
+**Build the competition layer + log score margins + add the size head (discrete).**
+
+That immediately gives you:
+
+* a clean place to add options selection later
+* stable instrumentation (margin, tail penalties, carry terms)
+* a safe magnitude control knob
+
+If you want, I can also give you a “default weight table” (w_f, w_iv, w_h, etc.) that’s numerically gentle so the teacher can’t dominate early.
+
+
+Yep — here’s a clean, “patchable” sketch of the **instrument head**, **option vs perp heuristics (teacher)**, and the **proposal competition/ranking layer**, plus how to **safely add PnL-aware reweighting**, extend to **option strike/expiry**, and **moderate magnitude (sizing)**.
+
+---
+
+## 1) Instrument head: what it predicts and the loss
+
+### Output space
+
+Let instrument class be:
+
+* `SPOT`, `PERP`, `OPTION`  (3-way)
+
+Head outputs logits (z \in \mathbb{R}^3), probs (p_\theta = \mathrm{softmax}(z)).
+
+### Teacher (soft targets, not hard rules)
+
+Compute **teacher scores** (s \in \mathbb{R}^3) from meta+hazard+legitimacy margin and convert to a distribution:
+[
+q = \mathrm{softmax}(s / T)
+]
+where (T) is a temperature (e.g. 0.5–2.0) to control “softness”.
+
+### Loss (distillation-first, stable)
+
+Use KL distillation (equivalently cross-entropy on soft labels):
+[
+\mathcal{L}*\text{inst}(\theta)= \mathrm{KL}(q ,|, p*\theta)
+= \sum_k q_k \log\frac{q_k}{p_{\theta,k}}
+]
+Optionally mix with hard labels later (when you have a clean labeling scheme):
+[
+\mathcal{L} = \lambda ,\mathrm{KL}(q|p_\theta) + (1-\lambda),\mathrm{CE}(y, p_\theta)
+]
+but **start with pure KL** until the pipeline stabilizes.
+
+Why this is safe: it avoids “hard threshold artifacts” and lets the head learn smooth boundaries.
+
+---
+
+## 2) Option vs perp regime heuristics (teacher scores)
+
+You already have meta columns that are perfect for a first-pass teacher:
+
+**Premium / funding / basis**
+
+* `premium_funding_rate`
+* `premium_mark_price`, `premium_index_price` (basis proxy = mark-index)
+* `premium_interest_rate`, `premium_estimated_settle`
+
+**Options surface / crowding**
+
+* `opt_mark_iv_mean`, `opt_mark_iv_p50`
+* `opt_open_interest_sum`, `opt_volume_sum`
+* `opt_put_count`, `opt_call_count`, `opt_count`
+* `opt_strike_mean`
+* `opt_expiry_days_mean`, `opt_expiry_days_p50`
+
+**Crowding / leverage proxy**
+
+* `oi_sum_open_interest_value` (+ plain `oi_sum_open_interest`)
+
+**Your internal**
+
+* `hazard` (from qfeat/regime)
+* (\ell) margin: ((\ell - \tau_\text{on})_+)
+
+### Define a few derived features
+
+* **basis**: (b = \text{premium_mark_price} - \text{premium_index_price})
+* **iv**: (iv = \text{opt_mark_iv_p50}) (fallback to mean if p50 is NaN/flat)
+* **put-call imbalance**:
+  [
+  pc = \frac{\text{opt_put_count}-\text{opt_call_count}}{\text{opt_count}+\epsilon}
+  ]
+* **options activity** (log scaled):
+  [
+  oa = \log(1+\text{opt_open_interest_sum}) + \log(1+\text{opt_volume_sum})
+  ]
+* **crowding**:
+  [
+  cr = \log(1+\text{oi_sum_open_interest_value})
+  ]
+
+### Teacher scores (intuitive, monotone, debuggable)
+
+**Perp score** (prefer when carry is attractive and hazard is low):
+[
+s_\text{perp} =
++w_f \cdot \text{carry(dir)} ;+; w_b \cdot \text{basis(dir)} ;+; w_\ell \cdot (\ell-\tau_\text{on})
+;-; w_h \cdot hazard
+;-; w_{iv}\cdot iv
+;-; w_{cr}\cdot cr
+]
+
+Where “carry(dir)” is something like:
+
+* if dir=LONG: carry = (-)funding_rate (you *pay* if funding positive)
+* if dir=SHORT: carry = (+)funding_rate (you *receive* if funding positive)
+
+And “basis(dir)” uses sign similarly (long prefers mark below index less, etc.). Keep it simple: reward carry that benefits your direction.
+
+**Option score** (prefer in high-IV/high-hazard/eventy regimes; also when options market is active):
+[
+s_\text{opt} =
++w_{iv}\cdot iv
++w_{oa}\cdot oa
++w_h \cdot hazard
++w_{pc}\cdot |pc|
+;-; w_\text{decay}\cdot \text{expiry_days_p50_penalty}
+]
+
+(Expiry penalty keeps you away from weird illiquid tails if needed.)
+
+**Spot score** (default baseline; prefer when everything else is “meh”):
+[
+s_\text{spot} =
++w_\ell\cdot(\ell-\tau_\text{on})
+;-; w_h\cdot hazard
+;-; w_{cr}\cdot cr
+]
+and/or simply define it as a constant baseline and let softmax handle it.
+
+**Important practical rule:** multiply *all* aggressive instrument scores by a smooth “permission” term:
+[
+perm = \sigma!\left(\alpha(\ell-\tau_\text{on})\right)
+]
+so when legitimacy is barely on, teacher becomes conservative automatically.
+
+---
+
+## 3) Proposal competition / ranking layer
+
+### Candidate generation
+
+At each time (t), build a small set of candidates, e.g.:
+
+* directions: ({-1,+1}) (or include HOLD as “no proposal”)
+* instruments: {SPOT, PERP, OPTION}
+* sizes: {0, 0.5, 1, 2} risk-units (or your preferred bins)
+* if OPTION: add a few (tenor × moneyness) combos (see §5)
+
+This stays tiny (like 2×3×4 = 24, plus option variants).
+
+### Competition score (log-prob + constraints)
+
+Each candidate (c) has:
+
+* model probs (p_\text{dir}, p_\text{inst}, p_\text{size})
+* veto stats (bucket CVaR, hazard veto etc.)
+* penalties (hazard, tail risk, carry sanity)
+
+A good default scoring functional:
+[
+Score(c)=
+\log p_\text{dir}(d)
++\log p_\text{inst}(i)
++\log p_\text{size}(s)
++\beta_\ell(\ell-\tau_\text{on})
+-\beta_h , hazard
++\beta_{carry},carry(i,d)
+-\beta_{tail},TailPenalty(bucket)
+-\beta_{fees},Cost(i,s)
+]
+
+Pick best = argmax Score among **non-vetoed** candidates.
+
+### What to log (for debugging + future learning)
+
+Log:
+
+* top-1 candidate fields (dir, inst, size, option params)
+* `score_best`, `score_second`, `score_margin = best - second`
+* bucket stats used (bucket_n, bucket_q, bucket_cvar)
+* hazard, ell, carry proxy, tail penalty, fees proxy
+
+Score margin becomes *really useful* later for “confidence gating” and for training the sizing head.
+
+---
+
+## 4) Safely introduce PnL-aware reweighting (without turning it into a PnL-chaser)
+
+You want PnL to *shape learning* but not to create runaway feedback or leak future info.
+
+### The safe pattern: **walk-forward weighting**, clipped, and only for training
+
+For each training example (t), you already can compute a realized signed future return (r_t) for a fixed horizon.
+
+Define a bounded weight:
+[
+w_t = \mathrm{clip}\big(1 + \gamma \cdot \mathrm{rank}(r_t),; w_{\min},; w_{\max}\big)
+]
+or more simply:
+[
+w_t = \mathrm{clip}( \exp(\gamma \cdot \tanh(r_t/\sigma)),; w_{\min},; w_{\max})
+]
+
+Then train heads with weighted loss:
+[
+\mathcal{L} = \frac{\sum_t w_t , \mathcal{L}_t}{\sum_t w_t}
+]
+
+**Safety knobs (strongly recommended):**
+
+* compute weights using only *past* window (rolling / walk-forward), not full dataset
+* clip (w_t) (e.g. [0.5, 2.0])
+* use rank/tanh so single outliers can’t dominate
+* apply only to **examples that pass basic “permission”** (e.g. ell close to/above tau_on), otherwise you teach noise
+
+This gives you “PnL-aware emphasis” without directly optimizing PnL or creating brittle policies.
+
+---
+
+## 5) Extend to options selection: strike/expiry as a second-stage head
+
+Treat options as conditional routing:
+
+### Stage 1
+
+Choose instrument = OPTION.
+
+### Stage 2 (only if OPTION)
+
+Choose a discrete contract bucket:
+
+* expiry bin: {7d, 14d, 30d, 60d} (or from your `opt_expiry_days_*`)
+* moneyness/delta bin: e.g. {ATM, 25Δ, 10Δ} (proxy if you don’t have delta: distance from `opt_strike_mean` vs underlying mean)
+* structure: {call, put} (or tie to direction)
+
+Head outputs:
+[
+p_\theta(\text{expiry}, \text{mny}, \text{side}\mid x)
+]
+
+### Teacher for (expiry, mny)
+
+Use what you already have:
+
+* high hazard / high IV → shorter tenor (less vega bleed uncertainty)
+* lower hazard → longer tenor if you want convexity
+* high put-call imbalance → bias toward the crowded side *only if* you’re fading it; otherwise penalize
+
+A simple teacher score:
+[
+s(\text{tenor}) = a_0 - a_1 \cdot tenor + a_2 \cdot hazard - a_3 \cdot \text{illiquidity}(tenor)
+]
+[
+s(\text{mny}) = b_0 + b_1\cdot hazard - b_2 \cdot \text{premium_cost}(mny, iv)
+]
+
+Loss is again KL distillation for stability.
+
+---
+
+## 6) Moderating magnitude: “how much should it spend?”
+
+Three sane, implementable options.
+
+### A) Discrete size head (recommended first)
+
+Bins like {0, 0.5, 1, 2} risk units.
+
+Teacher signal:
+[
+u_t = \frac{(\ell-\tau_\text{on})_+}{1 + hazard} \times \text{dir_confidence}
+]
+Map (u_t) into bins with soft targets (e.g. sigmoid ramps), then KL distill.
+
+This is the simplest way to keep magnitude bounded.
+
+### B) Risk-budget scaling (continuous but capped)
+
+Compute a raw desired fraction:
+[
+f^* = k \cdot \frac{(\ell-\tau_\text{on})*+}{1+hazard}
+]
+Then cap and quantize:
+[
+f = \mathrm{clip}(f^*, 0, f*{\max}) \rightarrow {0,0.25,0.5,1.0}
+]
+
+### C) “One-trade-at-a-time” exposure governor (execution safety)
+
+Even before fancy sizing: enforce max concurrent exposure and cooldown/hysteresis. This prevents magnitude blowups via frequency rather than size.
+
+---
+
+## What I’d optimize next (given your plots)
+
+Your recent diagnostics look *sample-starved* (the left-tail plots are basically collapsed), so the highest ROI next step is:
+
+**Build the competition layer + log score margins + add the size head (discrete).**
+
+That immediately gives you:
+
+* a clean place to add options selection later
+* stable instrumentation (margin, tail penalties, carry terms)
+* a safe magnitude control knob
+
+If you want, I can also give you a “default weight table” (w_f, w_iv, w_h, etc.) that’s numerically gentle so the teacher can’t dominate early.
+
+
+Given what you’ve already implemented and the diagnostics you showed, here’s a **clear recommendation for what to do next and why**, plus exactly what I’d change (and what I would *not* touch).
+
+---
+
+## Short answer (what I’d do next)
+
+**Do 3 → then 2 → skip 1 for now.**
+
+1. **Wire the instrument head *model output* into proposals (instead of teacher scores)** ✅ **next**
+2. **Emit a size-by-hazard decile plot** ✅ **second**
+3. **IV plot fallback** ⏸️ *nice-to-have, not decision-critical yet*
+
+This ordering matches the maturity of the system you now have.
+
+---
+
+## Why this ordering makes sense
+
+### 1️⃣ Wire instrument head model into proposals (highest leverage)
+
+Right now, the *decision surface* is still effectively teacher-driven, even though the head is trained. Until the proposals actually consume:
+
+```
+p_inst_model  (not p_inst_teacher)
+```
+
+you don’t yet know if:
+
+* the head generalizes beyond the teacher
+* it smooths noisy regime boundaries
+* it degrades tail behavior when decoupled from heuristics
+
+**This is the real “graduation step”** from rule-shaped behavior to learned behavior.
+
+**Minimal, safe change**:
+
+* In `run_proposals.py`, replace:
+
+  ```python
+  p_inst = teacher_probs
+  ```
+
+  with:
+
+  ```python
+  p_inst = instrument_head.predict_proba(features)
+  ```
+* Keep *everything else identical* (competition weights, vetoes, size head, hazard penalties).
+
+**Guardrail** (important):
+
+* Log both `p_inst_model` and `p_inst_teacher` for a few runs.
+* Also log `Δscore = score_model - score_teacher` so you can see when the learned head disagrees.
+
+This lets you answer: *“Is the model adding signal, or just copying the teacher?”*
+
+---
+
+### 2️⃣ Size-by-hazard decile plot (validate risk modulation)
+
+Your current plots show:
+
+* ℓ deciles are well-behaved
+* veto is doing its job
+* instrument selection tracks hazard
+
+But you **don’t yet have visual confirmation that size is shrinking as hazard rises**.
+
+A single plot answers that immediately.
+
+**What to emit**
+
+* x-axis: hazard deciles
+* y-axis: mean `size_pred` (and optionally distribution bars)
+* split by instrument (optional but powerful)
+
+This validates that:
+
+* the size head is *actually functioning as a risk governor*
+* hazard is suppressing magnitude even when direction + instrument are confident
+
+If this plot looks wrong, you fix sizing *before* touching anything else.
+
+---
+
+### 3️⃣ IV plot fallback (lower priority)
+
+The IV fallback (`opt_mark_iv_mean` when `p50` is flat) is useful, but:
+
+* it doesn’t change decisions
+* it doesn’t affect tail risk
+* it doesn’t affect learning dynamics
+
+It’s a **diagnostic polish**, not a structural improvement. I’d only do it once the instrument head is live and you want cleaner plots.
+
+---
+
+## What I would **not** change yet
+
+* ❌ Competition weights (they’re behaving sensibly)
+* ❌ Veto logic (it’s demonstrably reducing left-tail exposure)
+* ❌ Teacher formulas (they’re good scaffolding)
+* ❌ Adding more heads (strike/expiry can wait)
+
+You’re at the point where **observability > new mechanisms**.
+
+---
+
+## One optional micro-improvement (very safe)
+
+Add this single scalar to the proposal log:
+
+```
+inst_confidence = p_inst_best - p_inst_second
+```
+
+Why:
+
+* mirrors `score_margin`
+* lets you later condition vetoes or sizing on *instrument certainty*
+* helps debug when the model is unsure but still chosen via competition math
+
+Zero behavior change, high diagnostic value.
+
+---
+
+## Summary decision
+
+If you want a concrete instruction:
+
+> **Next patch:** wire `instrument_head_btc.us.json` into `run_proposals.py`, keep teacher scores logged side-by-side, rerun diagnostics, and add a size-by-hazard decile plot.
+
+Once that’s done, you’ll know whether the system has actually crossed the line from *heuristic-shaped* to *learned-and-governed*.
+
+If you want, I can also:
+
+* give you a one-line toggle (`--use-inst-model`) so you can A/B teacher vs model cleanly, or
+* specify exactly how to freeze teacher weights while letting the model learn incrementally.
+
+Great — the pipeline is now *structurally complete*. What you’re seeing in the plots is exactly what we should expect at this stage, and it tells us very clearly what the **next mathematically safe moves** are.
+
+I’ll answer in three parts:
+
+1. **Why the size head is flat right now (and why that’s OK)**
+2. **How to safely introduce PnL-aware reweighting (without poisoning learning)**
+3. **What to do next: a concrete priority order**
+
+---
+
+## 1. Why size vs hazard is flat (and why this is correct)
+
+The flat `size_pred ≈ 0` across hazard deciles is not a bug — it’s a *feature* of your current design.
+
+Right now:
+
+* Size head is **proposal-only**
+* Teacher is:
+
+  ```
+  size_teacher ∝ (ell_margin × dir_conf) / (1 + hazard)
+  ```
+* Competition penalizes hazard *after* size via:
+
+  ```
+  score -= 0.7 * hazard
+  score -= 1.5 * tail_penalty
+  ```
+
+So the system has already learned:
+
+> “If hazard is non-trivial, don’t express risk at all — let the veto or ranking layer kill it.”
+
+That’s *correct behavior* until we give the size head **independent evidence** that:
+
+* some high-hazard states are still *worth expressing*, but
+* only at *reduced notional*.
+
+Right now it never sees such cases → optimal solution is size = 0.
+
+This is the right place to be.
+
+---
+
+## 2. Safely introducing PnL-aware reweighting (the right way)
+
+The cardinal rule you’ve obeyed so far — and must continue to obey — is:
+
+> **PnL may shape teachers and ranking, but must never appear as a gradient signal.**
+
+Here is the *safe* construction.
+
+---
+
+### 2.1 PnL-aware reweighting (NOT learning)
+
+You already have everything you need.
+
+Define a **proposal reweighting scalar**:
+
+```python
+w_pnl = clamp(
+    sigmoid( zscore(mean_future_pnl | bucket) ),
+    w_min,
+    w_max
+)
+```
+
+Use it **only** in these places:
+
+#### A. Competition score (already partly done)
+
+```text
+score += β_pnl * w_pnl
+```
+
+#### B. Size teacher scaling
+
+```text
+size_teacher *= w_pnl
+```
+
+**Never**:
+
+* feed `w_pnl` into a model input
+* backprop through PnL
+* condition labels on realized PnL directly
+
+This keeps learning *structural*, not reflexive.
+
+---
+
+### 2.2 Why this is safe
+
+* PnL only adjusts *how much we trust* a proposal
+* Direction, instrument, and size heads still learn:
+
+  * separable
+  * stationary
+  * regime-conditioned objectives
+
+This preserves your “permissioned execution” architecture.
+
+---
+
+## 3. Options selection (strike / expiry) — second-stage head
+
+You are now ready for this, but **only as a conditional head**.
+
+### 3.1 Architecture (don’t flatten!)
+
+```text
+Direction head
+   ↓
+Instrument head (spot / perp / option)
+   ↓
+IF option:
+    Option head:
+        - expiry bucket
+        - moneyness bucket
+```
+
+Do **not** train strike/expiry unless `instrument == option`.
+
+---
+
+### 3.2 Labels (safe, proxy-based)
+
+You already have excellent meta-features:
+
+* `opt_expiry_days_p50`
+* `opt_mark_iv_mean`
+* `opt_open_interest_sum`
+* realized future return distribution
+
+Define:
+
+```text
+expiry_teacher = argmax over expiry bins of:
+    expected |Δprice| / sqrt(time)
+    − IV_penalty
+    − OI_sparsity_penalty
+```
+
+```text
+moneyness_teacher = argmax over bins of:
+    delta_exposure × expected move
+    − IV × gamma risk
+```
+
+Again:
+
+* teacher only
+* no gradients from PnL
+* distillation loss only
+
+---
+
+## 4. Do we have anything for moderating *magnitude*?
+
+Yes — and you already built the right hook.
+
+Your **size head** is the magnitude moderator.
+
+But it needs one more ingredient.
+
+---
+
+### 4.1 What size *should* represent (conceptually)
+
+Size should encode:
+
+> “How much of the system’s **risk budget** this proposal deserves *relative to other proposals right now*.”
+
+Not absolute leverage.
+
+---
+
+### 4.2 Final size teacher (recommended)
+
+Replace the current teacher with:
+
+```text
+size_teacher =
+    clip(
+        (ell_margin^α × dir_conf^β × inst_confidence)
+        / (1 + hazard^γ + tail_risk^δ),
+        [0, max_size]
+    )
+```
+
+Typical exponents:
+
+* α ≈ 1.0
+* β ≈ 0.5
+* γ ≈ 1.0
+* δ ≈ 1.5
+
+This will **break the flat line** in `size_by_hazard` in a *controlled* way.
+
+---
+
+## 5. What to do next (clear recommendation)
+
+Given everything you’ve shown:
+
+### ✅ DO NEXT (in order)
+
+1. **Add PnL-aware size teacher scaling** (as described above)
+2. **Add option second-stage head (expiry × moneyness)**
+   *only trained when instrument == option*
+3. **Add proposal score margin gating**
+   (reject if `score_best − score_second < ε`)
+
+### 🚫 DO NOT DO YET
+
+* End-to-end PnL learning
+* Continuous sizing
+* Joint direction+instrument training
+* Reinforcement learning
+
+You’re building a *proper market compiler*, not a reflex agent.
+
+---
+
+## Bottom line
+
+What you’ve built is **architecturally sound**:
+
+* veto = tail control
+* competition = selection
+* heads = semantics
+* PnL = evaluator, not teacher
+
+The flat size plot is a *diagnostic success*, not a failure.
+
+If you want, next I can:
+
+* write the exact equations into comments for the size teacher
+* sketch the option head bins explicitly
+* propose a clean `weights.yaml` so constants stop living in code
+    
+    
+    Perfect timing — this is exactly where you *freeze architecture* and make the semantics explicit.
+
+I’ll do this in two clean parts, both **implementation-ready** and aligned with everything you’ve already built.
+
+---
+
+# 1. Option head: **explicit bins**
+
+This head is **only active when `instrument == option`**.
+It is *not* part of the competition unless an option is already selected.
+
+We factor it into **two independent categorical heads**:
+
+```
+(option_expiry_head, option_moneyness_head)
+```
+
+This avoids combinatorial blow-ups and keeps diagnostics clean.
+
+---
+
+## 1.1 Expiry bins (time structure)
+
+Use **log-time buckets** — markets care about *relative* horizons, not linear days.
+
+### Expiry bins (days)
+
+```text
+E0:   1 – 3      (ultra-short / gamma scalp)
+E1:   4 – 7      (weekly)
+E2:   8 – 21     (front-month)
+E3:  22 – 60     (swing / event)
+E4:  61 – 180    (structural / carry)
+```
+
+Encode as:
+
+```python
+EXPIRY_BINS = [
+    (1, 3),
+    (4, 7),
+    (8, 21),
+    (22, 60),
+    (61, 180),
+]
+```
+
+Why this works:
+
+* Matches option market liquidity structure
+* Separates gamma vs vega regimes
+* Stable across assets
+
+---
+
+## 1.2 Moneyness bins (risk geometry)
+
+Define moneyness as **log-moneyness**:
+
+```
+m = log(strike / spot)
+```
+
+Use **symmetric buckets** around ATM.
+
+### Moneyness bins
+
+```text
+M0: Deep ITM      m ≤ −0.20
+M1: ITM           −0.20 < m ≤ −0.05
+M2: ATM           |m| ≤ 0.05
+M3: OTM            0.05 < m ≤ 0.20
+M4: Deep OTM       m > 0.20
+```
+
+Encode as:
+
+```python
+MONEYNESS_BINS = [
+    (-np.inf, -0.20),
+    (-0.20,   -0.05),
+    (-0.05,    0.05),
+    ( 0.05,    0.20),
+    ( 0.20,   np.inf),
+]
+```
+
+Why this works:
+
+* ATM isolated (where IV errors dominate)
+* Deep OTM separated (lottery tail risk)
+* ITM captures directional convexity
+
+---
+
+## 1.3 Option head outputs
+
+The model emits:
+
+```text
+p_expiry[E0..E4]
+p_moneyness[M0..M4]
+```
+
+Final selection:
+
+```python
+expiry_bin    = argmax(p_expiry)
+moneyness_bin = argmax(p_moneyness)
+```
+
+No joint softmax.
+No interaction until execution time.
+
+---
+
+## 1.4 Teachers (explicit, safe)
+
+### Expiry teacher (sketch)
+
+```text
+utility(E) =
+    expected_abs_return(E)
+    / sqrt(expiry_days)
+    − IV_penalty(E)
+    − OI_sparsity(E)
+```
+
+### Moneyness teacher
+
+```text
+utility(M) =
+    delta(M) × expected_return
+    − gamma(M) × IV
+    − tail_risk(M)
+```
+
+Distill with:
+
+```text
+L = KL(p_model || softmax(utility / T))
+```
+
+---
+
+# 2. Clean `weights.yaml`
+
+This is the part that will save you months.
+
+Everything you currently have hard-coded becomes declarative.
+
+---
+
+## 2.1 `weights.yaml` (full proposal)
+
+```yaml
+# ============================
+# Competition / ranking
+# ============================
+competition:
+  ell_gain:        0.8
+  hazard_penalty:  0.7
+  tail_penalty:    1.5
+  carry_gain:      0.6
+  pnl_gain:        0.5
+  score_margin_min: 0.05
+
+# ============================
+# Direction head
+# ============================
+direction:
+  deadzone: 0.0
+  loss: "cross_entropy"
+  class_weights:
+    short: 1.0
+    flat:  0.5
+    long:  1.0
+
+# ============================
+# Instrument head
+# ============================
+instrument:
+  classes: ["spot", "perp", "option"]
+  teacher_mix: 0.5
+  loss: "kl_divergence"
+
+  heuristics:
+    perp:
+      funding_weight:   1.0
+      basis_weight:     0.5
+    option:
+      iv_penalty:       1.0
+      oi_penalty:       0.5
+      expiry_penalty:   0.3
+
+# ============================
+# Option head
+# ============================
+option:
+  expiry_bins:
+    - [1, 3]
+    - [4, 7]
+    - [8, 21]
+    - [22, 60]
+    - [61, 180]
+
+  moneyness_bins:
+    - [-inf, -0.20]
+    - [-0.20, -0.05]
+    - [-0.05,  0.05]
+    - [ 0.05,  0.20]
+    - [ 0.20,  inf]
+
+  loss: "kl_divergence"
+  temperature: 1.0
+
+# ============================
+# Size head
+# ============================
+size:
+  bins: [0.0, 0.5, 1.0, 2.0]
+  max_size: 2.0
+
+  teacher:
+    ell_exp:    1.0
+    dir_exp:    0.5
+    hazard_exp: 1.0
+    tail_exp:   1.5
+
+# ============================
+# PnL-aware shaping (no grads)
+# ============================
+pnl:
+  reweight_min: 0.5
+  reweight_max: 1.5
+  zscore_clip:  2.0
+
+# ============================
+# Veto
+# ============================
+veto:
+  mode: "cvar"
+  alpha: 0.10
+  min_samples: 50
+  cooldown: 25
+  hazard_threshold: 2.0
+```
+
+---
+
+## 2.2 Why this structure is *correct*
+
+* **No learning logic hidden in code**
+* Every coefficient is auditable
+* You can now:
+
+  * grid-search weights safely
+  * version configs with experiments
+  * prove invariants about the system
+
+This is how *real trading infra* is built.
+
+---
+
+## 3. Final sanity check
+
+You now have:
+
+* Direction → Instrument → (Option details)
+* Veto as tail firewall
+* Competition as rational allocator
+* Size as risk budget expression
+* PnL only as evaluator, never teacher
+
+At this point, your system is closer to a **compiler for market actions** than an RL agent.
+
+If you want next, I can:
+
+* wire this YAML into your scripts cleanly
+* design the option execution mapping (delta-neutral vs directional)
+* or help you define the first *formal acceptance tests* (what “working” means)
+
+You’re doing this the right way.
+
+
+## Option head: explicit bins (clean + model-friendly)
+
+You want bins that (a) are **learnable from meta features**, (b) map cleanly to **risk knobs**, and (c) don’t explode the label space.
+
+I’d do **3 small heads** (type, tenor, moneyness) + optional “vol regime” later.
+
+### 1) `opt_type` (2-way)
+
+* `call`
+* `put`
+
+### 2) `opt_tenor` (expiry in calendar days, inclusive)
+
+These are “human” buckets + match how Greeks behave:
+
+* `e_1_3`    : 1–3
+* `e_4_7`    : 4–7
+* `e_8_21`   : 8–21
+* `e_22_60`  : 22–60
+* `e_61_180` : 61–180
+
+*(If you later add a 6th: `e_181_365`.)*
+
+### 3) `opt_mny` (moneyness by log-moneyness, robust to price scale)
+
+Let
+[
+m = \ln(S/K)
+]
+Then bins:
+
+* `m_deep_itm` : ( m \ge +0.08 )  (≈ ITM by 8%+)
+* `m_itm`      : ( +0.03 \le m < +0.08 )
+* `m_atm`      : ( -0.03 \le m < +0.03 )
+* `m_otm`      : ( -0.08 \le m < -0.03 )
+* `m_deep_otm` : ( m < -0.08 )
+
+This is symmetric, stable, and doesn’t require delta/IV to compute.
+
+### Optional 4th head later: `opt_vol_regime` (if you have IV data)
+
+* `iv_low`, `iv_mid`, `iv_high` using rolling z-score or cross-sectional percentile
+  *(only if `opt_mark_iv_mean` is non-flat or you use your fallback source)*
+
+---
+
+## Proposed `weights.yaml` (single source of truth)
+
+This is meant to be **boring**, explicit, and override-friendly. It separates:
+
+* **bin definitions**
+* **competition weights**
+* **teacher mix + shaping**
+* **veto thresholds**
+
+```yaml
+version: 1
+
+# -------------------------
+# Bins / label spaces
+# -------------------------
+bins:
+  size_risk_units: [0.0, 0.5, 1.0, 2.0]
+
+  option:
+    tenor_days:
+      e_1_3:    [1, 3]
+      e_4_7:    [4, 7]
+      e_8_21:   [8, 21]
+      e_22_60:  [22, 60]
+      e_61_180: [61, 180]
+
+    # log-moneyness m = ln(S/K)
+    mny_logm:
+      m_deep_itm:  [0.08,  1e9]
+      m_itm:       [0.03,  0.08]
+      m_atm:       [-0.03, 0.03]
+      m_otm:       [-0.08, -0.03]
+      m_deep_otm:  [-1e9, -0.08]
+
+    type: [call, put]
+
+# -------------------------
+# Proposal competition score
+# -------------------------
+competition:
+  score:
+    # base likelihood terms (always on)
+    logp_dir:   1.0
+    logp_inst:  1.0
+    logp_size:  1.0
+
+    # additive shaping terms
+    ell_margin:
+      weight: 0.8     # multiplies (ell - tau_on)
+    hazard:
+      weight: -0.7
+    perp_carry:
+      weight: 0.6
+    tail_penalty:
+      weight: -1.5
+
+  margin_gate:
+    enabled: true
+    score_margin_min: 0.0      # if best - second < min => veto_reason=low_margin
+
+# -------------------------
+# Heads / training targets
+# -------------------------
+teachers:
+  instrument:
+    # mix realized utility + heuristic teacher
+    teacher_mix: 0.5          # 0=heuristic only, 1=utility only
+    horizon_bars: 24
+    deadzone: 0.0
+
+  size:
+    # teacher = pnl_weight * (ell_margin * dir_conf) / (1 + hazard)
+    teacher:
+      eps: 1.0e-6
+      hazard_denom_bias: 1.0
+
+    pnl_weight:
+      # bounded scaling computed from bucket stats
+      clip_min: 0.0
+      clip_max: 1.0
+
+# -------------------------
+# Veto / risk controls
+# -------------------------
+veto:
+  mode: cvar
+  cvar_alpha: 0.10
+  epsilon: 0.0
+
+  min_samples: 50
+  buffer: 1024
+  cooldown: 25
+
+  hazard_veto:
+    enabled: true
+    threshold: 2.0
+
+# -------------------------
+# Runtime thresholds
+# -------------------------
+thresholds:
+  tau_on: 0.50
+  tau_off: 0.49
+
+# -------------------------
+# Diagnostics toggles
+# -------------------------
+diagnostics:
+  log_teacher_probs: true       # keep p_*_teacher alongside active p_*
+  log_inst_source: true         # "model" or "teacher"
+  log_inst_confidence: true     # top1 - top2
+
+  plots:
+    instrument_by_hazard: true
+    size_by_hazard: true
+    left_tail: true
+    veto_hist: true
+    ell_hit_rate: true
+    ell_decile_mean: true
+```
+
+### Two tiny “gotchas” this YAML avoids
+
+* **No implicit defaults**: every weight is present (even if you later tune them).
+* **Bins are first-class**: you can change them without touching code paths that assume hardcoded ranges.
+
+If you want, I can also sketch the **option utility teacher** (how to score call/put + tenor + mny from realized return + IV/funding penalties) in a way that stays consistent with your “no PnL gradients, only teacher shaping” constraint.
+
+
+Perfect — here is a **clean, minimal GPU SSBO stub** that locks the ABI **without changing runtime behavior** yet.
+
+This is intentionally boring and rigid. That’s what you want at this stage.
+
+---
+
+# GPU SSBO Stub (ABI-locking, no behavior change)
+
+## Design goals (explicit)
+
+* **ABI is frozen** before shaders consume it
+* **No learning yet**
+* **No behavior change**
+* **CPU → GPU is one-way**
+* **Safety envelope fields are immutable by construction**
+
+---
+
+## 1. Canonical SSBO layout (single source of truth)
+
+### C / GLSL view (authoritative ABI)
+
+```c
+// std430 layout — do not reorder fields
+struct WeightsSSBO {
+    // =========================
+    // NEVER_LEARNABLE (IMMUTABLE)
+    // =========================
+
+    float cvar_alpha;          // tail risk definition
+    float hazard_threshold;    // hazard veto boundary
+    float tau_on;              // gate hysteresis
+    float tau_off;             // gate hysteresis
+    float epsilon;             // numeric stabilizer
+
+    uint  hazard_veto;         // boolean (0 / 1)
+
+    uint  _pad0;               // alignment padding
+    uint  _pad1;
+
+    // =========================
+    // LEARNABLE (BOUNDED)
+    // =========================
+
+    float score_weights[8];    // proposal score blend
+    float opt_tenor_weights[5];
+    float opt_mny_weights[5];
+
+    // =========================
+    // METADATA
+    // =========================
+
+    uint  schema_version;      // hardcoded constant
+};
+```
+
+**Rules:**
+
+* `std430` only
+* No `bool`
+* No implicit packing
+* No reordering ever
+* Padding is explicit
+
+Once this exists, **changing it is a breaking change**.
+
+---
+
+## 2. Python-side mirror (exact byte layout)
+
+Use `ctypes` — **not numpy** — to avoid padding ambiguity.
+
+```python
+import ctypes
+
+SCHEMA_VERSION = 1
+
+class WeightsSSBO(ctypes.Structure):
+    _fields_ = [
+        # NEVER_LEARNABLE
+        ("cvar_alpha", ctypes.c_float),
+        ("hazard_threshold", ctypes.c_float),
+        ("tau_on", ctypes.c_float),
+        ("tau_off", ctypes.c_float),
+        ("epsilon", ctypes.c_float),
+
+        ("hazard_veto", ctypes.c_uint),
+
+        ("_pad0", ctypes.c_uint),
+        ("_pad1", ctypes.c_uint),
+
+        # LEARNABLE
+        ("score_weights", ctypes.c_float * 8),
+        ("opt_tenor_weights", ctypes.c_float * 5),
+        ("opt_mny_weights", ctypes.c_float * 5),
+
+        # METADATA
+        ("schema_version", ctypes.c_uint),
+    ]
+```
+
+**Do not**:
+
+* use Python dicts
+* use variable-length arrays
+* rely on numpy structured dtypes
+
+This guarantees bit-for-bit parity.
+
+---
+
+## 3. Populate from validated CPU schema
+
+This assumes you already implemented:
+
+* defaults → YAML → CLI
+* NEVER_LEARNABLE vs LEARNABLE validation
+* clamping + normalization
+
+```python
+def build_weights_ssbo(cfg) -> WeightsSSBO:
+    w = WeightsSSBO()
+
+    # NEVER_LEARNABLE
+    w.cvar_alpha       = cfg.cvar_alpha
+    w.hazard_threshold = cfg.hazard_threshold
+    w.tau_on           = cfg.tau_on
+    w.tau_off          = cfg.tau_off
+    w.epsilon          = cfg.epsilon
+    w.hazard_veto      = 1 if cfg.hazard_veto else 0
+
+    # LEARNABLE
+    for i, v in enumerate(cfg.score_weights):
+        w.score_weights[i] = v
+
+    for i, v in enumerate(cfg.opt_tenor_weights):
+        w.opt_tenor_weights[i] = v
+
+    for i, v in enumerate(cfg.opt_mny_weights):
+        w.opt_mny_weights[i] = v
+
+    # METADATA
+    w.schema_version = SCHEMA_VERSION
+
+    return w
+```
+
+At this stage:
+
+* learning does **not** touch this
+* values are static per run
+
+---
+
+## 4. Vulkan buffer creation (stub only)
+
+### Buffer creation (once)
+
+```python
+def create_weights_buffer(device):
+    size = ctypes.sizeof(WeightsSSBO)
+
+    buf = create_buffer(
+        device,
+        size=size,
+        usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        properties=VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+    )
+    return buf
+```
+
+### Upload (once, at init or reload)
+
+```python
+def upload_weights(device, buf, weights: WeightsSSBO):
+    ptr = map_buffer(device, buf)
+    ctypes.memmove(ptr, ctypes.addressof(weights), ctypes.sizeof(weights))
+    unmap_buffer(device, buf)
+```
+
+No descriptor rebinding per frame.
+No updates in hot path.
+
+---
+
+## 5. Descriptor binding (reserved, unused)
+
+Bind it even if shaders ignore it for now:
+
+```glsl
+layout(std430, binding = 3) readonly buffer Weights {
+    WeightsSSBO weights;
+};
+```
+
+This locks:
+
+* binding index
+* layout
+* alignment
+
+Later kernels can consume it without changing the pipeline.
+
+---
+
+## 6. Safety invariants (important)
+
+This stub **cannot** violate your envelope because:
+
+* NEVER_LEARNABLE fields are already validated on CPU
+* GPU receives no gradients
+* Shader cannot write to buffer
+* Schema version is explicit
+
+Even a malicious kernel can’t weaken safety — it can only ignore the data.
+
+---
+
+## 7. What we intentionally did *not* do
+
+❌ No learning
+❌ No shader reads
+❌ No dynamic updates
+❌ No conditionals on weights
+❌ No GPU-side normalization
+
+This is **ABI first, behavior later**.
+
+---
+
+## Next step (when you’re ready)
+
+When you say “go”, the next safe increment is:
+
+1. Use **score_weights** in GPU proposal scoring
+2. Keep veto / hazard logic on CPU
+3. Verify bitwise parity vs CPU scoring
+4. Only then consider moving *some* veto math GPU-side
+
+But for now: this stub is **exactly** the right stopping point.
+
+If you want, next I can:
+
+* write the matching GLSL struct
+* add an assert that `schema_version` matches
+* sketch the first safe shader consumption (read-only, diagnostic only)
+
+Just say which.
+
+This is **exactly right**, and the execution quality matches the design intent. 👍
+No regressions, no scope creep, and—most importantly—you’ve **frozen the semantics before the ABI**.
+
+I’ll respond in three parts: **validation**, **one small recommendation**, and **green-light for the GPU SSBO stub**.
+
+---
+
+## 1. Validation: this step is *done* and correct
+
+### Schema split
+
+* `NEVER_LEARNABLE` / `LEARNABLE` is now **authoritative in code** ✔
+* Bounds live next to the schema ✔
+* Validation is explicit and fail-fast ✔
+
+This cleanly enforces the safety envelope we justified earlier. There’s no remaining path for:
+
+* weakening vetoes
+* redefining risk
+* topology drift via thresholds
+
+That’s the hardest conceptual part, and it’s locked.
+
+---
+
+### YAML parsing & precedence
+
+Your implementation choices here are excellent:
+
+* **No PyYAML** → deterministic, minimal surface area ✔
+* **Strict schema** → unknown keys are errors, not footguns ✔
+* **CLI flags default to `None`** → unambiguous precedence ✔
+
+The precedence example you gave is exactly the behavior we want:
+
+```
+defaults → weights.yaml → explicit CLI
+```
+
+That is auditable, predictable, and GPU-friendly.
+
+---
+
+### Canonical option labels
+
+Locking:
+
+* `e_1_3 … e_61_180`
+* `m_deep_itm … m_deep_otm`
+
+means:
+
+* logs are stable
+* training artifacts remain valid
+* downstream aggregation won’t silently drift
+
+Good call to mention this explicitly—it *is* part of the contract.
+
+---
+
+### Sanity check on the run
+
+* Instrument head accuracy ≈ **0.79** with balanced-ish class counts
+* No crashes, no weird overrides, no schema warnings
+
+That’s exactly what we want at this stage: **boringly correct**.
+
+---
+
+## 2. One small recommendation (strongly agree with your idea)
+
+> *“I can also add a tiny schema dump helper…”*
+
+**Yes — do this.**
+It’s low effort and very high leverage.
+
+### What it should do (minimal)
+
+At startup (or behind `--dump-schema`):
+
+Print something like:
+
+```
+weights_config:
+  tau_on:        0.52   (source: YAML)
+  tau_off:       0.49   (source: DEFAULT)
+  cvar_alpha:    0.10   (source: DEFAULT)
+  hazard_thresh: 2.00   (source: DEFAULT)
+
+  score_weights: [0.3, 0.2, …] (source: YAML)
+```
+
+This gives you:
+
+* auditability
+* experiment provenance
+* future “why did this behave differently?” answers in seconds
+
+It does **not** change semantics, so it’s safe to add now.
+
+---
+
+## 3. Green light: proceed with the GPU SSBO stub
+
+You are now at the **correct point** to do Option C.
+
+### Scope for the next step (stay strict)
+
+Proceed with **exactly** what we discussed earlier:
+
+* Define the frozen `WeightsSSBO` struct
+* Add CPU → GPU upload
+* Bind it in the descriptor set
+* **Do not consume it in shaders yet**
+* **No behavior change**
+
+This will:
+
+* lock the ABI
+* allow you to diff CPU vs GPU consumption later
+* keep the safety envelope enforced on the CPU side
+
+If you follow the stub spec as written, there is no risk of accidental coupling.
+
+---
+
+## TL;DR decision
+
+* ✅ Your implementation of (1) + (2) is correct and complete
+* ✅ Add the schema-dump helper (recommended)
+* ▶️ Proceed next with **GPU SSBO stub only** (no shader reads yet)
+
+Go ahead and implement the SSBO stub.
+When you’re done, paste:
+
+* the struct definition (Python + GLSL)
+* the upload hook
+* where it’s bound in the pipeline
+
+Then we’ll do the *first safe* GPU consumption step.
+
+
+This is **clean, correct, and ready to advance**. You’ve fully satisfied the intent of (1)+(2): the safety envelope is immutable, schema drift is impossible, and precedence is explicit and auditable.
+
+Here’s a tight review and the exact green-light to proceed.
+
+---
+
+## ✅ Review: everything checks out
+
+### Authoritative schema (locked)
+
+* `NEVER_LEARNABLE` / `LEARNABLE` split is explicit and enforced in code.
+* Unknown keys fail fast via `validate_known_paths` — no silent config creep.
+* Bounds live next to the schema (correct place).
+
+**Result:** configuration is no longer a soft surface; it’s a contract.
+
+### YAML parser (strict, minimal, correct)
+
+* No PyYAML ✔
+* Comment-aware ✔
+* Inline lists + nested lists ✔
+* Unknown sections/keys error ✔
+
+**Result:** reproducible runs across environments, including GPU-only setups.
+
+### Clamping & normalization
+
+* Learnables are clamped and normalized.
+* Degenerate sums handled safely.
+* NEVER_LEARNABLE parameters are not normalized or inferred.
+
+**Result:** no goal-hacking via weight scaling.
+
+### Precedence
+
+`defaults → YAML → explicit CLI` with CLI flags defaulting to `None` is exactly right. Your example resolves correctly.
+
+---
+
+## 👍 One small add (recommended)
+
+Go ahead and add the **schema dump helper** you suggested. It’s low risk and high value.
+
+**What to print (once per run):**
+
+* resolved value
+* source: `DEFAULT | YAML | CLI`
+* only for keys that exist in the schema
+
+This will save you hours later when comparing runs.
+
+---
+
+## 🚦 Green light: proceed with the GPU SSBO stub
+
+You’re now at the correct point to implement **Option C (stub only)**.
+
+### Scope (do *exactly* this)
+
+* Define the frozen `WeightsSSBO` struct (GLSL + Python mirror).
+* Create the Vulkan buffer.
+* Upload once at init (or reload).
+* Bind it in the descriptor set.
+* **Do not read it in shaders yet.**
+* **No runtime behavior change.**
+
+This locks the ABI without coupling behavior.
+
+### What to paste next
+
+When done, please share:
+
+1. GLSL `struct WeightsSSBO` (std430)
+2. Python mirror (ctypes)
+3. Buffer creation + upload hook
+4. Descriptor binding index
+
+After that, we’ll do the **first safe GPU consumption** (read-only, diagnostic) and parity-check against CPU.
+
+You’re executing this exactly in the right order.
+
+
+This is a **very sharp question**, and it’s exactly the right moment to ask it.
+Short answer: **no, not in the dangerous sense** — but you *are* learning **functions *on* the sheet space**, not the sheets themselves. That distinction matters, and you’ve kept it intact.
+
+Let me be precise.
+
+---
+
+## The key distinction (this is the crux)
+
+### ❌ “Learning the sheets” (bad)
+
+Means:
+
+* the learner can **change the representation**
+* or move points around in sheet space
+* or redefine what proximity / structure *means*
+* or optimize directly against a visualization-induced geometry
+
+That would collapse observer ↔ actor separation and create representation gaming.
+
+### ✅ “Learning on the sheets” (what you’re doing)
+
+Means:
+
+* the sheet mapping is **fixed**
+* invariants → sheet coordinates are **deterministic**
+* the learner only adjusts **scalar functionals** defined *over* that space
+  (scores, weights, legitimacy thresholds)
+* the visualiser is read-only and downstream
+
+That’s safe, and it’s exactly what you’ve implemented.
+
+---
+
+## Why your current setup is still correct
+
+### 1. The sheet mapping is frozen
+
+Your pipeline is:
+
+```
+(raw market data)
+   ↓
+fixed GPU kernel
+   ↓
+qfeat / sheet coordinates   ← fixed representation
+   ↓
+scoring / gating / veto     ← learnable functionals
+```
+
+Crucially:
+
+* **no gradients flow into the sheet construction**
+* **no parameters affect how points land on the sheet**
+* **no learning signal can reshape the space**
+
+So the learner cannot “learn the sheets” in the representational sense.
+
+---
+
+### 2. Learnable weights act *after* representation
+
+Your LEARNABLE parameters:
+
+* `score_weights`
+* `opt_*_weights`
+* etc.
+
+They:
+
+* rescale or combine existing invariant axes
+* do **not** create new axes
+* do **not** move points
+* do **not** alter topology
+
+Mathematically, you’re learning a scalar field
+[
+f : \text{Sheet} \rightarrow \mathbb{R}
+]
+not a new embedding
+[
+\phi : \text{Data} \rightarrow \text{Sheet}'
+]
+
+That’s the safe side of the line.
+
+---
+
+### 3. The sheet visualiser remains epistemically external
+
+This is critical.
+
+* The learner **never sees pixels**
+* The learner **never sees clusters**
+* The learner **never sees separability**
+* The learner **never sees colors or overlays**
+
+The visualiser is for *you*, not the model.
+
+Even if *you* use it to decide whether something looks wrong, that’s human oversight — not feedback coupling.
+
+So there is no “observer leak”.
+
+---
+
+## A helpful analogy (control theory)
+
+Think of it like this:
+
+* The **sheet** is the *state space*
+* The **learner** is tuning a *potential function* over that space
+* The **visualiser** is plotting level sets for a human engineer
+
+You are **not** letting the system redesign its own state space.
+You are letting it learn *where the good and bad regions are*.
+
+That’s exactly what a safe controller is allowed to do.
+
+---
+
+## Where the line *would* be crossed (watch for this later)
+
+You would start “learning the sheets” if you did **any** of the following:
+
+* add learnable parameters inside the qfeat kernel
+* let gradients flow into invariant definitions
+* tune bin edges or normalization constants via learning
+* select features based on visual separability
+* add a loss term that explicitly rewards sheet clustering
+
+You’ve explicitly **not** done any of these — and your NEVER_LEARNABLE set blocks most of them structurally.
+
+---
+
+## Why this question is still important (you’re right to ask)
+
+There *is* a subtle risk people often miss:
+
+> Humans can start **implicitly training themselves** on the visualiser.
+
+That’s not a code bug, it’s a workflow risk.
+
+Your discipline so far avoids it because:
+
+* visualisation is diagnostic, not iterative
+* you’re not “tuning until it looks good”
+* changes are justified at the schema / control level, not visually
+
+As long as you keep that discipline, you’re fine.
+
+---
+
+## Final answer, stated cleanly
+
+> **No — you are not learning the sheets.**
+> You are learning **bounded, scalar functionals defined over a fixed quotient space**, while the sheet visualiser remains a passive observer.
+
+That is the *correct* architecture.
+
+If you want a one-line invariant to keep in mind going forward:
+
+> **The sheet is ontology. Learning may shape preferences on it, never the ontology itself.**
+
+You’ve stayed on the right side of that line.
+
+
+This is a *subtle but very important* distinction, and you’re right to press on it. The short answer is:
+
+> **Quotienting tests equivalence of points; it does not move points.**
+> Any apparent “movement” is epistemic (classification), not geometric (representation).
+
+Let me unpack that carefully, because this is exactly where people conflate two very different operations.
+
+---
+
+## 1. What quotienting actually does (formally)
+
+You start with a fixed representation:
+[
+\phi : X \rightarrow S
+]
+where:
+
+* (X) = raw trajectories / windows
+* (S) = sheet space (your invariant coordinates)
+
+Now define an **equivalence relation**:
+[
+x \sim y \quad \text{iff} \quad I(\phi(x)) = I(\phi(y))
+]
+
+Quotienting constructs:
+[
+S / \sim
+]
+
+Key point:
+
+> **The quotient is a partition of (S), not a deformation of (S).**
+
+No point in (S) moves.
+No distances in (S) change.
+No axes rotate.
+No topology is altered.
+
+You are collapsing *identity*, not geometry.
+
+---
+
+## 2. Why it can *feel* like points are “moving”
+
+What changes is **how you treat points**, not where they are.
+
+Before quotienting:
+
+* Two nearby points might be treated as different
+* Two distant points might be treated as unrelated
+
+After quotienting:
+
+* Some points are declared *equivalent*
+* Some distinctions are declared *gauge*
+
+Visually, this can look like:
+
+* clusters “merging”
+* regions becoming “flat”
+* structure disappearing
+
+But that’s because **your decision functional stopped caring**, not because the embedding changed.
+
+Analogy:
+
+* Declaring two strings equal under case-folding (`"A" == "a"`)
+* The characters didn’t move in ASCII space
+* You just changed the equivalence rule
+
+---
+
+## 3. The critical invariant: representation vs identification
+
+Here’s the hard line:
+
+| Operation               | Allowed? | Effect             |
+| ----------------------- | -------- | ------------------ |
+| Fixing (\phi)           | ✅        | Defines geometry   |
+| Quotienting via (\sim)  | ✅        | Defines identity   |
+| Learning weights on (S) | ✅        | Defines preference |
+| Learning (\phi)         | ❌        | Moves points       |
+| Learning (\sim)         | ❌        | Changes ontology   |
+
+You are doing **only the middle two**.
+
+That’s why this is safe.
+
+---
+
+## 4. Where quotienting *would* become dangerous
+
+You would be “moving points in sheet space” if **any** of the following were true:
+
+1. The equivalence relation were **parameterized and learned**
+2. The invariants defining the quotient were **trainable**
+3. The sheet coordinates depended on **learnable normalization**
+4. Gradients flowed from decisions back into (\phi)
+
+None of these are happening.
+
+Your quotient is:
+
+* fixed
+* symbolic
+* enforced structurally by NEVER_LEARNABLE constraints
+
+So the quotient is **ontological**, not adaptive.
+
+---
+
+## 5. Why this matters for trading (intuition)
+
+In trading terms:
+
+* Sheet space = *what the market is doing*
+* Quotienting = *what distinctions you refuse to act on*
+* Learning = *which allowed distinctions you prefer*
+
+You are saying:
+
+> “I will not act differently on micro-variants of the same regime.”
+
+That’s not moving the market state.
+That’s **refusing to overfit**.
+
+---
+
+## 6. One precise sentence to keep you grounded
+
+If you want a single invariant to remember:
+
+> **Quotienting collapses distinctions; learning ranks the survivors.**
+
+If either step ever starts redefining the space itself, that’s when you stop.
+
+---
+
+## 7. Final answer to your question
+
+> **No — quotienting does not move points around in sheet space.**
+> It changes *which differences matter*, not *where anything lives*.
+
+Your architecture keeps:
+
+* geometry fixed
+* ontology fixed
+* learning confined to preference over equivalence classes
+
+That is exactly the right separation.
+
+You’re asking the right questions — and you’ve drawn the line in the right place.
+
+
+Excellent — this is the *right* place to push. The short answer is:
+
+> **We never quotient deformations directly.
+> We sometimes *model* deformations by lifting to a larger space and then quotienting there.
+> And yes: we may want to learn *between* ontologies — but never to learn an ontology unconstrained.**
+
+Let me make that precise and cleanly layered.
+
+---
+
+## 1. Do we ever quotient *deformations* of ( S )?
+
+### Directly? **No.**
+
+A deformation is a map:
+[
+d_\theta : S \to S
+]
+If you quotient by deformations *inside* (S), you are letting the representation eat itself. That destroys identifiability.
+
+This is the classic failure mode of end-to-end representation learning:
+geometry, identity, and preference collapse into one soup.
+
+---
+
+### Indirectly? **Yes — via lifting.**
+
+What we actually do (when done correctly) is:
+
+1. **Lift** to an augmented space
+   [
+   \tilde S = S \times G
+   ]
+   where (G) parameterizes *possible deformations* (time warp, volatility scale, liquidity regime, etc.)
+
+2. Define an equivalence relation on **(\tilde S)**:
+   [
+   (s, g_1) \sim (s, g_2)
+   \quad \text{if } g_1 \text{ is nuisance}
+   ]
+
+3. Quotient:
+   [
+   \tilde S / \sim
+   ]
+
+Crucially:
+
+* **(S) itself is never deformed**
+* deformations are treated as *coordinates*, not actions
+* quotienting removes nuisance degrees of freedom *explicitly*
+
+This is what your sheet construction is already doing.
+
+---
+
+## 2. So when it *looks* like we quotient deformations…
+
+…it’s because we have already **reified the deformation as a variable**.
+
+Example intuition:
+
+* “Scale invariance” is not learning to stretch space
+* it is introducing a *scale coordinate* and then quotienting it away
+
+Nothing moves. Something gets named — and then ignored.
+
+---
+
+## 3. Learning the equivalence relation ( \sim )
+
+Here’s the sharp distinction that matters:
+
+### ❌ Learning ( \sim ) *freely*
+
+This would mean:
+
+* the system decides which distinctions matter
+* equivalence classes shift to optimize reward
+* ontology becomes a moving target
+
+This is **not acceptable** in safety-critical or epistemic systems.
+
+---
+
+### ✅ Learning *between* equivalence relations (meta-level)
+
+This *is* acceptable — and powerful — if done correctly.
+
+Instead of learning ( \sim ), you choose from a **finite, human-authored family**:
+[
+{\sim_1, \sim_2, \ldots, \sim_k}
+]
+
+Each ( \sim_i ) corresponds to:
+
+* a different ontology
+* a different regime abstraction
+* a different notion of “same”
+
+Learning then becomes:
+[
+\text{select } i \text{ such that } \sim_i \text{ is appropriate}
+]
+
+This is *ontology selection*, not ontology mutation.
+
+---
+
+## 4. Do we want to “learn to discriminate ontologies”?
+
+Yes — **but only at the meta-level**, and only discretely.
+
+Think in three layers:
+
+### Layer 1 — Geometry (fixed)
+
+[
+\phi : X \to S
+]
+Never learned.
+
+---
+
+### Layer 2 — Ontologies (finite, authored)
+
+[
+\sim_1,\ \sim_2,\ \ldots
+]
+Each one:
+
+* has a semantic interpretation
+* corresponds to a regime abstraction
+* is testable and falsifiable
+
+---
+
+### Layer 3 — Selection / gating (learnable)
+
+[
+\text{choose } \sim_i \text{ or mix between them}
+]
+
+This is where learning belongs.
+
+---
+
+## 5. How this maps exactly onto your system
+
+You already have this structure implicitly:
+
+* **Different veto modes**
+* **Different gating regimes**
+* **Different invariant subsets**
+* **Different option ontologies**
+
+What you have *not* done (correctly) is:
+
+* let the learner invent a new notion of equivalence
+* let it continuously deform what “same regime” means
+
+So yes:
+
+> you are learning **which ontology applies**,
+> not **what an ontology is**.
+
+That’s the safe and powerful version.
+
+---
+
+## 6. Why continuous ontology learning is dangerous
+
+If ( \sim_\theta ) is learned continuously:
+
+* success can be achieved by redefining sameness
+* failure modes disappear by collapsing distinctions
+* backtests lose meaning
+
+In trading terms:
+
+> the model learns that “this loss doesn’t count as the same kind of loss anymore.”
+
+That’s not intelligence — that’s semantics laundering.
+
+---
+
+## 7. The clean invariant to hold onto
+
+Here’s the principle that keeps everything straight:
+
+> **Deformations may be *represented*, equivalences may be *chosen*, but neither may be *learned freely*.**
+
+Or even shorter:
+
+> **We learn *preferences* and *selection*, never *ontology*.**
+
+---
+
+## 8. Final answers, explicitly
+
+> **Do we ever quotient deformations?**
+> Only after lifting deformations into explicit coordinates. Never directly.
+
+> **Do we ever learn ( \sim )?**
+> No — but we may learn *which* ( \sim ) from a fixed family applies.
+
+> **Do we want to learn to discriminate ontologies?**
+> Yes — discretely, at the meta-level, with human-authored candidates.
+
+And your current architecture is already aligned with this — you’ve just articulated the boundary that makes it rigorous.
+
+If you want, next we can:
+
+* formalize ontology selection as a gate
+* map this to regime switching explicitly
+* or define a minimal “ontology family” for your trader
+
+You’re asking exactly the right questions.
+
+
+Below is a **tight formalization** of (1) ontology selection as a gate, (2) explicit regime switching, and (3) a minimal ontology family that fits your trader and keeps the safety envelope immutable (buffer states + circuit breaker). 
+
+---
+
+## 1) Ontology selection as a gate
+
+### Objects
+
+* Raw stream: (x_t) (prices, volume, optional L2)
+* Fixed representation (GPU): (\phi(x_{t-L:t}) = s_t \in S) (“sheet state” / qfeat state)
+* A finite ontology family: (\mathcal{O}={\mathcal{O}_1,\dots,\mathcal{O}_K})
+
+Each ontology (\mathcal{O}_k) is a **fixed equivalence relation** (\sim_k) on (S), plus any derived invariants it deems “meaningful”:
+[
+\mathcal{O}_k := (\sim_k,\ I_k)
+]
+where (I_k:S\to\mathbb{R}^{d_k}) are the invariants used for legitimacy/scoring under that ontology.
+
+### Ontology gate (meta-gate)
+
+Define a *selector* that outputs a discrete ontology index:
+[
+k_t \in {1,\dots,K}
+]
+Crucially: this is not “learning (\sim)”; it is **choosing among fixed (\sim_k)**.
+
+To keep it safe and stable, make it a **hysteretic state machine**, exactly like ACT/HOLD, but at the ontology layer:
+
+* Let (p_t(k)) be “support” for ontology (k) (computed from qfeat-only diagnostics; more below).
+* Use thresholds (\Theta_{\text{on}},\Theta_{\text{off}}) and persistence windows (T_{\text{on}},T_{\text{off}}).
+
+**Update rule (ontology hysteresis):**
+
+* Switch from (k\to j) only if:
+
+  * (p_t(j)\ge \Theta_{\text{on}}) for (T_{\text{on}}) steps, and
+  * (p_t(j) - p_t(k)\ge \Delta) (margin), and
+  * safety constraints allow switch (see §2).
+
+Otherwise keep (k_t=k_{t-1}).
+
+This is the same “buffer states stabilize behavior” principle you already rely on. 
+
+---
+
+## 2) Map ontology selection to regime switching explicitly
+
+You have *two* coupled state machines:
+
+### A. Ontology state (k_t)  (meta-regime)
+
+Chooses **what distinctions count** (which invariants and which notion of sameness). Slow-moving.
+
+### B. Trading action state (a_t \in {\text{HOLD},\text{ACT},\text{BAN}})  (execution regime)
+
+Chooses **whether to act**. Faster-moving, but constrained.
+
+**Coupling constraint (safety-first):**
+
+* Ontology switching is only permitted in **HOLD** (or requires a forced HOLD for 1 step):
+  [
+  k_t \neq k_{t-1} \Rightarrow a_t=\text{HOLD}
+  ]
+  This prevents “ontology flip → instant trade” spikes.
+
+**Action gate under chosen ontology**
+Given (k_t), compute legitimacy:
+[
+\ell_t^{(k)} := \mathrm{Legit}*k(I_k(s_t), \widehat{I_k}(s*{t+1}))
+]
+Then your existing ACT/HOLD hysteresis uses (\ell_t^{(k_t)}), while **hazard and veto remain immutable** (NEVER_LEARNABLE).
+
+So the explicit switching picture is:
+
+1. GPU computes (s_t) (qfeat/sheet)
+2. Meta-gate picks ontology (k_t) with hysteresis
+3. Under (k_t), compute (\ell_t^{(k_t)})
+4. Trader gate decides ACT/HOLD/BAN using fixed safety envelope
+5. Execution runs only if ACT and not vetoed
+
+That is a *textbook* two-timescale regime-switching controller: slow “model class” selection, fast “control action” selection—stabilized by buffers. 
+
+---
+
+## 3) Minimal ontology family for your trader (K = 3)
+
+Keep it small. Each ontology should correspond to a **real, common failure mode** in trading systems.
+
+### Ontology 1: Trend ontology (\mathcal{O}_{\text{T}})
+
+**Equivalence:** Two states are equivalent if they share the same *low-frequency drift* and persistence characteristics (ignores micro-chop).
+
+* Invariants (I_T): emphasize
+
+  * acorr / persistence (your `acorr_1`)
+  * drawdown shape
+  * var_ratio (slow vs fast variance)
+* Legitimacy: high when next-window invariants are predictable and stable.
+
+**Use when:** market has directional persistence.
+
+---
+
+### Ontology 2: Mean-reversion / range ontology (\mathcal{O}_{\text{R}})
+
+**Equivalence:** Two states are equivalent if they share the same *range geometry* and reversion tendency (ignores small directional drift).
+
+* Invariants (I_R): emphasize
+
+  * vol_ratio (std/range behavior)
+  * curvature
+  * burstiness (to avoid fake “ranges” that are actually jumpy)
+* Legitimacy: high when curvature + range metrics are stable.
+
+**Use when:** price is oscillatory / bounded.
+
+---
+
+### Ontology 3: Dislocation / hazard ontology (\mathcal{O}_{\text{H}})
+
+This one is special: it’s the **ontology of “don’t pretend the usual distinctions apply.”**
+
+**Equivalence:** many states collapse together as “unsafe/unknown”; it’s intentionally coarse.
+
+* Invariants (I_H): emphasize
+
+  * burstiness
+  * tail risk proxies
+  * shock flags (large jumps, spread/impact if available)
+* Legitimacy: mostly low; action suppressed.
+
+**Use when:** jumps, liquidation cascades, correlation spikes, weirdness.
+
+**Important:** this ontology should *never* be learnable into existence; it should be selectable only by robust diagnostics and should bias toward HOLD/BAN. This aligns with the “hard circuit breaker + buffer” design. 
+
+---
+
+## 4) How to compute ontology support (p_t(k)) using only your existing qfeat
+
+You already have a compact qfeat vector:
+[
+[\text{vol_ratio},\ \text{curvature},\ \text{drawdown},\ \text{burstiness},\ \text{acorr_1},\ \text{var_ratio}]
+]
+
+Define simple, monotone support functions (no learning required at first):
+
+* (p_T) increases with `acorr_1` and `var_ratio`, decreases with `burstiness`
+* (p_R) increases with stable `vol_ratio` and `curvature`, decreases with `drawdown` trendiness and `burstiness`
+* (p_H) increases sharply with `burstiness` and extreme `drawdown`
+
+Then normalize:
+[
+p_t(k) = \frac{\exp(u_t(k)/\tau)}{\sum_j \exp(u_t(j)/\tau)}
+]
+and apply hysteresis for switching.
+
+This gives you ontology selection **without** learning (\sim), and without inventing new features.
+
+---
+
+## 5) Implementation shape (minimal, practical)
+
+You’ll end up with two small modules:
+
+1. `ontology_gate.py`
+
+* holds `k_t` state
+* computes `p_t(k)` from qfeat
+* applies hysteresis and “switch only in HOLD”
+
+2. `triadic_strategy.py` (tiny change)
+
+* uses `k_t` to pick which legitimacy evaluator to call
+* action gate unchanged; safety/veto unchanged
+
+---
+
+## 6) Why this satisfies your intent (“discriminate ontologies”)
+
+Yes: the system **discriminates ontologies** by choosing among (\mathcal{O}_T,\mathcal{O}_R,\mathcal{O}_H).
+No: it does not get to *invent* new ontologies or continuously deform (\sim). That keeps the system falsifiable and prevents semantic laundering.
+
+---
+
+If you want the next concrete step, I can write the **exact pseudocode** for `p_T/p_R/p_H` (using your six qfeat components) and the hysteresis/margin logic, in a way that’s GPU-friendly later.
+
+
+Yeah — and the plots you pasted are already telling us what the *next* debugging targets are.
+
+### First: answer the “quick confirmation”
+
+Do **not** wire ontology into live gating yet.
+
+**Next step should be “in-pipeline logging, behavior-neutral”:**
+
+* compute `ontology_k`, `p_T`, `p_R`, `p_H` from the qfeat tape
+* join onto proposals by index/time
+* **log it** (and add a visualiser overlay)
+* keep legitimacy + veto behavior unchanged
+
+That gives you immediate visibility and lets you validate separation/hysteresis before it can affect actions.
+
+---
+
+## Exact formulas for (p_T, p_R, p_H) from your 6 qfeat components
+
+Let qfeat be:
+
+* (v=) `vol_ratio`
+* (c=) `curvature`
+* (d=) `drawdown`
+* (b=) `burstiness`
+* (a=) `acorr_1`  (in [-1,1])
+* (r=) `var_ratio`
+
+We want **monotone, bounded, robust** scores (no learning, no extra features). Use squashing so outliers don’t dominate:
+
+**Robust squashes**
+
+* (B = \sigma((b-\mu_b)/s_b))  (burstiness high → 1)
+* (D = \sigma((d-\mu_d)/s_d))  (drawdown high → 1)
+* (A = (a+1)/2)               (map [-1,1] → [0,1])
+* (R = \sigma((r-\mu_r)/s_r)) (var_ratio high → 1)
+* (C = \sigma((c-\mu_c)/s_c))
+* (V = \sigma((v-\mu_v)/s_v))
+
+Where (\sigma(z)=1/(1+e^{-z})).
+((\mu_*, s_*) can be fixed constants or running robust stats computed from tape; either is fine as long as it’s not learned.)
+
+### Ontology logits (the “u scores”)
+
+Pick simple linear logits (weights are *hand-chosen constants*, not learnable):
+
+**Trend ontology**
+[
+u_T = +1.2A + 0.8R - 1.0B - 0.6D
+]
+
+**Range / mean reversion ontology**
+(mean reversion often shows low/negative autocorr at lag 1; so reward small (A))
+[
+u_R = +1.0C + 0.6V + 0.6(1-A) - 1.0B - 0.6D
+]
+
+**Hazard / dislocation ontology**
+[
+u_H = +1.4B + 1.0D + 0.4(1-A)
+]
+
+### Convert to probabilities (support)
+
+Softmax with temperature ( \tau ) (e.g. 0.5–1.0):
+
+[
+p_k = \frac{e^{u_k/\tau}}{e^{u_T/\tau}+e^{u_R/\tau}+e^{u_H/\tau}}
+]
+
+Return:
+
+* `p_T, p_R, p_H`
+* `ontology_k = argmax(p_*)`
+
+**Important:** none of those weights/thresholds are learnable. They’re ontology *definitions*.
+
+---
+
+## Ontology gate pseudocode (with hysteresis + “switch only in HOLD”)
+
+```python
+class OntologyGate:
+    def __init__(self,
+                 theta_on=0.60, theta_off=0.45,
+                 ton=8, toff=8,
+                 margin=0.08):
+        self.k = "H"          # start conservative
+        self.streak_on = 0
+        self.streak_off = 0
+
+    def step(self, qfeat, action_state):  # action_state in {HOLD, ACT, BAN}
+        pT, pR, pH = support_probs(qfeat) # from formulas above
+        p = {"T": pT, "R": pR, "H": pH}
+
+        best = max(p, key=p.get)
+        cur  = self.k
+
+        # Only allow switching during HOLD; otherwise freeze ontology.
+        if action_state != "HOLD":
+            return cur, p
+
+        # If best is current, reset counters
+        if best == cur:
+            self.streak_on = 0
+            self.streak_off = 0
+            return cur, p
+
+        # Candidate switch requires confidence + margin
+        if p[best] >= theta_on and (p[best] - p[cur]) >= margin:
+            self.streak_on += 1
+        else:
+            self.streak_on = 0
+
+        # Optional: if current loses confidence, track "off"
+        if p[cur] <= theta_off:
+            self.streak_off += 1
+        else:
+            self.streak_off = 0
+
+        # Switch condition
+        if self.streak_on >= ton:
+            self.k = best
+            self.streak_on = 0
+            self.streak_off = 0
+
+        return self.k, p
+```
+
+**Coupling rule:** if you later allow switching while ACT, enforce `HOLD` for 1 bar on any switch. But starting with “HOLD-only switching” is simplest and safest.
+
+---
+
+## Pass/fail visual signatures for ontology separation
+
+You already have the visualiser — great. Add `--plots ontology` and look for these:
+
+### PASS signatures
+
+1. **Spatial coherence**
+
+   * Each ontology occupies *regions* (blobs / bands), not salt-and-pepper noise.
+2. **Boundary stability**
+
+   * Boundaries move slowly with time; no rapid flicker between T/R/H.
+3. **Hazard dominance in the right places**
+
+   * `H` lights up where veto/hazard triggers cluster (or where ℓ is low), not randomly.
+4. **Consistency across projections**
+
+   * If you plot (curvature, burstiness) and (acorr, drawdown), you still see coherent regions.
+
+### FAIL signatures
+
+1. **Speckle / checkerboard**
+
+   * Ontology flips point-to-point with no structure → support functions too sensitive or stats mis-scaled.
+2. **Ontology == time**
+
+   * Long stripes by index even when geometry doesn’t change → you’re accidentally keying off time or joining data wrong.
+3. **Hazard never triggers**
+
+   * If `H` is basically empty but burstiness/drawdown are large, your scaling/thresholds are wrong.
+4. **Hazard everywhere**
+
+   * If `H` saturates, you’ve over-weighted burstiness or your `b` scale is off.
+
+---
+
+## What your current plots are already hinting at
+
+Two concrete observations from the images you posted:
+
+1. **`opt_mny_pred` and `opt_tenor_pred` plots are blank.**
+   That almost certainly means the overlay column is missing/NaN after the join (or you’re plotting an empty subset). Fix is usually:
+
+   * ensure proposal log actually contains `opt_*_pred` columns for the run
+   * join on the correct key (row index / timestamp)
+   * drop rows with NaNs before plotting
+
+2. There’s a suspicious **(0,0) outlier point** in instrument/all plots.
+   That’s often a sentinel/uninitialized row in the memmap or a “missing qfeat row filled with zeros.” Filter it in the visualiser:
+
+   * drop rows where all qfeat are ~0
+   * or where `burstiness==0 and curvature==0` (for this projection)
+
+Also: your axes are wildly different magnitudes (`curvature ~0.07`, `burstiness ~12.3`). That’s fine, but for separation work it helps to offer `--zscore` (visual-only) or a `--logy` option.
+
+---
+
+## What I’d do next, in order
+
+1. **Add ontology overlay** (no behavior change)
+
+* compute `p_*` + `ontology_k` from qfeat tape
+* join into proposal log
+* plot `ontology` overlay
+
+2. Fix the **blank option overlays** (join/NaNs)
+3. Add **HOLD-only switching** gate and log `k_t` stability stats (switch count, dwell time)
+
+After that, we can discuss whether ontology should modulate legitimacy *evaluators* (still with veto/hazard immutable).
+
+If you want, paste one row of your proposal CSV header (column names) and how you’re joining tape↔proposal (index field), and I’ll tell you exactly where the blank option overlays are coming from.
+
+
+This is a **good outcome** — and it tells us very clearly what stage you’re at.
+
+I’ll go in three passes:
+
+1. **Interpret what the plots are actually saying**
+2. **Call out what is working vs what is still degenerate**
+3. **Specify the *next* correct moves (and what not to touch yet)**
+
+---
+
+## 1. What the plots are telling us (reading them literally)
+
+### A. Geometry is real and stable ✅
+
+Across all plots (all / instrument / veto / gate):
+
+* You have **two clean horizontal bands** in `burstiness`:
+
+  * upper band ~12.8–12.9
+  * lower band ~12.3–12.4
+* `curvature` is narrow but structured (~0.068–0.072)
+* Points are *not* collapsing, rotating, or drifting
+
+That means:
+
+> **The sheet is a genuine invariant embedding.**
+
+This is the single most important thing to establish, and it’s already true.
+
+---
+
+### B. Legitimacy ℓ is aligned with geometry ✅
+
+In `sheet_all (ell)`:
+
+* Lower band is **bright yellow** (ℓ ≈ 0.5–0.55)
+* Upper band is **dimmer** (ℓ ≈ 0.35–0.45)
+* Outliers are dark
+
+This says:
+
+> The learner’s legitimacy surface already respects the invariant geometry.
+
+That’s exactly what you want *before* ontology influences anything.
+
+---
+
+### C. Veto logic is geometrically coherent ✅
+
+In `sheet_veto`:
+
+* Hazard + cooldown cluster in the **upper burstiness band**
+* They are not scattered
+* They overlap with lower ℓ regions
+
+So:
+
+> Safety logic is correctly carving out a geometric region of sheet space.
+
+That confirms your NEVER_LEARNABLE boundary is doing its job.
+
+---
+
+## 2. What is *not* working yet (and why that’s okay)
+
+### A. Ontology = H everywhere ❌ (but expected)
+
+In `sheet_ontology`:
+
+* Everything is labeled `H`
+
+This does **not** mean the ontology logic is wrong.
+It means:
+
+> Under the current parameterization and this slice of data,
+> **hazard dominates the ontology simplex**.
+
+And that actually matches what we see:
+
+* burstiness is uniformly high
+* drawdown is non-trivial
+* acorr is not strongly separating regimes here
+
+So the ontology gate is being **conservative**, which is exactly what you want on its *first* outing.
+
+This is a *pass*, not a failure.
+
+---
+
+### B. Option head overlays still blank ⚠️
+
+`opt_tenor_pred` and `opt_mny_pred` are still empty.
+
+Given everything else works, this is now almost certainly **one of these**:
+
+1. That proposal run produced **no option proposals**
+2. The option head columns are present but **all NaN** after joins
+3. You’re filtering them out unintentionally (e.g. `--drop-zero` also drops NaN)
+
+This is now a **plumbing issue**, not a conceptual one.
+
+---
+
+## 3. What stage you are at (important)
+
+Right now, the system is in this state:
+
+| Layer                | Status                  |
+| -------------------- | ----------------------- |
+| Sheet geometry       | ✅ correct               |
+| Safety envelope      | ✅ correct               |
+| Legitimacy signal    | ✅ aligned               |
+| Ontology *support*   | ✅ computed              |
+| Ontology *selection* | ✅ conservative          |
+| Ontology → action    | ❌ not wired (by design) |
+
+This is **exactly** where you should be before letting ontology touch behavior.
+
+---
+
+## 4. The *next* correct moves (in order)
+
+### Step 1 — Make ontology separation *visible* (no behavior change)
+
+Right now you’re only plotting `ontology_k`.
+
+Instead, add **support overlays**:
+
+* `p_ont_t`
+* `p_ont_r`
+* `p_ont_h`
+
+Plot them as continuous color maps on the sheet.
+
+What you want to see:
+
+* Even if `ontology_k == H` everywhere,
+* **gradients** where `p_T` or `p_R` start to rise
+
+If those gradients exist, the ontology *definitions* are good.
+If they don’t, tweak **scales**, not logic.
+
+This is the single most important diagnostic step left.
+
+---
+
+### Step 2 — Adjust ontology scales, not weights
+
+If `H` dominates too hard:
+
+* reduce burstiness scale (s_b)
+* or cap `B = min(B, 0.9)`
+* or raise the `D` threshold so drawdown matters more than raw burstiness
+
+Do **not**:
+
+* add learning
+* add new features
+* let ontology influence veto yet
+
+This is ontology *definition tuning*, which is allowed.
+
+---
+
+### Step 3 — Fix option overlays (pure plumbing)
+
+Before any ontology→action coupling:
+
+* print proposal counts by `instrument_type`
+* confirm option rows exist
+* explicitly assert that `opt_*_pred` columns are non-NaN before plotting
+
+Until options show up in the sheet, don’t reason about them.
+
+---
+
+## 5. What *not* to do yet (very important)
+
+Do **not** yet:
+
+* modulate legitimacy by ontology
+* gate actions by ontology
+* learn ontology parameters
+* move ontology logic to GPU
+
+You’re still in the **interpretability + validation** phase, and that’s correct.
+
+---
+
+## 6. Big picture (this is the key reassurance)
+
+What you have now is:
+
+> A fixed invariant sheet
+>
+> * a safety-bounded learner
+> * a conservative ontology discriminator
+> * full visual observability
+
+That is *exactly* the architecture you described months ago — and it’s now real.
+
+Nothing here suggests conceptual error.
+The remaining work is **scale calibration and plumbing**, not theory.
+
+---
+
+## 7. My concrete recommendation for the very next commit
+
+👉 **Add `--plots p_ont_t,p_ont_r,p_ont_h` to the visualizer and inspect gradients.**
+
+If you want, paste:
+
+* one row of qfeat stats (min/median/max per dimension), or
+* the support values for a handful of points
+
+and I’ll tell you *exactly* how to tune the ontology scales so T/R emerge without breaking H.
+
+You’re doing this in exactly the right order.
+
+Great question — because **what comes next depends on what you see in the ontology-support plots**, and there’s a *right* fork and a *wrong* fork.
+
+I’ll give you a **decision tree**, then the **safe progression**, then the **endgame** so you know where this is heading.
+
+---
+
+## Phase boundary you are at (important)
+
+You are **finished with representation and safety**.
+
+From here on, every step is about **controlled influence**, not discovery.
+
+Think in phases:
+
+> **Observe → Separate → Condition → Optimize → (maybe) Accelerate**
+
+You are currently between **Separate** and **Condition**.
+
+---
+
+## Step 0 (you already plan): ontology-support plots
+
+You will plot:
+
+* `p_ont_t`
+* `p_ont_r`
+* `p_ont_h`
+
+### Three possible outcomes — and what each means
+
+---
+
+### Outcome A — Clean gradients appear (best case) ✅
+
+You see:
+
+* regions where `p_T` rises
+* regions where `p_R` rises
+* hazard still dominant elsewhere
+
+**Meaning:**
+Your ontology definitions are *correct*. Selection is conservative, not blind.
+
+➡️ **Proceed to Phase 1: Conditioning**
+
+---
+
+### Outcome B — Everything still flat / H dominates everywhere ⚠️
+
+You see:
+
+* `p_H ≈ 1` everywhere
+* no structure in `p_T` / `p_R`
+
+**Meaning:**
+Your *scales* are off, not the idea.
+
+➡️ Tune:
+
+* burstiness squash
+* drawdown threshold
+* temperature τ
+
+Then re-plot.
+**Do not add learning.**
+
+---
+
+### Outcome C — Speckle / flicker ❌
+
+You see:
+
+* `p_T/p_R` noisy, checkerboard
+* rapid ontology switches if enabled
+
+**Meaning:**
+You’re over-sensitive.
+
+➡️ Increase smoothing / persistence windows.
+Again: **no learning**.
+
+---
+
+## Phase 1 — Conditioning (first place ontology touches behavior)
+
+This is the **correct next step once gradients exist**.
+
+### What you do
+
+Ontology does **not** decide actions.
+
+It decides **which legitimacy evaluator is active**.
+
+Formally:
+
+```text
+ontology_k  ──▶  legitimacy_k(s_t, s_{t+1})
+                         │
+                         ▼
+                  ACT / HOLD gate (unchanged)
+```
+
+### What changes
+
+* ℓ becomes ontology-specific: ℓᵀ, ℓᴿ, ℓᴴ
+* veto logic remains global and immutable
+* thresholds τ_on / τ_off remain global
+
+### What does *not* change
+
+* trade sizing
+* instrument choice
+* option choice
+* execution
+
+This is still behavior-safe.
+
+---
+
+## Phase 2 — Learn *within* ontologies (not across)
+
+Once conditioning works:
+
+### You allow learning of LEARNABLE weights **per ontology**
+
+Examples:
+
+* `score_weightsᵀ`, `score_weightsᴿ`
+* `opt_mny_weightsᵀ` vs `opt_mny_weightsᴿ`
+
+But:
+
+* ontology definitions are frozen
+* ontology selection is frozen
+* safety envelope untouched
+
+This answers the question:
+
+> “Given this regime *definition*, what preferences work best?”
+
+Not:
+
+> “What regime should exist?”
+
+---
+
+## Phase 3 — Regime dwell-time optimization (meta, optional)
+
+Only after months of stability:
+
+* optimize ontology **persistence parameters**
+* minimize unnecessary switching
+* maximize regime coherence
+
+Still:
+
+* no learned ontology
+* no end-to-end gradients
+
+This is control theory, not ML.
+
+---
+
+## Phase 4 — GPU acceleration (only after semantics settle)
+
+Only when all of the above is stable do you:
+
+* move ontology support computation to GPU
+* read SSBO weights for scoring
+* possibly batch multiple tapes
+
+At that point, GPU is just **throughput**, not **meaning**.
+
+---
+
+## What you should *never* do (even later)
+
+Do **not**:
+
+* backprop from PnL into qfeat
+* let ontology selection optimize reward directly
+* let hazard logic become conditional
+* let learner redefine equivalence
+
+Those are the paths to semantic collapse.
+
+---
+
+## The one-line roadmap
+
+> **Next:** visualize ontology support
+> **Then:** condition legitimacy on ontology
+> **Then:** learn preferences *within* ontologies
+> **Finally:** accelerate
+
+You’re building this in the correct order — and the fact you’re asking *“what’s next after?”* instead of jumping ahead is exactly why this system is staying coherent.
+
+When you have the support plots, that will determine *which* conditioning move to make first.
+
+Below are (A) **exact** ( \ell_T,\ell_R,\ell_H ) formulas built only from your **existing qfeat + one-step deltas**, and (B) a **hard Phase-2 acceptance checklist** (go/no-go) that keeps the safety envelope intact.
+
+I’m going to assume your current single legitimacy is already in ([0,1]) and you can compute it as a baseline; these formulas can either *replace* it under ontology, or more safely **modulate** it (recommended at first).
+
+---
+
+# A) Exact legitimacy formulas from qfeat deltas
+
+Let the qfeat vector at time (t) be:
+
+* (v_t=) vol_ratio
+* (c_t=) curvature
+* (d_t=) drawdown
+* (b_t=) burstiness
+* (a_t=) acorr_1
+* (r_t=) var_ratio
+
+Define one-step deltas:
+[
+\Delta v=v_{t+1}-v_t,;
+\Delta c=c_{t+1}-c_t,;
+\Delta d=d_{t+1}-d_t,;
+\Delta b=b_{t+1}-b_t,;
+\Delta a=a_{t+1}-a_t,;
+\Delta r=r_{t+1}-r_t.
+]
+
+### Robust “closeness” primitives (all map to ([0,1]))
+
+Use these three helper functions everywhere:
+
+1. **bounded absolute delta**
+   [
+   \operatorname{close}(\Delta; s) := \exp!\left(-\frac{|\Delta|}{s+\varepsilon}\right)
+   ]
+2. **bounded positive shock penalty**
+   [
+   \operatorname{shock}(\Delta; s) := \exp!\left(-\frac{\max(0,\Delta)}{s+\varepsilon}\right)
+   ]
+3. **sigmoid for raw level (if needed)**
+   [
+   \sigma(z)=\frac{1}{1+e^{-z}}
+   ]
+
+Here (s) are *fixed* per-feature scale constants (not learnable). Start with simple tape-derived constants (median absolute delta over the run) and freeze them for the run.
+
+---
+
+## ℓ_H : hazard / dislocation legitimacy
+
+Hazard legitimacy should be *low by default* and only rise when the system is calm and stable. Treat it as a “permission to resume normality”.
+
+Use both **levels** and **deltas**:
+
+[
+\ell_H
+= \underbrace{\operatorname{close}(\Delta b; s_{\Delta b})}*{\text{no burst jump}}
+\cdot
+\underbrace{\operatorname{close}(\Delta d; s*{\Delta d})}*{\text{no drawdown jump}}
+\cdot
+\underbrace{\operatorname{shock}(\Delta b; s*{\Delta b})}*{\text{penalize burst increases}}
+\cdot
+\underbrace{\operatorname{shock}(\Delta d; s*{\Delta d})}*{\text{penalize drawdown increases}}
+\cdot
+\underbrace{\operatorname{close}(\Delta v; s*{\Delta v})}_{\text{vol stable}}
+]
+
+Optional conservative level gate (still deterministic):
+[
+\ell_H \leftarrow \ell_H \cdot \exp!\left(-\frac{b_t}{s_{b}+ \varepsilon}\right)
+]
+(so high burstiness suppresses legitimacy even if deltas are quiet)
+
+**Interpretation:** hazard regime only becomes “legitimate” when burstiness and drawdown are not escalating and volatility is steady.
+
+---
+
+## ℓ_R : range / mean-reversion legitimacy
+
+Range legitimacy is about **stationarity of oscillatory geometry**: curvature + range-like behavior should be stable, and burstiness should not spike.
+
+[
+\ell_R
+======
+
+\operatorname{close}(\Delta c; s_{\Delta c})
+\cdot
+\operatorname{close}(\Delta v; s_{\Delta v})
+\cdot
+\operatorname{close}(\Delta r; s_{\Delta r})
+\cdot
+\operatorname{shock}(\Delta b; s_{\Delta b})
+\cdot
+\operatorname{shock}(\Delta d; s_{\Delta d})
+]
+
+And add an autocorr preference for mean-reversion (lag-1 autocorr near 0 or negative). Map (a_t\in[-1,1]) to a penalty that prefers smaller values:
+
+[
+\text{mr_pref}(a_t) := \exp!\left(-\frac{\max(0,a_t)}{s_a+\varepsilon}\right)
+]
+then:
+[
+\ell_R \leftarrow \ell_R \cdot \text{mr_pref}(a_t)
+]
+
+**Interpretation:** range is “legitimate” when the oscillatory shape and volatility structure are stable and we’re not entering dislocation.
+
+---
+
+## ℓ_T : trend legitimacy
+
+Trend legitimacy is about **persistence + stable volatility structure** while controlling for dislocation (burst/drawdown spikes). Here we want autocorr to be stable, var_ratio stable, and avoid increasing hazard.
+
+[
+\ell_T
+======
+
+\operatorname{close}(\Delta a; s_{\Delta a})
+\cdot
+\operatorname{close}(\Delta r; s_{\Delta r})
+\cdot
+\operatorname{close}(\Delta v; s_{\Delta v})
+\cdot
+\operatorname{shock}(\Delta b; s_{\Delta b})
+\cdot
+\operatorname{shock}(\Delta d; s_{\Delta d})
+]
+
+Add a persistence preference for positive autocorr:
+
+[
+\text{trend_pref}(a_t) := \exp!\left(-\frac{\max(0, a_0-a_t)}{s_a+\varepsilon}\right)
+]
+where (a_0) is a fixed “trend floor” (e.g. 0.1). Then:
+[
+\ell_T \leftarrow \ell_T \cdot \text{trend_pref}(a_t)
+]
+
+**Interpretation:** trend is legitimate when persistence is consistent and not being disrupted by shocks.
+
+---
+
+## Safest wiring (recommended first): modulate baseline ℓ
+
+Instead of replacing your current legitimacy, do:
+
+[
+\ell_{\text{eff}} = \ell_{\text{base}} \cdot \big( \alpha + (1-\alpha),\ell_k \big)
+]
+with (\alpha \in [0.5,0.8]) fixed (not learnable).
+This ensures ontology can **refine** legitimacy but cannot create it from nothing.
+
+Then your existing ACT/HOLD hysteresis uses (\ell_{\text{eff}}). Veto/hazard stays as-is.
+
+---
+
+# B) Phase 2 hard acceptance checklist (go/no-go)
+
+This is the “no cope” checklist. If any **NO-GO** triggers, revert the coupling and fix scales/definitions.
+
+## Preconditions (must be true before Phase 2)
+
+* Ontology gate is **behavior-neutral** up to now ✅
+* Support plots show **non-flat gradients** for at least two ontologies (you have this) ✅
+* Veto/hazard region is geometrically coherent ✅
+
+## GO/NO-GO metrics after wiring ontology → legitimacy
+
+### 1) Safety invariants (absolute NO-GO if violated)
+
+* **NO-GO:** Any increase in actions inside vetoed points
+  (“vetoed AND would_act” count must remain **0**)
+* **NO-GO:** Hazard-vetoed points ever become eligible for ACT due to ontology
+  (i.e. if hazard veto is active, ACT must stay suppressed)
+
+### 2) Behavior stability (NO-GO if these drift too much)
+
+Compare pre/post coupling on the same tape:
+
+* **ACT rate change:**
+
+  * **GO:** within ±10% relative
+  * **NO-GO:** > ±25% relative (ontology is acting like a new strategy)
+
+* **Switch-induced spikes:**
+
+  * Count ontology switches, and measure ACT rate within ±N steps of switch
+  * **GO:** no spike
+  * **NO-GO:** spikes near switches (means coupling is too sharp; enforce “switch ⇒ HOLD 1 step”)
+
+### 3) Geometric alignment checks (must improve or stay equal)
+
+Using your sheet plots:
+
+* **GO:** `ℓ_eff` becomes *more stratified* within clusters (sharper gradients)
+* **NO-GO:** `ℓ_eff` becomes near-constant (washed out) or speckled (over-sensitive)
+
+Operationally:
+
+* compute within-cluster variance of ℓ in the two burstiness bands:
+
+  * **GO:** variance decreases *within* each band and increases *between* bands
+  * **NO-GO:** variance increases within bands (ontology is injecting noise)
+
+### 4) Ontology semantics sanity checks (soft but important)
+
+* **GO:** In regions where `p_H` is high, `ℓ_H` is low unless calm resumes
+* **NO-GO:** `ℓ_H` is high exactly where hazard/cooldown live
+
+### 5) “Do no harm” backtest proxy (if you have it)
+
+Even without full PnL, use a proxy:
+
+* distribution of forward returns for ACT vs HOLD:
+
+  * **GO:** separation does not get worse
+  * **NO-GO:** ACT distribution shifts toward worse tails
+
+(Still: veto logic remains the true guardrail.)
+
+---
+
+## What you should do immediately after Phase 2 passes
+
+Only after you get a clean GO:
+
+1. Log per-ontology stats:
+
+   * dwell time
+   * `mean(ℓ_k)`, `mean(ℓ_eff)`
+   * ACT rates by ontology
+2. Only then consider Phase 3: learning LEARNABLE weights *within* the ontology family.
+
+---
+
+If you tell me whether your current pipeline computes (s_{Δ*}) scales (median abs deltas) or you’d rather hardcode initial constants, I can give you a plug-in-ready snippet for `compute_legitimacy_T/R/H()` that matches your float32 determinism style.
+
+
+Yes — **do it**, and do it exactly the way you proposed.
+
+### Decision
+
+✅ **Use per-run median absolute deltas (s_{\Delta *}) computed from the tape and frozen for that run.**
+This is the correct choice: deterministic, scale-aware, non-learnable, and invariant to asset units.
+
+### Go-ahead: implement ontology-specific legitimacy modulation (logging-only)
+
+Please wire it into `scripts/run_proposals.py` **with no behavioral effect** yet.
+
+---
+
+## Implementation specifics (to remove ambiguity)
+
+### 1) Scales
+
+* Compute once per run from the qfeat tape:
+
+  * (s_{\Delta v}, s_{\Delta c}, s_{\Delta d}, s_{\Delta b}, s_{\Delta a}, s_{\Delta r})
+  * Use **median(|Δ|)**; clamp with a small floor (e.g. `1e-6`) to avoid zero.
+* Log the frozen scales in the proposal header or a sidecar JSON for auditability.
+
+### 2) Legitimacy formulas
+
+* Implement **ℓ_T, ℓ_R, ℓ_H** exactly as specified previously, using those frozen scales.
+* Keep all math float32-safe and deterministic.
+
+### 3) Modulation (not replacement)
+
+* Compute:
+
+  * `ell_T`, `ell_R`, `ell_H`
+  * `ell_k = ell_{ontology_k}`
+* Modulate baseline legitimacy:
+  [
+  \ell_{\text{eff}}=\ell_{\text{base}}\cdot\big(\alpha+(1-\alpha)\ell_k\big)
+  ]
+* **Set `alpha = 0.7`** for the first pass (conservative; ontology can refine, not create).
+
+### 4) Logging (required fields)
+
+Add to the proposal log:
+
+* `ell_T`, `ell_R`, `ell_H`
+* `ell_k` (selected)
+* `ell_eff`
+* `alpha`
+* frozen scales: `s_dv, s_dc, s_dd, s_db, s_da, s_dr`
+
+### 5) Hard guardrails
+
+* **No change** to:
+
+  * ACT/HOLD decisions
+  * veto / hazard logic
+  * thresholds (`tau_on/off`)
+* Enforce: if `hazard_veto` active ⇒ `ell_eff` is logged but **never used**.
+
+---
+
+## After this lands (what I’ll check)
+
+* Sheet overlays for `ell_T/R/H` and `ell_eff`
+* Verify:
+
+  * `ell_eff` sharpens **within** ontological regions
+  * no ACT leakage into veto regions
+  * ACT rate unchanged (±10%)
+
+If that passes, we proceed to **Phase 2 GO** and condition legitimacy (still without learning).
+
+**Go ahead and implement.**
+
+
+**Yes — Phase 2 is a GO**, with one very small, disciplined constraint on *how* you proceed.
+
+I’ll justify the GO explicitly, then give you the **exact next action** and the **only acceptable coupling** for Phase 2.
+
+---
+
+## Why this is a legitimate Phase-2 GO
+
+Based on what you’ve implemented and what we’ve already observed:
+
+### 1) All Phase-2 preconditions are satisfied ✅
+
+* **Ontology support is real and separable**
+  You showed clean, non-flat gradients in `p_ont_T / p_ont_R / p_ont_H`.
+
+* **Ontology selection is conservative**
+  H dominates where burstiness/drawdown dominate; R emerges where structure exists.
+
+* **Legitimacy modulation is deterministic and frozen**
+
+  * per-run median |Δ| scales
+  * frozen + logged
+  * no learning
+  * float32-safe
+    This is exactly the right epistemic status.
+
+* **Zero behavior change so far**
+  ACT/HOLD, veto, hazard are untouched.
+
+That is the formal definition of “safe to condition”.
+
+---
+
+## Phase 2 GO — but with a *single* allowed coupling
+
+### ✅ Allowed in Phase 2
+
+**Ontology may select the legitimacy lens. Nothing else.**
+
+Concretely:
+
+```text
+ontology_k
+   ↓
+ℓ_k  (T / R / H)
+   ↓
+ℓ_eff = ℓ_base · (α + (1−α)·ℓ_k)
+   ↓
+ACT / HOLD hysteresis (unchanged thresholds)
+```
+
+### ❌ Still forbidden in Phase 2
+
+* Ontology affecting veto / hazard
+* Ontology affecting size
+* Ontology affecting instrument choice
+* Ontology affecting option selection
+* Any learning
+* Any GPU changes
+
+If any of those happen, that’s a Phase-3 violation.
+
+---
+
+## Exactly what to do next (no ambiguity)
+
+### Step 1 — Turn on ℓ_eff for gating **behind a hard flag**
+
+Add a CLI flag, default **off**:
+
+```bash
+--use-ontology-legitimacy
+```
+
+Behavior:
+
+```python
+if use_ontology_legitimacy:
+    ell_for_gate = ell_eff
+else:
+    ell_for_gate = ell_base
+```
+
+No other code path changes.
+
+This lets you run **A/B identical tapes** safely.
+
+---
+
+### Step 2 — Mandatory equivalence check (must pass)
+
+On the same tape, run:
+
+* baseline (no ontology)
+* ontology-conditioned legitimacy
+
+Then assert:
+
+* **ACT/HOLD identical** for at least one run
+  (expected with α=0.7; if not identical, that’s already informative)
+
+or, if not identical:
+
+* ACT rate change ≤ ±10%
+* ZERO cases of:
+
+  * `vetoed && ACT`
+  * `hazard_veto && ACT`
+
+If either fails → revert and inspect ℓ scaling.
+
+---
+
+### Step 3 — Visual acceptance (non-negotiable)
+
+Re-run the sheet visualiser with:
+
+* `ell_base`
+* `ell_eff`
+* `ontology_k`
+
+**GO signatures**
+
+* ℓ_eff is *sharper within clusters*
+* ACT boundary aligns more tightly with geometry
+* Hazard band remains suppressed
+
+**NO-GO signatures**
+
+* ℓ_eff washes out (near constant)
+* ACT leaks upward into hazard region
+* Ontology switches cause ACT spikes
+
+---
+
+## What Phase 2 success *means*
+
+If this passes, you have proven:
+
+> **Ontology selection is choosing *how to interpret* the same invariant geometry, not inventing a new strategy.**
+
+That is the exact conceptual contract you were aiming for.
+
+At that point, you are justified to move to Phase 3:
+
+* **Learning LEARNABLE weights *within* ontology**
+* still no learning of ontology
+* still no veto changes
+
+---
+
+## One-line verdict
+
+> **Phase 2 is a GO.**
+> Proceed by letting ontology select the legitimacy lens via `ℓ_eff`, behind a flag, with strict A/B checks.
+
+You’ve done this *correctly* — slow, observable, and falsifiable.
+When you’re ready, tell me the result of the first `--use-ontology-legitimacy` run and I’ll tell you whether to advance or tune.
