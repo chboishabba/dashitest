@@ -28,6 +28,7 @@ from utils.weights_config import (
     format_resolved,
     validate_never_learnable,
     validate_known_paths,
+    clamp_learnable_vector,
 )
 
 try:
@@ -324,6 +325,15 @@ def main() -> None:
     ap.add_argument("--ont-ton", type=int, default=8, help="Ontology gate on persistence.")
     ap.add_argument("--ont-toff", type=int, default=8, help="Ontology gate off persistence.")
     ap.add_argument("--ont-margin", type=float, default=0.08, help="Ontology gate margin.")
+    ap.add_argument(
+        "--use-ontology-legitimacy",
+        action="store_true",
+        help="Use ontology-modulated ell_eff for ACT/HOLD gating.",
+    )
+    ap.add_argument("--use-learned-weights", type=Path, default=None, help="Per-ontology weights JSON.")
+    ap.add_argument("--use-score-weights", action="store_true", help="Apply per-ontology score_weights.")
+    ap.add_argument("--score-weight-beta", type=float, default=0.1, help="Score weight scale (beta).")
+    ap.add_argument("--score-weight-clip", type=float, default=0.05, help="Score weight delta clip.")
     ap.add_argument("--dump-schema", action="store_true", help="Print resolved weight sources.")
     args = ap.parse_args()
 
@@ -528,6 +538,65 @@ def main() -> None:
         toff=args.ont_toff,
         margin=args.ont_margin,
     )
+    default_weights = {
+        "T": {
+            "score_weights": np.array([1, 1, 1, 1, 1, 1], dtype=np.float32),
+            "instrument_weights": np.array([1.0, 1.0, 0.5], dtype=np.float32),
+            "opt_tenor_weights": np.array([0.5, 0.8, 1.0, 0.6, 0.3], dtype=np.float32),
+            "opt_mny_weights": np.array([0.3, 0.6, 1.0, 0.6, 0.2], dtype=np.float32),
+            "size_weights": np.array([1, 1, 1, 1], dtype=np.float32),
+        },
+        "R": {
+            "score_weights": np.array([1, 1, 1, 1, 1, 1], dtype=np.float32),
+            "instrument_weights": np.array([0.8, 0.8, 1.0], dtype=np.float32),
+            "opt_tenor_weights": np.array([0.3, 0.6, 1.0, 0.8, 0.4], dtype=np.float32),
+            "opt_mny_weights": np.array([0.2, 0.5, 1.0, 0.7, 0.3], dtype=np.float32),
+            "size_weights": np.array([1, 1, 1, 1], dtype=np.float32),
+        },
+        "H": {
+            "score_weights": np.array([1, 1, 1, 1, 1, 1], dtype=np.float32),
+            "instrument_weights": np.array([0.2, 0.2, 0.1], dtype=np.float32),
+            "opt_tenor_weights": np.array([0.1, 0.1, 0.1, 0.1, 0.1], dtype=np.float32),
+            "opt_mny_weights": np.array([0.1, 0.1, 0.1, 0.1, 0.1], dtype=np.float32),
+            "size_weights": np.array([1, 1, 1, 1], dtype=np.float32),
+        },
+    }
+    learned_weights = None
+    if args.use_learned_weights is not None and args.use_learned_weights.exists():
+        payload = json.loads(args.use_learned_weights.read_text())
+        learned_weights = payload.get("weights", payload)
+
+    def _weight_vec(ont: str, name: str, size: int) -> np.ndarray:
+        base = default_weights.get(ont, default_weights["H"]).get(name)
+        if base is None or base.size != size:
+            base = np.ones(size, dtype=np.float32)
+        vec = base.astype(np.float32, copy=True)
+        if learned_weights is not None and ont in learned_weights:
+            raw = learned_weights[ont].get(name)
+            if raw is not None and len(raw) == size:
+                vec = np.array(raw, dtype=np.float32)
+        vec = np.array(clamp_learnable_vector(vec.tolist(), name), dtype=np.float32)
+        total = float(np.sum(vec))
+        if total > 0 and math.isfinite(total):
+            vec = vec / total
+        return vec
+
+    def _apply_weights(probs: np.ndarray, weights: np.ndarray) -> np.ndarray:
+        if probs.size != weights.size:
+            return probs
+        weighted = probs * weights
+        total = float(np.sum(weighted))
+        if total <= 0 or not math.isfinite(total):
+            return probs
+        return weighted / total
+
+    def _score_delta(w_score: np.ndarray, features: np.ndarray, beta: float, clip: float) -> float:
+        if w_score.size != features.size:
+            return 0.0
+        delta = float(beta) * float(np.dot(w_score, features))
+        if not math.isfinite(delta):
+            return 0.0
+        return float(np.clip(delta, -abs(clip), abs(clip)))
 
     stats: dict[tuple[int, int, str], RunningStats] = {}
     buffers: dict[tuple[int, int, str], BucketBuffer] = {}
@@ -545,6 +614,11 @@ def main() -> None:
         )
         action_state = "HOLD" if is_holding else "ACT"
         ontology_k, ontology_switched = ontology_gate.step(ont_probs, action_state)
+        w_score = _weight_vec(ontology_k, "score_weights", 6)
+        w_inst = _weight_vec(ontology_k, "instrument_weights", 3)
+        w_size = _weight_vec(ontology_k, "size_weights", 4)
+        w_tenor = _weight_vec(ontology_k, "opt_tenor_weights", 5)
+        w_mny = _weight_vec(ontology_k, "opt_mny_weights", 5)
         hazard = (
             args.hazard_a * float(qrow[3])
             + args.hazard_b * float(qrow[1])
@@ -580,12 +654,14 @@ def main() -> None:
         else:
             ell_k = ell_h
         ell_eff = float(ell[t]) * (alpha + (1.0 - alpha) * float(ell_k))
+        ell_base = float(ell[t])
+        ell_for_gate = float(ell_eff) if args.use_ontology_legitimacy else ell_base
         row = {
             "i": int(t),
             "ts": int(ts_int[t]),
             "price": float(price[t]),
             "state": int(state[t]),
-            "ell": float(ell[t]),
+            "ell": ell_base,
             "ell_T": float(ell_t),
             "ell_R": float(ell_r),
             "ell_H": float(ell_h),
@@ -598,7 +674,7 @@ def main() -> None:
             "s_db": float(s_db),
             "s_da": float(s_da),
             "s_dr": float(s_dr),
-            "actionability": float(ell[t]),
+            "actionability": ell_base,
             "margin": float(margin[t]) if math.isfinite(margin[t]) else float("nan"),
             "acceptable": bool(acceptable[t]),
             "hazard": float(hazard),
@@ -616,12 +692,12 @@ def main() -> None:
 
         gate_open = True
         if not is_holding:
-            if ell[t] < args.tau_on:
+            if ell_for_gate < args.tau_on:
                 gate_open = False
         else:
-            if ell[t] < args.tau_off:
+            if ell_for_gate < args.tau_off:
                 gate_open = False
-        if ell[t] <= 0.0 or not math.isfinite(ell[t]):
+        if ell_for_gate <= 0.0 or not math.isfinite(ell_for_gate):
             gate_open = False
 
         if cooldown > 0:
@@ -790,6 +866,8 @@ def main() -> None:
             logits_inst = x_inst @ inst_W + inst_b
             inst_probs = _softmax_vec(logits_inst, 1.0)
             inst_source = "model"
+        if args.use_learned_weights is not None and learned_weights is not None and dir_pred != 0:
+            inst_probs = _apply_weights(inst_probs, w_inst)
         inst_choice = inst_labels[int(np.argmax(inst_probs))]
         size_centers = np.array([0.0, 0.5, 1.0, 2.0], dtype=float)
         size_labels = ["0", "0.5", "1", "2"]
@@ -809,6 +887,8 @@ def main() -> None:
             size_score = pnl_weight * (ell_margin * dir_conf) / (1.0 + risk)
         size_logits = -np.abs(size_score - size_centers)
         size_probs = _softmax_vec(size_logits, args.size_temp) if dir_pred != 0 else np.array([1.0, 0.0, 0.0, 0.0])
+        if args.use_learned_weights is not None and learned_weights is not None and dir_pred != 0:
+            size_probs = _apply_weights(size_probs, w_size)
         size_pred = size_labels[int(np.argmax(size_probs))] if dir_pred != 0 else "0"
 
         inst_confidence = float(np.sort(inst_probs)[-1] - np.sort(inst_probs)[-2]) if dir_pred != 0 else float("nan")
@@ -819,20 +899,30 @@ def main() -> None:
             best_score = float("nan")
             second_score = float("nan")
             score_margin = float("nan")
+            best_score_eff = float("nan")
+            second_score_eff = float("nan")
+            score_margin_eff = float("nan")
         else:
             cand_scores = []
             cand_meta = []
+            cand_scores_eff = []
+            p_dir = max(float(probs[classes.index(dir_pred)]), 1e-6)
+            logp_dir = math.log(p_dir)
+            ell_margin = max(0.0, float(ell[t] - args.tau_on))
             for i_s, inst in enumerate(inst_labels):
                 for i_m, size in enumerate(size_labels):
                     score = 0.0
-                    p_dir = max(float(probs[classes.index(dir_pred)]), 1e-6)
                     p_inst = max(float(inst_probs[i_s]), 1e-6)
                     p_size = max(float(size_probs[i_m]), 1e-6)
-                    score += math.log(p_dir) + math.log(p_inst) + math.log(p_size)
-                    score += 0.8 * float(ell[t] - args.tau_on)
+                    logp_inst = math.log(p_inst)
+                    logp_size = math.log(p_size)
+                    score += logp_dir + logp_inst + logp_size
+                    score += 0.8 * ell_margin
                     score -= 0.7 * float(hazard)
+                    carry = 0.0
                     if inst == "perp" and funding is not None and math.isfinite(float(funding[t])):
-                        score += 0.6 * (-float(funding[t]) * float(dir_pred))
+                        carry = 0.6 * (-float(funding[t]) * float(dir_pred))
+                        score += carry
                     # tail penalty from current bucket if available
                     pen = 0.0
                     key_c = (dir_pred, ell_bin, inst)
@@ -847,13 +937,27 @@ def main() -> None:
                                 pen = max(0.0, -cvar - float(args.epsilon))
                     score -= 1.5 * pen
                     cand_scores.append(score)
+                    if args.use_score_weights:
+                        features = np.array(
+                            [logp_dir, logp_inst, logp_size, ell_margin, -float(hazard), carry],
+                            dtype=np.float32,
+                        )
+                        delta = _score_delta(w_score, features, args.score_weight_beta, args.score_weight_clip)
+                        cand_scores_eff.append(score + delta)
+                    else:
+                        cand_scores_eff.append(score)
                     cand_meta.append((inst, size))
             cand_scores = np.array(cand_scores, dtype=float)
-            best_idx = int(np.argmax(cand_scores))
-            best_score = float(cand_scores[best_idx])
+            cand_scores_eff = np.array(cand_scores_eff, dtype=float)
+            best_idx = int(np.argmax(cand_scores_eff))
+            best_score = float(np.sort(cand_scores)[::-1][0]) if cand_scores.size else float("nan")
             sorted_scores = np.sort(cand_scores)[::-1]
             second_score = float(sorted_scores[1]) if sorted_scores.size > 1 else float("nan")
             score_margin = best_score - second_score if math.isfinite(second_score) else float("nan")
+            sorted_scores_eff = np.sort(cand_scores_eff)[::-1]
+            best_score_eff = float(sorted_scores_eff[0]) if sorted_scores_eff.size else float("nan")
+            second_score_eff = float(sorted_scores_eff[1]) if sorted_scores_eff.size > 1 else float("nan")
+            score_margin_eff = best_score_eff - second_score_eff if math.isfinite(second_score_eff) else float("nan")
             instrument_pred, size_pred = cand_meta[best_idx]
 
         opt_type_pred = "none"
@@ -879,6 +983,8 @@ def main() -> None:
             tenor_scores += args.opt_tenor_w_hazard * float(z_hazard[t])
             tenor_scores -= args.opt_tenor_w_iv * (z_iv[t] if z_iv is not None else 0.0)
             opt_tenor_probs = _softmax_vec(tenor_scores, args.opt_temp)
+            if args.use_learned_weights is not None and learned_weights is not None:
+                opt_tenor_probs = _apply_weights(opt_tenor_probs, w_tenor)
             opt_tenor_pred = tenor_labels[int(np.argmax(opt_tenor_probs))]
 
             opt_mny_labels = ["m_deep_itm", "m_itm", "m_atm", "m_otm", "m_deep_otm"]
@@ -889,6 +995,8 @@ def main() -> None:
             mny_scores[3] += 0.2 - 0.6 * args.opt_mny_w_iv * (z_iv[t] if z_iv is not None else 0.0)
             mny_scores[4] += 0.05 + 0.2 * args.opt_mny_w_hazard * float(z_hazard[t])
             opt_mny_probs = _softmax_vec(mny_scores, args.opt_temp)
+            if args.use_learned_weights is not None and learned_weights is not None:
+                opt_mny_probs = _apply_weights(opt_mny_probs, w_mny)
             opt_mny_pred = opt_mny_labels[int(np.argmax(opt_mny_probs))]
 
         delta_pnl = float(future_ret[t])
@@ -999,6 +1107,9 @@ def main() -> None:
                 "score_best": best_score,
                 "score_second": second_score,
                 "score_margin": score_margin,
+                "score_best_eff": best_score_eff,
+                "score_second_eff": second_score_eff,
+                "score_margin_eff": score_margin_eff,
             }
         )
         rows.append(row)

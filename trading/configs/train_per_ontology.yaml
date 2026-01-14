@@ -1,0 +1,32 @@
+training:
+  epochs: 8
+  batch_size: 256
+  learning_rate: 5.0e-4
+  grad_clip_norm: 1.0
+  confidence_min: 0.60
+
+loss:
+  l2_reg: 1.0e-3
+  entropy_reg: 1.0e-3
+
+forward_proxy:
+  horizon: 8
+  clip_return: 0.01
+  use_log_return: true
+
+ontologies:
+  - T
+  - R
+  - H
+
+learnable:
+  score_weights: true
+  instrument_weights: true
+  opt_tenor_weights: false
+  opt_mny_weights: false
+  size_weights: false
+
+logging:
+  log_every: 200
+  dump_weights: true
+  dump_grad_norms: true

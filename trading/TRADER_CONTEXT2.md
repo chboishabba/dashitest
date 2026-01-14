@@ -12163,3 +12163,1009 @@ At that point, you are justified to move to Phase 3:
 
 You’ve done this *correctly* — slow, observable, and falsifiable.
 When you’re ready, tell me the result of the first `--use-ontology-legitimacy` run and I’ll tell you whether to advance or tune.
+
+
+**GO. Phase-2 is clean and accepted.**
+
+Your A/B results are exactly what we wanted at this checkpoint:
+
+* **ACT/HOLD equivalence: PASS**
+* **ACT rate unchanged (0 → 0)** — conservative, as expected for this tape
+* **No veto or hazard leaks** — hard invariant preserved
+
+This confirms that **ontology-conditioned legitimacy is behavior-safe** and does not punch through the safety envelope.
+
+---
+
+## What this means (formally)
+
+* Ontology is **selecting interpretation**, not creating actions.
+* Legitimacy modulation is **refining boundaries**, not inventing signal.
+* The system remains **falsifiable and auditable**.
+
+You’re cleared to advance.
+
+---
+
+## Next steps (strict order)
+
+### Phase 2b — Visual verification (mandatory, quick)
+
+Re-run the sheet visualizer comparing:
+
+* `ell_base`
+* `ell_eff`
+* `ontology_k`
+
+**Pass criteria**
+
+* `ell_eff` sharpens **within** ontological regions.
+* No brightening in hazard regions.
+* No speckle introduced.
+
+(If it looks good, proceed; if not, adjust scales/α—not logic.)
+
+---
+
+### Phase 3 — Learn *within* ontology (preferences only)
+
+Enable learning **per-ontology**, keeping everything else frozen:
+
+* Learnables (per ontology):
+  `score_weights^k`, `opt_tenor_weights^k`, `opt_mny_weights^k`, `size_weights^k`
+* Frozen forever:
+  ontology definitions, ontology gate, veto/hazard, thresholds, geometry
+
+**Guardrails**
+
+* Train **conditioned on fixed `ontology_k`**.
+* No cross-ontology gradients.
+* A/B compare again after training.
+
+---
+
+### Phase 4 — Persistence & dwell optimization (optional)
+
+Tune hysteresis/margins to reduce unnecessary ontology switching. Still no learning of ontology.
+
+---
+
+### Phase 5 — GPU acceleration (last)
+
+Only after semantics settle: move support + legitimacy math to GPU for throughput.
+
+---
+
+## One-line verdict
+
+> **Phase-2 coupling is validated. Proceed to Phase-3 (per-ontology preference learning), after a quick visual sanity check.**
+
+If you want, I can:
+
+* sketch the per-ontology training loop with safeguards, or
+* propose default initializers for per-ontology weights, or
+* define the Phase-3 A/B acceptance checklist.
+
+Just say which.
+
+
+• Got it — thanks for the full run output. The A/B check is clean:
+
+  - ACT/HOLD equivalence: PASS
+  - ACT rate unchanged
+  - No vetoed && ACT
+  - No hazard_veto && ACT
+
+  This satisfies Phase‑2 acceptance.
+
+  Next step (as you outlined): run the visual check comparing ell_base, ell_eff, and ontology_k. If you want, tell me the plotting command you use and I’ll run it for you, or I can wire a quick plot helper that overlays those columns.
+  
+  Perfect — here’s a **drop-in Phase-3 kit** you can use immediately. I’ll keep it concrete and conservative, and aligned with everything you’ve already locked (ontology, safety, geometry).
+
+---
+
+# 1) Exact training config YAML + CLI flags
+
+### `configs/train_per_ontology.yaml`
+
+```yaml
+# Phase-3 per-ontology preference training
+# NOTHING here may redefine ontology, veto, or geometry.
+
+training:
+  epochs: 8
+  batch_size: 256
+  learning_rate: 5.0e-4
+  grad_clip_norm: 1.0
+  confidence_min: 0.60      # only train on stable ontology points
+  alpha_legitimacy: 0.7     # logged only; not trained
+
+loss:
+  type: pairwise_rank
+  margin: 0.0               # logistic ranking
+  l2_reg: 1.0e-3            # pull back to defaults
+  entropy_reg: 1.0e-3       # prevent collapse
+
+forward_proxy:
+  horizon: 8                # bars
+  clip_return: 0.01         # 1% absolute clip
+  use_log_return: true
+
+ontologies:
+  - T
+  - R
+  - H
+
+learnable:
+  score_weights: true
+  instrument_weights: true
+  opt_tenor_weights: false  # enable later
+  opt_mny_weights: false
+  size_weights: false
+
+logging:
+  log_every: 200
+  dump_weights: true
+  dump_grad_norms: true
+```
+
+### CLI invocation
+
+```bash
+PYTHONPATH=. python scripts/train_per_ontology.py \
+  --tape logs/qfeat_btc.us_20260113_210153.memmap \
+  --proposal-log logs/proposals_btc.us.ont.csv \
+  --prices-csv data/raw/stooq/btc.us.csv \
+  --config configs/train_per_ontology.yaml \
+  --out logs/weights_phase3_ont.json
+```
+
+**Notes**
+
+* `proposal-log` must already contain `ontology_k`, `ontology_confidence`, and features.
+* This script **never** runs execution or veto logic.
+* Output is weights only — no decisions.
+
+---
+
+# 2) `train_per_ontology.py` skeleton (safe, minimal)
+
+```python
+# scripts/train_per_ontology.py
+import argparse, json
+import numpy as np
+
+from utils.weights_config import (
+    LEARNABLE, clamp_learnable_vector, normalize_vector
+)
+from utils.rank_loss import pairwise_rank_loss
+from utils.forward_proxy import forward_return_proxy
+
+def load_config(path):
+    with open(path) as f:
+        return yaml.safe_load(f)
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--tape", required=True)
+    ap.add_argument("--proposal-log", required=True)
+    ap.add_argument("--prices-csv", required=True)
+    ap.add_argument("--config", required=True)
+    ap.add_argument("--out", required=True)
+    args = ap.parse_args()
+
+    cfg = load_config(args.config)
+
+    # -------------------------
+    # Load data (read-only)
+    # -------------------------
+    tape = np.memmap(args.tape, mode="r")
+    props = load_proposals(args.proposal_log)
+    prices = load_prices(args.prices_csv)
+
+    # Forward return proxy (frozen)
+    fwd = forward_return_proxy(
+        prices,
+        horizon=cfg["forward_proxy"]["horizon"],
+        clip=cfg["forward_proxy"]["clip_return"],
+        logret=cfg["forward_proxy"]["use_log_return"],
+    )
+
+    # -------------------------
+    # Initialize weights
+    # -------------------------
+    weights = init_default_weights_per_ontology()
+
+    # -------------------------
+    # Training loop
+    # -------------------------
+    for epoch in range(cfg["training"]["epochs"]):
+        for k in cfg["ontologies"]:
+            rows = select_rows(
+                props,
+                ontology=k,
+                conf_min=cfg["training"]["confidence_min"]
+            )
+            if len(rows) < cfg["training"]["batch_size"]:
+                continue
+
+            batch = sample_batch(rows, cfg["training"]["batch_size"])
+
+            scores = score_batch(batch, weights[k])
+            proxy = fwd[batch.indices]
+
+            loss, grads = pairwise_rank_loss(
+                scores,
+                proxy,
+                l2=cfg["loss"]["l2_reg"],
+                entropy=cfg["loss"]["entropy_reg"],
+            )
+
+            grads = clip_norm(grads, cfg["training"]["grad_clip_norm"])
+            weights[k] = apply_update(
+                weights[k],
+                grads,
+                lr=cfg["training"]["learning_rate"],
+            )
+
+            # SAFETY: clamp + renormalize
+            for name in weights[k]:
+                weights[k][name] = normalize_vector(
+                    clamp_learnable_vector(weights[k][name], name)
+                )
+
+        log_epoch(epoch, weights)
+
+    with open(args.out, "w") as f:
+        json.dump(weights, f, indent=2)
+
+if __name__ == "__main__":
+    main()
+```
+
+### Hard guarantees in this skeleton
+
+* No access to veto / hazard
+* No access to ontology logic
+* No geometry changes
+* Per-ontology isolation enforced structurally
+* All outputs reversible (just weights)
+
+---
+
+# 3) Minimal forward-return proxy (robust & conservative)
+
+This is **not PnL learning**. It’s just a **ranking signal**.
+
+### Definition
+
+For bar index (t), horizon (H):
+
+#### Log-return (preferred)
+
+[
+r_t = \log\left(\frac{P_{t+H}}{P_t}\right)
+]
+
+Then clip:
+[
+\tilde r_t = \mathrm{clip}(r_t,,-r_{\max},,r_{\max})
+]
+
+Use **only the sign and ordering**, not magnitude.
+
+---
+
+### Implementation (`utils/forward_proxy.py`)
+
+```python
+import numpy as np
+
+def forward_return_proxy(prices, horizon=8, clip=0.01, logret=True):
+    P = np.asarray(prices, dtype=np.float64)
+    out = np.zeros_like(P)
+
+    for t in range(len(P) - horizon):
+        if logret:
+            r = np.log(P[t + horizon] / P[t])
+        else:
+            r = (P[t + horizon] - P[t]) / P[t]
+
+        out[t] = np.clip(r, -clip, clip)
+
+    return out
+```
+
+### Why this is safe
+
+* No leverage
+* No sizing
+* No reward hacking
+* No tail chasing
+* Purely ordinal (ranking loss)
+
+This proxy answers only:
+
+> “Between two candidates, which one did less badly / slightly better?”
+
+That’s appropriate for **preference learning**, not strategy invention.
+
+---
+
+# Final Phase-3 invariant (keep this in mind)
+
+> **We are training taste, not belief.**
+> Ontology defines *what the world is*.
+> Geometry defines *what happened*.
+> Learning only defines *which allowed choices we prefer*.
+
+---
+
+## What to do next
+
+1. Commit `train_per_ontology.py`
+2. Run it with **score_weights only**
+3. Run A/B vs Phase-2 (same tape)
+4. Inspect sheet plots + acceptance checklist
+
+If you want, next I can:
+
+* wire this into a reproducible experiment runner,
+* define Phase-3 failure modes visually,
+* or help you decide when to enable option weights safely.
+
+Just say which.
+
+Great — I’ll do this in two clean parts:
+
+1. **Semantic review of the learned weight diffs** (what they *mean*, not the numbers)
+2. **Which learnable to unlock next, and why (only one)**
+
+I’ll stay grounded in the behavior you actually observed.
+
+---
+
+## 1) Semantic review of the Phase-3 weight diffs
+
+From your run:
+
+* Weights stayed **very close to defaults**
+* Only **tiny drift in H (hazard) ontology**
+* T and R essentially unchanged
+
+That combination is *exactly* what we want at this stage. Here’s what it means.
+
+---
+
+### A. Trend ontology (T): unchanged = good
+
+**Interpretation**
+
+* The learner did *not* find stable pairwise preference signal in trend contexts on this tape.
+* That’s expected for BTC microstructure over a short horizon:
+
+  * trends exist, but preference differences between allowed actions are subtle
+  * your defaults already encode “reasonable trend taste”
+
+**Conclusion**
+
+* No overfitting
+* No geometry distortion
+* Trend ontology is behaving as a *recognizer*, not a signal generator
+
+This is a **pass**.
+
+---
+
+### B. Range ontology (R): unchanged = very good
+
+This is actually the strongest signal of correctness.
+
+**Interpretation**
+
+* In range regimes, noisy preference learning often collapses into:
+
+  * over-weighting curvature
+  * over-trading micro-oscillations
+* The fact that weights didn’t drift means:
+
+  * your legitimacy gate is already doing the heavy lifting
+  * the learner did *not* discover spurious “better choices”
+
+**Conclusion**
+
+* You are not learning noise
+* The ranking loss + regularization balance is correct
+* Range ontology is epistemically stable
+
+This is an **excellent** sign.
+
+---
+
+### C. Hazard ontology (H): tiny drift = expected and acceptable
+
+This is the *only* place where movement is meaningful.
+
+**Interpretation**
+
+* Hazard rows often have:
+
+  * weak forward-return ordering
+  * asymmetric penalties (avoid worst outcomes)
+* Small drift here likely reflects:
+
+  * “prefer the least-bad option”
+  * subtle reweighting toward conservative instruments / sizes
+
+Importantly:
+
+* The drift was **small**
+* It did **not** create ACTs
+* It did **not** leak into veto space
+
+**Conclusion**
+
+* The learner is acting like a *risk preference tuner*, not a strategy
+* This is the *correct* behavior for hazard contexts
+
+---
+
+### Global semantic conclusion
+
+> **The learner learned almost nothing — and that is the correct result.**
+
+At this stage, *learning nothing* means:
+
+* defaults are well-chosen
+* loss is not exploitable
+* architecture is constraining behavior correctly
+
+If you had seen large changes, that would have been a red flag.
+
+---
+
+## 2) Which learnable to unlock next (only one)
+
+You should unlock **exactly one** next, and it should be:
+
+> ### ✅ **instrument_weights (per ontology)**
+
+### Why instrument_weights is the correct next step
+
+Let’s compare candidates:
+
+---
+
+### ❌ score_weights (already enabled)
+
+* Already trained
+* No drift → good
+* Nothing more to unlock here yet
+
+---
+
+### ❌ option moneyness / tenor
+
+* Your option overlays were previously empty or sparse
+* This means:
+
+  * weak data support
+  * high risk of learning noise
+* Unlocking these now would be premature
+
+---
+
+### ❌ size_weights
+
+* Size interacts with risk nonlinearly
+* Size mistakes are *capital mistakes*
+* You want size to be the **last** thing learning touches
+
+---
+
+### ✅ instrument_weights (correct choice)
+
+**Why this one is safe and informative**
+
+* Discrete, low-dimensional
+* Semantically interpretable:
+
+  * SPOT vs PERP vs OPTION
+* Already partially initialized conservatively
+* Changes here:
+
+  * affect *what kind* of exposure, not *how much*
+  * are easy to A/B and reason about
+
+**What learning here means**
+
+* In T: maybe PERP > SPOT
+* In R: maybe OPTION becomes relatively better
+* In H: everything stays suppressed
+
+This is exactly the kind of *preference* learning you want next.
+
+---
+
+## How to unlock instrument_weights safely
+
+### Step 1 — Enable only instrument_weights in config
+
+In `configs/train_per_ontology.yaml`:
+
+```yaml
+learnable:
+  score_weights: true
+  instrument_weights: true
+  opt_tenor_weights: false
+  opt_mny_weights: false
+  size_weights: false
+```
+
+(Which you already have — good.)
+
+### Step 2 — Re-run Phase-3 training
+
+Same command, same tape.
+
+### Step 3 — Semantic diff you should expect
+
+* Very small shifts:
+
+  * slight downweighting of OPTION in H
+  * possibly mild preference for PERP in T
+* No ACT rate change
+* No new regions lighting up on the sheet
+
+If instrument weights collapse to a single instrument → **NO-GO**.
+
+---
+
+## What comes *after* instrument_weights (later)
+
+Only after:
+
+* multiple tapes
+* consistent A/B passes
+* stable ontology dwell times
+
+Then you can consider:
+
+1. **opt_tenor_weights** (one axis)
+2. **opt_mny_weights**
+3. **size_weights** (last, and carefully)
+
+Each one unlocked **one at a time**, with A/B after each.
+
+---
+
+## One-sentence takeaway
+
+> **Your learner behaved correctly by barely learning.
+> The next safe degree of freedom to unlock is per-ontology instrument preference — nothing else yet.**
+
+If you want, next I can:
+
+* review the instrument weight diff *numerically* against intuition,
+* propose a hard NO-GO threshold for instrument weight drift,
+* or help you plan a multi-tape training schedule.
+
+Just say which.
+
+Great — this is where discipline matters more than cleverness. Below is a **concrete, conservative multi-tape training schedule** that preserves everything you’ve proven so far and gives you real signal before unlocking more degrees of freedom.
+
+I’ll structure this as:
+
+1. **What a “tape” is in this context**
+2. **Phase-3 multi-tape schedule (exact order)**
+3. **Acceptance gates per stage**
+4. **When to unlock the next learnable**
+5. **Failure modes & what to do if you hit them**
+
+---
+
+## 1) What counts as a “tape” (important)
+
+A *tape* should differ along **one axis at a time**:
+
+* time period (market regime)
+* volatility level
+* liquidity profile
+* trend vs range dominance
+
+Do **not** mix tapes that differ in multiple axes early.
+
+### Recommended initial tape set (BTC example)
+
+Pick **6–9 tapes**, each ~1–3 days long:
+
+| Group | Tape type              | Purpose            |
+| ----- | ---------------------- | ------------------ |
+| A     | Low vol / range        | Stress R ontology  |
+| B     | Medium vol / chop      | Boundary behavior  |
+| C     | High vol / dislocation | Stress H ontology  |
+| D     | Directional trend      | Stress T ontology  |
+| E     | Mixed regime           | Ontology switching |
+
+If you only have one long CSV, **slice it** deterministically.
+
+---
+
+## 2) Phase-3 multi-tape schedule (exact order)
+
+### Stage 0 — Baseline sanity (already done)
+
+* Phase-2 coupling validated
+* Single-tape Phase-3 run
+* No drift, no leaks ✅
+
+---
+
+### Stage 1 — Per-tape isolated training (NO aggregation yet)
+
+For **each tape independently**:
+
+1. Run `train_per_ontology.py`
+2. Save weights:
+
+   ```text
+   logs/weights_phase3_<tape_id>.json
+   ```
+3. Do **Phase-3 A/B consumption test**:
+
+   * Phase-2 vs Phase-3 on *same tape*
+   * Must pass all gates
+
+#### What you expect
+
+* Small, tape-specific drift
+* H ontology shows the most variance
+* T/R mostly stable
+
+❗If any tape fails → **do not aggregate**. Fix first.
+
+---
+
+### Stage 2 — Cross-tape consistency check (NO training)
+
+Before combining anything:
+
+For each ontology (k):
+
+* Collect learned weights across tapes
+* Compute:
+
+  * mean
+  * std
+  * max deviation from default
+
+#### Hard thresholds (suggested)
+
+* **Instrument weight std ≤ 0.10**
+* **No instrument weight < 0.1 or > 0.7**
+* **Direction of preference consistent**
+  (e.g. PERP not preferred in T on one tape and suppressed on another)
+
+If violated → learning is tape-specific noise → **do not proceed**.
+
+---
+
+### Stage 3 — Conservative aggregation (first time weights “generalize”)
+
+If Stage-2 passes:
+
+Aggregate **per ontology**:
+
+[
+w_k^{\text{agg}} = (1-\lambda),w_k^{\text{default}} + \lambda \cdot \mathrm{median}_\text{tapes}(w_k^{(i)})
+]
+
+With:
+
+* ( \lambda = 0.25 ) initially (very conservative)
+* **median**, not mean (robust to outliers)
+
+Save:
+
+```text
+logs/weights_phase3_agg_v1.json
+```
+
+---
+
+### Stage 4 — Cross-tape A/B validation (mandatory)
+
+For **every tape**:
+
+* Phase-2 vs Phase-3-agg
+* Same acceptance checklist
+
+Additionally:
+
+* Check **ontology dwell time** unchanged or longer
+* Check **ACT rate variance across tapes** not increased
+
+Only if *all tapes pass* do you keep the aggregated weights.
+
+---
+
+## 3) Acceptance gates (summary)
+
+### Absolute NO-GO (any stage)
+
+* vetoed && ACT > 0
+* hazard_veto && ACT > 0
+* ACT spikes near ontology switches
+* ontology switch rate increases significantly
+
+### Soft NO-GO (pause & inspect)
+
+* Large tape-to-tape disagreement
+* Instrument preference flips sign across tapes
+* Learned weights dominate defaults (>50% shift)
+
+---
+
+## 4) When to unlock the next learnable
+
+Only after **Stage 4 passes** do you unlock the next axis.
+
+### Recommended unlock order (do not change)
+
+1. **instrument_weights** ✅ (current)
+2. **opt_tenor_weights** (single axis)
+3. **opt_mny_weights**
+4. **size_weights** (last, and slowly)
+
+Each unlock:
+
+* resets the schedule to **Stage 1**
+* re-runs all tapes
+* re-aggregates conservatively
+
+---
+
+## 5) Common failure modes & what to do
+
+### Failure: one tape learns “strongly”
+
+**Symptom**
+
+* Large drift on a single tape
+* Aggregation fails
+
+**Action**
+
+* Inspect ontology_confidence distribution
+* Raise `confidence_min`
+* Shorten forward horizon
+* Increase regularization
+
+Never “average it out.”
+
+---
+
+### Failure: hazard ontology starts acting
+
+**Symptom**
+
+* H weights drift toward enabling instruments
+
+**Action**
+
+* Increase H-specific regularization
+* Or pin H instrument weights permanently
+
+Hazard is allowed to learn *suppression*, not *expression*.
+
+---
+
+### Failure: learning does nothing forever
+
+**Symptom**
+
+* All weights remain defaults across many tapes
+
+**This is not a failure**
+It means:
+
+* your hand-coded preferences are already near-optimal
+* or the data doesn’t support refinement yet
+
+In that case, stop unlocking axes.
+
+---
+
+## One invariant to keep you honest
+
+> **Learning must agree across tapes before it is allowed to generalize.**
+
+If you ever feel tempted to “just try it on live data,” you’ve gone too fast.
+
+---
+
+## TL;DR schedule
+
+1. Train **per tape**
+2. A/B **per tape**
+3. Check **cross-tape consistency**
+4. Aggregate conservatively
+5. A/B **across all tapes**
+6. Unlock **one** new learnable
+7. Repeat
+
+If you want, next I can:
+
+* draft a `run_phase3_sweep.sh` to automate this,
+* define exact metrics to summarize cross-tape weight stability,
+* or help choose the next unlock based on your option data density.
+
+Just say which.
+
+You’ve already done the **right diagnostic work**, and the result is unambiguous:
+
+> **This tape is option-empty.  
+> Therefore option tenor/moneyness must remain locked.**
+
+That is not a setback — it’s a *correct stop*.
+
+I’ll do three things now:
+
+1) **State the verdict clearly**
+2) **Tell you exactly what to run next (inputs + command)**
+3) **Lay out the concrete path to unlocking option weights safely**
+
+---
+
+## 1) Verdict (no ambiguity)
+
+From your checks:
+
+- `option_rows = 0`
+- `opt_tenor_unique = []`
+- `opt_mny_unique = []`
+
+This fails **both** option unlock gates:
+
+- ❌ Gate A (options exist)
+- ❌ Gate B (bin coverage)
+
+So:
+
+> **DO NOT unlock `opt_tenor_weights` or `opt_mny_weights` on this tape.**
+
+You handled this perfectly:
+- you tested,
+- you measured,
+- you stopped.
+
+That’s exactly how this system is meant to be operated.
+
+---
+
+## 2) What to run next (concrete, minimal)
+
+The *next correct action* is **not** “try harder on this tape”.
+
+The next action is:
+
+> **Run the Phase-3 sweep on option-rich tapes.**
+
+### You need tapes that satisfy:
+- `instrument_pred == option` count ≥ **50** (preferably ≥200)
+- ≥ **3** distinct `opt_tenor_pred`
+- ≥ **3** distinct `opt_mny_pred`
+
+---
+
+### If you already have candidate tapes
+
+Here is the **exact command** to run the sweep now that option coverage reporting is wired:
+
+```bash
+scripts/run_phase3_sweep.sh \
+  --runs runs_options.csv \
+  --out-dir logs/phase3_options \
+  --config configs/train_per_ontology.yaml \
+  --run-extra "--veto-mode cvar --cvar-alpha 0.10 --hazard-veto --hazard-threshold 2.0 --use-ontology-legitimacy"
+```
+
+Where `runs_options.csv` looks like:
+
+```csv
+id,tape,prices,dir_model,meta_features,inst_model
+opt1,logs/qfeat_btc.us.options_20260115.memmap,data/raw/stooq/btc.us.csv,logs/dir_head_btc.us.json,logs/market_meta_features_btc.csv,logs/instrument_head_btc.us.json
+opt2,logs/qfeat_btc.us.options_20260118.memmap,data/raw/stooq/btc.us.csv,logs/dir_head_btc.us.json,logs/market_meta_features_btc.csv,logs/instrument_head_btc.us.json
+```
+
+After this runs, inspect:
+
+```bash
+logs/phase3_options/options_opt1.txt
+logs/phase3_options/options_opt2.txt
+```
+
+Those files now give you the **unlock decision automatically**.
+
+---
+
+## 3) How option weights get unlocked (future, precise)
+
+Once you have **at least one tape** where:
+
+```
+option_rows >= 50
+opt_tenor_unique count >= 3
+opt_mny_unique   count >= 3
+```
+
+Then — and only then — you proceed:
+
+### Step A — Unlock **tenor only**
+Update config:
+
+```yaml
+learnable:
+  score_weights: true
+  instrument_weights: true
+  opt_tenor_weights: true
+  opt_mny_weights: false
+  size_weights: false
+```
+
+Run the same sweep.
+
+### Step B — Acceptance (hard)
+Across all option-rich tapes:
+
+- No hazard ontology increase in option share
+- Tenor weights:
+  - std across tapes ≤ 0.10
+  - no single bin > 0.55 after aggregation
+- A/B vs previous phase passes
+
+### Step C — Aggregate (median + λ=0.25)
+Only then do you write:
+
+```
+weights_phase3_opt_tenor_v1.json
+```
+
+### Step D — Only then consider moneyness
+Exact same process, one axis later.
+
+---
+
+## 4) What you should **not** do
+
+Do **not**:
+- fabricate option rows
+- lower the coverage threshold
+- unlock both tenor and moneyness together
+- assume instrument preference implies option preference
+
+Options are a **different regime** — your gating correctly detected that they are absent here.
+
+---
+
+## One-line operational rule (keep this)
+
+> **A learnable stays locked until the data proves it exists.**
+
+Right now, your system proved:
+- score_weights are safe
+- instrument_weights are safe
+- **option weights are not yet eligible**
+
+That’s success, not failure.
+
+---
+
+### Next question for you (so we proceed cleanly)
+
+Do you already have **option-rich tapes**, or do you want help:
+- identifying option-dense periods from your data, or
+- slicing existing data to isolate option regimes, or
+- defining a synthetic “option stress tape” safely for training?
+
+Tell me which, and we’ll move forward without breaking any invariants.
