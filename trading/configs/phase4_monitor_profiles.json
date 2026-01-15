@@ -1,0 +1,14 @@
+{
+  "strict": {
+    "min_rows_per_ontology": 120,
+    "min_bins": 3,
+    "min_rows_per_bin": 40,
+    "min_bin_balance": 0.35,
+    "min_effect_size": 0.0005,
+    "min_monotone_bins": 2,
+    "bin_persistence_window": 8,
+    "bin_persistence_required": 6,
+    "median_flip_max": 1,
+    "consecutive_passes": 3
+  }
+}

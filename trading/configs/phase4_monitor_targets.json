@@ -1,0 +1,19 @@
+{
+  "targets": [
+    {
+      "name": "BTC",
+      "proposal_log": "data/btc/proposals_intraday.csv",
+      "prices_csv": "data/btc/close.csv"
+    },
+    {
+      "name": "ES",
+      "proposal_log": "logs/esnq/ES_5m/proposals.csv",
+      "prices_csv": "data/esnq/ES_5m/close.csv"
+    },
+    {
+      "name": "NQ",
+      "proposal_log": "logs/esnq/NQ_5m/proposals.csv",
+      "prices_csv": "data/esnq/NQ_5m/close.csv"
+    }
+  ]
+}

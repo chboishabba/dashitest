@@ -53,6 +53,11 @@ def main() -> None:
     parser.add_argument("--reuse-tape", action="store_true", help="Reuse existing tape instead of rebuilding")
     parser.add_argument("--log", type=pathlib.Path, default=pathlib.Path("logs/trading_log_vulkan.csv"))
     parser.add_argument("--symbol", type=str, default="VKN")
+    parser.add_argument(
+        "--timing-debug",
+        action="store_true",
+        help="Print host/GPU timing for the Vulkan tape build.",
+    )
     parser.add_argument("--tau-on", type=float, default=0.52, help="Entry threshold for ACT")
     parser.add_argument("--tau-off", type=float, default=0.47, help="Exit threshold for HOLD")
     args = parser.parse_args()
@@ -105,6 +110,7 @@ def main() -> None:
             spv_path=str(args.spv),
             vk_icd=args.vk_icd,
             fp64_returns=not args.no_fp64_returns,
+            timing_debug=args.timing_debug,
         )
 
     ts_map = make_ts_map(bars["ts"].to_numpy())

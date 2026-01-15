@@ -13168,4 +13168,1155 @@ Do you already have **option-rich tapes**, or do you want help:
 - slicing existing data to isolate option regimes, or
 - defining a synthetic “option stress tape” safely for training?
 
-Tell me which, and we’ll move forward without breaking any invariants.
+Tell me which, and we’ll move forward without breaking any invariants.  
+
+
+You **did** figure it out — and the answer is now very crisp:
+
+> With the current data sources + the current instrument head, you do **not** have option-rich tapes.
+> The only way options show up at all is via the teacher path, and even then it’s **11 rows / 1 tenor bin / 1 mny bin**.
+
+So: **option tenor/moneyness must stay locked** *for now*, and the next move is to decide **how we want options to exist in time** inside the tape.
+
+Below is the actionable diagnosis + the two viable paths forward (pick one).
+
+---
+
+## What your scan proves (root cause)
+
+### 1) The instrument model never selects OPTION on BTC tapes
+
+Even after rebuilding meta features aligned to each tape:
+
+* **instrument model path:** `option_rows = 0` (every tape you tested)
+
+So the option head never gets exercised → no bins → nothing to learn.
+
+### 2) Teacher can emit options, but your option meta is effectively static/snapshot
+
+Teacher-only on intraday:
+
+* `option_rows = 11`
+* tenor bins: `['e_1_3']` only
+* mny bins: `['m_deep_itm']` only
+
+That’s *not* a regime distribution — that’s a **single ontology atom**.
+This is consistent with using Deribit “instruments/summary” snapshots without a proper **time series keyed to each bar**.
+
+**Conclusion:** you don’t currently have “options as a time-varying instrument family,” you have “options as a snapshot feature blob.”
+
+---
+
+## What must be true before we can unlock option tenor/mny
+
+To learn option weights you need **option candidates per bar** with **diverse bins**.
+
+Minimum gates remain:
+
+* `option_rows >= 50` (prefer ≥ 200)
+* tenor bins ≥ 3/5
+* mny bins ≥ 3/5
+
+Right now: you’re at **0** (model) / **11** (teacher) and **1/5 + 1/5** coverage.
+
+---
+
+## The next step: choose *how options enter the tape*
+
+There are only **two sane ways** forward.
+
+### Path A (recommended): add an “option candidate generator” (offline, deterministic)
+
+Instead of trying to infer options from weak meta, you *generate* a consistent option surface per bar from the underlying price.
+
+**How it works (minimal, deterministic)**
+For each bar (t):
+
+* choose fixed expiries (E \in {1–3, 4–7, 8–21, 22–60, 61–180})
+* choose fixed moneyness points (M \in {\text{deep ITM, ITM, ATM, OTM, deep OTM}})
+* compute synthetic option greeks/IV using a simple model:
+
+  * either constant IV per regime, or
+  * IV proxy from your qfeat (e.g. vol_ratio → IV)
+* label each synthetic contract with your bins
+
+Then your instrument head sees OPTION candidates *every bar*, and your option bin heads actually get data.
+
+**Pros**
+
+* immediate option-rich tapes
+* fully deterministic and reproducible
+* GPU-friendly later (just math)
+
+**Cons**
+
+* it’s “model options,” not exchange options (but that’s fine for preference learning)
+
+If you want to unlock tenor/mny soon, this is the shortest clean path.
+
+---
+
+### Path B: build a true historical options time series (realistic, slower)
+
+You’d need:
+
+* a time series of options snapshots (or trades/mark IV) aligned to each bar
+* mapping from spot to moneyness and time-to-expiry per bar
+* enough coverage to populate bins
+
+Your current Deribit downloads look like “summary/instruments” snapshots, which won’t fill per-bar bins.
+
+**Pros**
+
+* realism
+  **Cons**
+* heavy data engineering
+* fragile alignment
+* likely not worth it until your pipeline is already profitable
+
+---
+
+## My recommendation
+
+Do **Path A now**, keep it behind a flag:
+
+```bash
+--synthetic-options
+```
+
+and keep the semantics strict:
+
+* it only affects candidate generation / option bin labeling
+* it does not touch veto / hazard / ontology / legitimacy
+
+Then you’ll immediately be able to:
+
+* get option_rows ≫ 0
+* get ≥3 bins in tenor/mny
+* unlock option tenor first, then mny
+
+---
+
+## Concrete next deliverable (what I’d implement next)
+
+A small module + hook in run_proposals:
+
+* `options/synthetic_chain.py`
+
+  * generates a fixed grid of option candidates per bar
+  * assigns bins `(opt_tenor_pred, opt_mny_pred)`
+  * outputs per-candidate “price” (optional) and a score feature vector
+
+* `run_proposals.py`
+
+  * if `--synthetic-options`, include synthetic option candidates in candidate set
+  * instrument model can still choose among SPOT/PERP/OPTION
+
+This gives you option-rich tapes *without changing* the safety envelope.
+
+---
+
+## The decision I need from you (one line)
+
+Do you want:
+
+1. **Synthetic option candidate generator** (fast, deterministic, unlock weights soon), or
+2. **Real historical options time series** (slow, realistic)?
+
+If you say “synthetic,” I’ll specify the minimal model (IV proxy, strike grid, expiry mapping) so it stays consistent with your qfeat regime logic and remains GPU-ready.
+
+Cool — we can do **both**, but they should share the *same interface* so:
+
+* **Synthetic options** can unblock learning immediately, and
+* **Real options time series** can later drop in without rewriting the trader.
+
+Below is the clean combined plan, with exact artifacts, flags, and acceptance gates.
+
+---
+
+## Unifying principle
+
+Treat “options” as a **candidate family generator** that emits, per bar:
+
+* a set of option candidates (c \in \mathcal{C}_t)
+* each candidate has:
+
+  * `opt_type` (call/put)
+  * `tenor_bin` (e_1_3 … e_61_180)
+  * `mny_bin` (m_deep_itm … m_deep_otm)
+  * `strike`, `expiry_days`
+  * and a small feature bundle used for scoring (or just metadata at first)
+
+Then the rest of the pipeline (instrument head, option heads, preference weights) consumes this uniformly.
+
+**Key:** whether candidates came from *synthetic* or *real* data must be invisible downstream.
+
+---
+
+# Track A: Synthetic options (unblock immediately)
+
+### What we build
+
+A deterministic **SyntheticChain** that generates a fixed grid each bar:
+
+* Tenor bins: `e_1_3, e_4_7, e_8_21, e_22_60, e_61_180`
+* Moneyness bins: `m_deep_itm, m_itm, m_atm, m_otm, m_deep_otm`
+* Option types: `call`, `put`
+* Total candidates per bar: `5 tenors × 5 mny × 2 types = 50`
+
+### Deterministic pricing / IV proxy (minimal & robust)
+
+We do **not** need perfect option prices to unlock bin learning. We need consistent ordering and stable metadata.
+
+Use:
+
+* underlying price (S_t)
+* expiry (T) (days)
+* synthetic IV (\sigma_t) as a deterministic function of your qfeat:
+
+Example:
+[
+\sigma_t = \mathrm{clip}(\sigma_0 + k_v \cdot v_t + k_b \cdot \log(1+b_t),\ \sigma_{\min},\ \sigma_{\max})
+]
+All constants fixed in config (NEVER_LEARNABLE).
+
+Strikes derived from moneyness bins:
+
+* ATM: (K=S_t)
+* ITM/OTM bands: (K=S_t\cdot \exp(\pm \delta)) with fixed (\delta) per bin
+
+Then compute a simple Black–Scholes *mid* for call/put (no smile needed yet).
+
+### How it plugs in
+
+Add a flag:
+
+```bash
+--options-source synthetic
+```
+
+and generate option candidates into the proposal candidate list each bar.
+
+### Immediate outcome
+
+Option coverage becomes:
+
+* `option_rows > 0` on every tape
+* bin coverage = 5/5 tenor + 5/5 mny
+
+So you can unlock:
+
+* `opt_tenor_weights` first
+* then `opt_mny_weights`
+
+**without waiting for real data engineering.**
+
+---
+
+# Track B: Real options time series (drop-in later)
+
+### What we build
+
+A **RealChain** loader that provides the same candidate set interface from historical data, aligned to your bars.
+
+You need one of these data shapes (ordered by sanity):
+
+#### Option B1: “Surface snapshots” time series (recommended)
+
+Per timestamp:
+
+* spot (S_t)
+* implied vol surface keyed by `(expiry, strike)` or `(expiry, moneyness)`
+* or a small grid across those
+
+This is enough to build candidates each bar:
+
+* choose nearest expiries matching bins
+* choose strikes by moneyness
+* attach mark IV + mid price
+
+#### Option B2: Trade/quote history (harder)
+
+* requires filtering, cleaning, microstructure
+* more fragile alignment
+
+Start with B1.
+
+### Alignment rules (important)
+
+* Time-align options snapshot to bar close (or nearest prior)
+* If missing at bar (t), carry forward with bounded staleness (e.g. max 30 min)
+* If still missing: fall back to synthetic for that bar (optional, but useful)
+
+### Flag
+
+```bash
+--options-source real
+--options-db data/options/deribit_btc_surface.parquet
+```
+
+### Output must match SyntheticChain
+
+RealChain must emit the same candidate fields and bin labels so your learner doesn’t care.
+
+---
+
+# Shared interface (the critical piece)
+
+Create `options/chain.py`:
+
+```python
+@dataclass
+class OptionCandidate:
+    t_idx: int
+    opt_type: str          # "call"/"put"
+    expiry_days: int
+    strike: float
+    tenor_bin: str         # e_1_3 ...
+    mny_bin: str           # m_atm ...
+    mid: float | None
+    iv: float | None
+    source: str            # "synthetic" or "real"
+```
+
+And one function:
+
+```python
+def generate_option_candidates(bar_idx, spot, qfeat, *, source, real_db=None) -> list[OptionCandidate]:
+    ...
+```
+
+Downstream:
+
+* instrument head sees OPTION candidates exist
+* option heads can output bins
+* preference weights can be trained once you meet gates
+
+---
+
+# Unlock plan when doing “both”
+
+## Phase S (Synthetic first)
+
+1. Enable `--options-source synthetic`
+2. Confirm option coverage gates:
+
+   * `option_rows >= 50` ✅
+   * tenor/mny coverage ≥3 bins (will be 5) ✅
+3. Unlock `opt_tenor_weights` only, sweep + A/B
+4. If stable, unlock `opt_mny_weights`, sweep + A/B
+5. Aggregate weights (median + λ=0.25)
+
+## Phase R (Real data integration)
+
+1. Build real surface snapshots dataset
+2. Enable `--options-source real` on the same tapes
+3. Run coverage report:
+
+   * if real coverage is good, proceed
+   * else fall back to hybrid: real where available, synthetic otherwise
+4. Re-run sweep + A/B against synthetic baseline
+
+**Important:** do not change the meaning of bins between synthetic and real. Bins must stay identical.
+
+---
+
+# Acceptance checklist for switching to real (hard)
+
+Real-source is acceptable only if:
+
+* `option_rows_real / option_rows_total ≥ 0.5` on target tapes (or whatever threshold you choose)
+* bin coverage ≥ 3/5 each axis
+* A/B vs synthetic:
+
+  * no veto/hazard leaks
+  * ACT rate change ≤ ±15%
+  * no switch spikes
+* learned weights remain directionally consistent
+
+---
+
+# What I need from you to implement both cleanly (no back-and-forth)
+
+Pick these defaults (I’ll assume them if you don’t):
+
+### Synthetic defaults
+
+* `sigma0 = 0.60`, `sigma_min=0.20`, `sigma_max=1.50`
+* `k_v = 0.50`, `k_b = 0.10`
+* moneyness deltas per bin: `{deep_itm: -0.20, itm: -0.10, atm: 0.0, otm: +0.10, deep_otm: +0.20}` (in log-strike space)
+
+### Real data target
+
+* Deribit BTC options **surface snapshots** saved as Parquet keyed by timestamp + expiry_days + strike (or moneyness)
+
+---
+
+## Next action
+
+We start with **SyntheticChain** (fast), and in parallel define the **RealChain dataset schema** (so whatever downloader you build writes the right format).
+
+If you tell me **which real source format you want** (surface snapshots vs quotes/trades), I’ll pin the exact Parquet schema and alignment rules. My recommendation: **surface snapshots**.
+
+
+This is **exactly where you want to be before touching Phase-4**. You’ve closed the loop cleanly and, importantly, you’ve turned “synthetic vs real” into a *first-class, audited contract* rather than an experiment.
+
+I’ll do three things:
+
+1. **Confirm Phase-4 readiness (verdict)**
+2. **Give you the concrete Phase-4 execution plan (trainer + gates)**
+3. **Recommend the *single* next artifact to build**
+
+---
+
+## 1) Phase-4 readiness verdict
+
+### ✅ READY — with one hard constraint
+
+You are **ready to implement Phase-4 size learning** under these conditions, which you already meet:
+
+* Synthetic surface is canonical, validated, and grid-complete (5×5×2).
+* Real surface pathway is guarded (schema, ms timestamps, min candidates, fallback tagging).
+* Phase-3 priors (instrument + tenor + moneyness) are stable and versionable.
+* Safety invariants (ACT/HOLD, veto, hazard) have held *through surface switching*.
+
+**Hard constraint that still applies:**
+
+> Phase-4 training must be **report-only first**, then **train T/R only**, with **H pinned**.
+
+No exceptions. You already framed this correctly.
+
+---
+
+## 2) Phase-4 execution plan (concrete, step-by-step)
+
+### Stage 4.0 — Size observability (no learning)
+
+Before training anything, add a **size diagnostics pass**:
+
+For each ontology (k):
+
+* count per size bin
+* median / MAD of clipped forward return per size bin
+* forward-proxy distribution
+
+This tells you whether size *has signal* at all.
+
+If size bins are empty or proxy is flat → stop.
+No learning is better than learning noise.
+
+---
+
+### Stage 4.1 — Size trainer (T/R only)
+
+#### What is learnable
+
+* `size_weights[T]`
+* `size_weights[R]`
+
+Pinned:
+
+* `size_weights[H] = uniform`
+
+#### Target (exact)
+
+Use your clipped forward-return proxy (directional, conservative):
+
+[
+r_{t,h} = \log \frac{P_{t+h}}{P_t}
+]
+
+[
+y_t = \mathrm{clip}(d_t \cdot r_{t,h}, -r_{\max}, r_{\max})
+]
+
+Optionally cap upside harder than downside:
+[
+y_t \leftarrow \min(y_t, y_{\text{cap_up}})
+]
+
+Then do **pairwise ranking within the same ontology**:
+
+* only among rows with `ACT == true`
+* only comparing different size bins
+
+This preserves the “preference, not strategy” property.
+
+---
+
+### Stage 4.2 — Regularization & clamps (mandatory)
+
+Apply **all** of the following:
+
+* clamp each size weight to `[0.05, 0.80]`
+* renormalize
+* enforce entropy floor (no single bin collapse)
+* learning rate lower than Phase-3 (size is higher leverage)
+
+Consumption remains:
+[
+p'*{\text{size}} = \mathrm{normalize}(p*{\text{size}} \odot w_k)
+]
+
+No additive effects. No gating influence.
+
+---
+
+### Stage 4.3 — A/B gates (non-negotiable)
+
+For every tape:
+
+**Hard NO-GO**
+
+* ACT/HOLD equivalence fails
+* vetoed && ACT > 0
+* hazard_veto && ACT > 0
+
+**Soft NO-GO**
+
+* size mass shifts >25% without proxy improvement
+* disagreement between T and R across tapes
+
+---
+
+### Stage 4.4 — Aggregate + lock
+
+Once ≥2 tapes pass:
+
+```bash
+python scripts/summarize_phase3_weights.py \
+  --weights logs/phase4_size \
+  --lambda 0.25 \
+  --out logs/phase4/weights_phase4_size_v1.json
+```
+
+Consume only under:
+
+```bash
+--use-size-weights
+```
+
+---
+
+## 3) The single next artifact to build (my recommendation)
+
+### 👉 Build **the Phase-4 trainer skeleton now**, not the aggregator
+
+Specifically:
+
+* `scripts/train_size_per_ontology.py`
+
+  * mirrors `train_per_ontology.py`
+  * reads proposal CSVs
+  * filters to ACT rows
+  * computes forward proxy
+  * trains only size_weights[T/R]
+  * logs diagnostics even when learning is disabled
+
+Why this first?
+
+* It lets you run **Stage 4.0** immediately (observability).
+* You’ll know whether size has learnable signal *before* risking coupling.
+* It keeps Phase-4 symmetrical with Phase-3 (important for auditability).
+
+The aggregator you already have can be reused unchanged.
+
+---
+
+## Final recommendation (one paragraph)
+
+You’ve finished Phase-3 correctly and hardened the synthetic→real surface boundary to production quality. Phase-4 is now a **size-only preference refinement**, not a strategic leap. The correct next step is to implement the Phase-4 size trainer in report-only mode, verify that clipped forward-return actually separates size bins in T/R, and only then enable learning with H pinned. Do **not** rush aggregation or consumption — size is the last and most leverage-sensitive axis.
+
+If you want, next I can:
+
+* sketch `train_size_per_ontology.py` line-by-line,
+* help you choose the exact forward horizon (h) and clip values,
+* or define a quantitative “size signal exists” test for Stage 4.0.
+
+Just say which.
+
+
+That diagnosis is **exactly correct**, and you stopped at the right place. This is a **clean Phase-4.0 NO-GO**, not a failure.
+
+Here’s the precise interpretation and what to do next—no hand-waving.
+
+---
+
+## What the diagnostics actually told us (and why it’s decisive)
+
+Your output:
+
+```json
+{"counts": {"T":0,"R":0,"H":353}}
+```
+
+means:
+
+* **All rows landed in ontology H (hazard)**
+* **No rows ever entered T or R**, therefore:
+
+  * No `size_pred` is *action-eligible*
+  * No forward-return proxy is attributable to size under T/R
+* The flat H proxy confirms:
+
+  * No accidental leakage
+  * No hidden coupling
+  * Ontology gate is doing its job
+
+This is exactly the situation Phase-4.1 was designed to detect and *refuse* to train on.
+
+So: ✅ **correct hard stop**.
+
+---
+
+## Why this is structurally unavoidable (not a bug)
+
+Two important invariants are interacting correctly:
+
+1. **Size learning is T/R-only**
+
+   * Size is meaningless under hazard
+   * H is explicitly excluded from learning
+
+2. **Size bins only materialize when ACT is allowed**
+
+   * No ACT → no size choice → no size signal
+   * You *cannot* bootstrap size learning from HOLD or H
+
+So with:
+
+* ACT rate = 0
+* Ontology = H everywhere
+
+→ **Phase-4 has no substrate to learn from**
+
+This is not a data problem, a config issue, or a bug.
+It is the *correct outcome* of a conservative learner.
+
+---
+
+## What must change before Phase-4 can proceed
+
+You need **any tape** satisfying **all three**:
+
+### Gate A — Ontology
+
+* Non-zero rows classified as **T or R**
+* Even a few dozen is enough
+
+### Gate B — Actionability
+
+* Those T/R rows must survive legitimacy gating
+* ACT doesn’t need to fire trades yet, just be *eligible*
+
+### Gate C — Size materialization
+
+* `size_pred` must be populated on those rows
+* (Even synthetic is fine)
+
+Until all three are true → **do not train size**
+
+---
+
+## Concrete next moves (pick one)
+
+### Option 1 — Different market regime (recommended)
+
+Run the same pipeline on:
+
+* A trending equity index (e.g. SPY daily)
+* A volatility regime change window
+* Any tape where Phase-2 produced T/R mass
+
+This is the *cleanest* path.
+
+---
+
+### Option 2 — Diagnostic-only legitimacy relaxation (safe)
+
+Temporarily:
+
+* Lower `tau_on` **for diagnostics only**
+* Log how many rows flip from H → T/R
+* Do **not** change execution logic
+
+If you see T/R rows appear:
+
+* Re-run Phase-4 diagnostics
+* Restore thresholds afterward
+
+This keeps all invariants intact.
+
+---
+
+### Option 3 — Synthetic ACT probe (explicitly labeled)
+
+Inject a **diagnostic ACT probe**:
+
+* Forces size bins on a small slice
+* Forward proxy logged but **never used**
+* Marked `size_probe=true`
+
+Useful for:
+
+* Verifying the size pipeline
+* Confirming the trainer would move weights *if allowed*
+
+But this is **diagnostic scaffolding only**, not learning.
+
+---
+
+## What *not* to do (and you didn’t 👍)
+
+* ❌ Do not train size on H
+* ❌ Do not aggregate empty weights
+* ❌ Do not “nudge” ACT just to get data
+* ❌ Do not relax veto/hazard
+
+Stopping here preserves the integrity of the entire system.
+
+---
+
+## Bottom line
+
+You’ve now demonstrated something important:
+
+> **The learner refuses to invent structure where none exists.**
+
+That’s a success condition.
+
+When you have a tape with even modest T/R activity, Phase-4.1 will activate immediately with no further code changes.
+
+If you want, next I can:
+
+* help you identify a suitable tape/regime,
+* sketch a **diagnostic legitimacy sweep** to surface T/R mass safely, or
+* design the **size-probe scaffold** (clearly labeled, non-learning).
+
+Just say which.
+
+
+You’ve actually answered your own question in the logs — and the conclusion you’re circling is the *right* one. Let me stabilize it and give you a clean next-step plan without breaking the system’s guarantees.
+
+---
+
+## Why everything is still H (and size stays 0)
+
+There are **three distinct layers** here, and right now they are all doing exactly what they were designed to do.
+
+### 1. Ontology gate is behaving correctly
+
+Even when you zero out thresholds (`tau_on=0`, `ont_margin=0`, hazard params → 0), you *do* manage to surface some **T/R rows**:
+
+* ~720 T
+* ~993 R
+  ✔️ That means ontology logic is not broken.
+
+So the ontology layer is **not** the blocker anymore.
+
+---
+
+### 2. Size head is still degenerate (the real blocker)
+
+Every run shows:
+
+```
+size_pred == 0 for ~100% of rows
+```
+
+Even when:
+
+* `pnl-weight-k` is huge (200)
+* hazard penalty is zero
+* tau thresholds are zero
+* ontology allows T/R
+
+That tells us something crucial:
+
+> **The size head currently has no geometric leverage to separate bins.**
+
+In other words:
+
+* `size_score` never crosses any non-zero center
+* Softmax temperature (`size_temp`) can’t help if logits are identical
+* This is *not* a gating issue anymore
+
+So Phase-4 is blocked **upstream of learning**.
+
+---
+
+### 3. Why that’s expected (and healthy)
+
+Your architecture enforces:
+
+> **No learning without choice variation**
+
+Size learning requires:
+
+* Multiple size bins actually being selected
+* Under T or R ontology
+* With measurable forward proxy differences
+
+Right now:
+
+* Size is effectively a constant function
+* There is nothing to rank
+* Training would be meaningless
+
+So stopping is the *correct* behavior.
+
+---
+
+## The key insight (important)
+
+You are *not* missing data.
+You are missing **a size-generating mechanism**.
+
+The current size logic is:
+
+* Too conservative
+* Too symmetric
+* Too weakly coupled to any feature that actually varies on BTC intraday
+
+That’s why even extreme parameter pushes don’t help.
+
+This is not a bug — it’s a design gap that Phase-4 is supposed to fill.
+
+---
+
+## What NOT to do (and you didn’t 👍)
+
+* ❌ Do not relax veto/hazard permanently
+* ❌ Do not force ACT to fabricate signal
+* ❌ Do not train on H
+* ❌ Do not aggregate empty size weights
+
+All good.
+
+---
+
+## What *will* unblock Phase-4 (three valid paths)
+
+### **Option A — Diagnostic size probe (recommended next step)**
+
+Add a **clearly labeled, non-learning probe** that *only* exists to test separability.
+
+Conceptually:
+
+* Keep execution logic unchanged
+* Inject a diagnostic-only size score:
+
+  * e.g. proportional to `|Δprice|`, `|Δqfeat|`, or `p_long − p_short`
+* Let it populate multiple bins
+* Log `size_probe_bin` (separate from `size_pred`)
+
+Then:
+
+* Run `train_size_per_ontology.py` in diagnostics mode
+* See if forward proxies separate by bin under T/R
+
+This tells you **whether size learning is even meaningful** before touching the real head.
+
+This is the cleanest scientific move.
+
+---
+
+### **Option B — Find a regime that naturally produces size variation**
+
+Instead of BTC intraday:
+
+* Strong trend equity (SPY daily)
+* High-vol earnings window
+* Crisis period
+
+If the *existing* size logic ever emits >1 bin naturally, Phase-4 can start immediately.
+
+This costs no code, but may take time.
+
+---
+
+### **Option C — Redesign the size head (structural)**
+
+If diagnostics show separation *would* exist, but current logic can’t express it, then Phase-4 implies:
+
+* New size centers
+* Or size logits tied to:
+
+  * volatility regime
+  * trend persistence
+  * drawdown depth
+* Possibly per-ontology size geometry
+
+This is **not tuning** — it’s model extension.
+
+---
+
+## The clean recommendation
+
+Given where you are:
+
+> **Implement Option A: a diagnostic size probe.**
+
+Why:
+
+* Zero risk
+* No invariant violation
+* Gives immediate signal/no-signal answer
+* Lets you design the real size head *informed by data*
+
+You already did this pattern for:
+
+* ontology (before coupling)
+* options (synthetic surface)
+* legitimacy (logging-only first)
+
+Size should follow the same discipline.
+
+---
+
+## What I can do next (pick one)
+
+1. **Specify the diagnostic size probe formula** (exact math, no learning)
+2. **Patch `run_proposals.py` to emit `size_probe_bin` + logs**
+3. **Help design a non-degenerate size head geometry**
+4. **Help you select a market/tape likely to activate size naturally**
+
+Just say which direction you want to go.
+
+
+Yep — that’s the right read. I’d do **one more step before hardcoding**: implement the real size_score as a *drop-in clone* of the probe geometry, then gradually reintroduce your existing “risk / pnl_weight / hazard” pieces as *regularizers*, not as the main signal.
+
+Here’s the concrete formula I’d hardcode first.
+
+---
+
+## A hardcoded Phase-4 size_score that mirrors the probe
+
+Let:
+
+* `r1 = log(p_t / p_{t-1})` (or simple return)
+* `trend = dir_conf * sign(dir)` (your existing directional confidence; in [-1,1])
+* `impulse = |r1| / (s_r + eps)` where `s_r` is the frozen median(|r1|) for the tape (same idea as your s_Δ* scales)
+* `persist = clamp01( (EMA(trend, w=8) + 1)/2 )`  (maps to [0,1], high when trend is consistently positive)
+
+Then define:
+
+### **Core size score (0..1)**
+
+[
+z = 0.65 \cdot \text{clamp01}!\left(\frac{\text{impulse}}{3.0}\right);+;0.35 \cdot \text{persist}
+]
+
+### **Risk regularizer (gentle, not dominating)**
+
+Let `risk01 = clamp01(risk / (risk_ref + eps))` with `risk_ref` = tape median(risk).
+
+[
+z_{\text{eff}} = \text{clamp01}\left(z \cdot (1 - 0.6\cdot \text{risk01})\right)
+]
+
+That’s it. No hazard. No pnl_weight. Those can come later once bins exist.
+
+---
+
+## Mapping z_eff to bins
+
+With 3 bins `{0, 0.5, 1.0}`:
+
+* `z_eff < 0.25  -> 0.0`
+* `0.25 ≤ z_eff < 0.75 -> 0.5`
+* `z_eff ≥ 0.75 -> 1.0`
+
+(or softmax over centers if you prefer; the point is: **threshold it first** to guarantee spread.)
+
+---
+
+## Why this will stop collapsing to 0
+
+* `impulse` is *always* nonnegative and varies on intraday.
+* Normalizing by `median(|r1|)` makes it scale-stable across tapes.
+* `persist` gives a second independent axis so you don’t need huge impulses.
+* Risk is a multiplier, not a subtractive term that can annihilate everything.
+
+So you’ll get:
+
+* calm-but-persistent regimes → middle bin
+* spike regimes → high bin
+* dead tape → low bin
+
+…and crucially, **under T/R**, not only H.
+
+---
+
+## Phase-4.0 acceptance gate for the real head (before any learning)
+
+Run diagnostics pointing at **size_pred** and require:
+
+* **T+R total ≥ 200 rows**
+* **≥ 20 rows per bin** in **T or R**
+* For **R**: `median(bin 1.0) > median(bin 0.0)` by at least `1e-4` (tune later)
+* No change to ACT/HOLD/veto/hazard A/B invariants
+
+If it passes → you can turn on Phase-4.1 training.
+
+---
+
+## Next action
+
+Do you want this implemented as:
+
+1. **Hard switch**: replace the current size_score with this “probe-clone” score, or
+2. **Parallel**: log `size_pred_v2` alongside `size_pred` for one tape, so you can visually confirm it matches the probe separation before swapping?
+
+I’d do **(2)** once, then switch.
+
+
+Good — you’ve actually reached a *clean stopping point* with everything wired correctly. Let me tighten this into a **clear state assessment** and a **concrete forward plan**, so you don’t thrash or second-guess.
+
+---
+
+## Where you are now (ground truth)
+
+### Phase-4
+
+* ✅ **Density monitor is correctly hardened**
+
+  * Ontology balance
+  * Bin persistence
+  * Effect-size threshold
+  * Debounce
+* ✅ **Size head is probe-equivalent**
+
+  * Real `size_pred` now activates bins under T/R
+  * Diagnostics confirm forward-return separation
+* ❌ **Data density is still insufficient**
+
+  * You *cannot* safely train Phase-4.1 yet
+  * This is not a modeling problem anymore
+
+This is the key realization:
+
+> **All remaining blockers are data, not logic.**
+
+---
+
+### Phase-5
+
+* ✅ **Execution simulator is correct and independent**
+
+  * Deterministic + size-proportional friction
+  * Consumes proposal logs only
+  * Produces JSONL execution logs
+* ✅ **Schema + timestamp handling fixed**
+* ✅ **Runs alongside Phase-4 without interference**
+
+Phase-5 is now a *parallel lens*, not a dependency.
+
+---
+
+## What you should *not* do next
+
+This is important.
+
+* ❌ Don’t relax Phase-4 gates
+* ❌ Don’t tweak size math again
+* ❌ Don’t synthesize more fake density to “unlock” training
+* ❌ Don’t wire Phase-5 feedback into learning yet
+
+All of those would weaken guarantees you’ve carefully preserved.
+
+---
+
+## What you *should* do next (ranked)
+
+### Option A — **Add one high-density instrument (best move)**
+
+This is the shortest path to Phase-4.1.
+
+**Target:**
+
+* ES or NQ intraday
+* 5–15 min bars
+* ≥ 10 trading days
+
+Why:
+
+* Persistent trends
+* Fewer hazard locks
+* Natural size differentiation
+* Almost guaranteed to trip the gate
+
+**Workflow:**
+
+1. Generate proposals
+2. Point the density monitor at them
+3. Wait for `OPEN → OPEN` (debounced)
+4. Immediately run `train_size_per_ontology.py --init-weights …`
+
+No further engineering required.
+
+---
+
+### Option B — **Let the monitor run continuously**
+
+If you’re staying with BTC for now:
+
+* Keep feeding longer intraday slices
+* Let the monitor accumulate persistence windows
+* Treat it like a daemon
+
+This is slower but zero-effort.
+
+---
+
+### Option C — **Exploit Phase-5 immediately**
+
+You can already extract value here.
+
+Useful things to do *now*:
+
+* Compare realized vs nominal PnL by size bin
+* Measure slippage sensitivity to size
+* Validate that “bigger ≠ always better” under friction
+
+This will *later* inform Phase-6 (risk & capital), without touching learning.
+
+---
+
+## Phase-5 → Phase-6 preview (so you know what you’re waiting for)
+
+Once Phase-4 size weights exist:
+
+**Phase-6 is NOT learning.**
+It is **capital control**.
+
+Examples:
+
+* Max exposure per ontology
+* Size caps under hazard proximity
+* Drawdown-aware size damping
+
+These sit *after* Phase-5 execution and never touch the proposal generator.
+
+You’re building a layered system correctly.
+
+---
+
+## Bottom line
+
+You’ve done the hard part:
+
+* The gates are real
+* The head is expressive
+* The simulator is honest
+* The system refuses to lie to you
+
+At this point the correct move is **patience or better data**, not more code.
+
+If you want, next I can:
+
+* help spec the ES/NQ ingestion quickly,
+* write a one-command monitor runner for multiple tapes,
+* or sketch Phase-6 capital logic so it’s ready when Phase-4 opens.
+
+Just tell me which.

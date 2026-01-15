@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import pathlib
 import ctypes
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -202,6 +203,7 @@ def build_feature_tape(
     spv_path: str = "vulkan_shaders/qfeat.spv",
     vk_icd: Optional[str] = None,
     fp64_returns: bool = True,
+    timing_debug: bool = False,
 ) -> QFeatTape:
     """
     Build a memmap tape (S, T, 8) of qfeat records. The current
@@ -212,7 +214,6 @@ def build_feature_tape(
     if prices.ndim != 2:
         raise ValueError("prices must be 2D (series, timesteps)")
     S, T = prices.shape
-
     if volumes is not None:
         volumes_arr = np.asarray(volumes, dtype=np.float32, order="C")
         if volumes_arr.shape != prices.shape:
@@ -230,6 +231,7 @@ def build_feature_tape(
     mm[:] = 0.0
     mm.flush()
 
+    timing_info: dict[str, float] | None = None
     if backend == "cpu":
         _compute_cpu_tape(
             prices,
@@ -248,7 +250,7 @@ def build_feature_tape(
             shader_file = shader_root / shader_file
         if not spv_file.is_absolute():
             spv_file = shader_root / spv_file
-        _run_vulkan_tape(
+        timing_info = _run_vulkan_tape(
             prices=prices,
             volumes=volumes,
             out_path=out_path,
@@ -261,11 +263,21 @@ def build_feature_tape(
             spv_path=spv_file,
             vk_icd=vk_icd,
             fp64_returns=fp64_returns,
+            timing_debug=timing_debug,
         )
     else:
         raise ValueError(f"unknown backend: {backend}")
 
-    return QFeatTape(str(out_path), S, T)
+    tape = QFeatTape(str(out_path), S, T)
+    if timing_debug and timing_info:
+        host_setup = timing_info["host_setup"]
+        gpu_compute = timing_info["gpu_compute"]
+        host_teardown = timing_info["host_teardown"]
+        print(
+            f"[vk_qfeat] timing host_setup={host_setup:.3f}s gpu={gpu_compute:.3f}s "
+            f"host_teardown={host_teardown:.3f}s"
+        )
+    return tape
 
 
 def _compile_shader(
@@ -370,7 +382,9 @@ def _run_vulkan_tape(
     spv_path: pathlib.Path,
     vk_icd: Optional[str],
     fp64_returns: bool,
-) -> None:
+    timing_debug: bool = False,
+) -> dict[str, float] | None:
+    host_start = time.perf_counter()
     if w2 > 1024:
         raise ValueError("w2 exceeds shader MAX_WINDOW=1024")
     if vk_icd:
@@ -380,6 +394,9 @@ def _run_vulkan_tape(
     from vulkan_compute.compute_buffer import _select_physical_device, _find_queue_family_index
 
     prices = np.asarray(prices, dtype=np.float32, order="C")
+    host_start = time.perf_counter()
+    if timing_debug:
+        print(f"[vk_qfeat] starting host setup (T={prices.shape[1]}, S={prices.shape[0]})...")
     S, T = prices.shape
     volumes_arr = None
     if volumes is not None:
@@ -407,12 +424,21 @@ def _run_vulkan_tape(
         use_fp64_returns = bool(getattr(features, "shaderFloat64", False))
         if use_fp64_returns:
             spv_path = spv_path.with_name(f"{spv_path.stem}.fp64{spv_path.suffix}")
+            if timing_debug:
+                print(f"[vk_qfeat] compiling shader (fp64) to {spv_path}...")
             _compile_shader(shader_path, spv_path, defines=["USE_FP64_RETURNS=1"])
             enabled_features = vk.VkPhysicalDeviceFeatures(shaderFloat64=vk.VK_TRUE)
         else:
+            if timing_debug:
+                print(f"[vk_qfeat] compiling shader (fp32 fallback) to {spv_path}...")
             _compile_shader(shader_path, spv_path)
     else:
+        if timing_debug:
+            print(f"[vk_qfeat] compiling shader to {spv_path}...")
         _compile_shader(shader_path, spv_path)
+
+    if timing_debug:
+        print(f"[vk_qfeat] creating device and buffers...")
 
     queue_info = vk.VkDeviceQueueCreateInfo(
         sType=vk.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
@@ -590,8 +616,10 @@ def _run_vulkan_tape(
         commandBufferCount=1,
         pCommandBuffers=[command_buffer],
     )
+    gpu_start = time.perf_counter()
     vk.vkQueueSubmit(queue, 1, [submit_info], vk.VK_NULL_HANDLE)
     vk.vkQueueWaitIdle(queue)
+    gpu_end = time.perf_counter()
 
     out_bytes = _read_buffer(device, qfeat_mem, qfeat_size)
     mm = np.memmap(out_path, dtype=np.float32, mode="r+", shape=(S, T, 8))
@@ -619,3 +647,11 @@ def _run_vulkan_tape(
     vk.vkDestroyCommandPool(device, command_pool, None)
     vk.vkDestroyDevice(device, None)
     vk.vkDestroyInstance(instance, None)
+    host_end = time.perf_counter()
+    if timing_debug:
+        return {
+            "host_setup": gpu_start - host_start,
+            "gpu_compute": gpu_end - gpu_start,
+            "host_teardown": host_end - gpu_end,
+        }
+    return None

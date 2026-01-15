@@ -1,0 +1,2 @@
+id,tape,prices,dir_model,meta_features,inst_model
+btc_synth,logs/qfeat_btc.us_20260113_210153.memmap,data/raw/stooq/btc.us.csv,logs/dir_head_btc.us.json,logs/market_meta_features_btc.csv,logs/instrument_head_btc.us.json

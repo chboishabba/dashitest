@@ -22,8 +22,8 @@ ontologies:
 learnable:
   score_weights: true
   instrument_weights: true
-  opt_tenor_weights: false
-  opt_mny_weights: false
+  opt_tenor_weights: true
+  opt_mny_weights: true
   size_weights: false
 
 logging:

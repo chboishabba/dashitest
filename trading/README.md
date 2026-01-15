@@ -117,6 +117,8 @@ by default; overwriting is not allowed.
   Command: `PYTHONPATH=. python scripts/rollup_bad_days.py --log logs/trading_log.csv --out logs/bad_days.csv --top 10`
 - `scripts/run_bars_btc.py`: Run bar-level executor on BTC intraday with confidence hysteresis.  
   Command: `PYTHONPATH=. python scripts/run_bars_btc.py`
+- `scripts/run_with_vulkan_tape.py`: Rebuild a Vulkan-powered `qfeat` tape for inference; pass `--timing-debug` to print host setup/GPU/host teardown durations (times already logged if `timing_debug` is true).  
+  Command: `PYTHONPATH=. python scripts/run_with_vulkan_tape.py --prices-csv data/raw/stooq/btc_intraday.csv --tape logs/qfeat_btc_intraday_vulkan.memmap --backend vulkan --force --timing-debug`
 - `scripts/score_bad_windows.py`: Rank high-severity bad windows; emit CSV.  
   Command: `PYTHONPATH=. python scripts/score_bad_windows.py --log logs/trading_log.csv --out logs/bad_windows.csv`
 - `scripts/sweep_confusion_surface.py`: Sweep tau_off and compute FP/FN rates over bins.  

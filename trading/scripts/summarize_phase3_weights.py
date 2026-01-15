@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import numbers
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,49 @@ try:
     from utils.weights_config import clamp_learnable_vector, normalize_vector
 except ModuleNotFoundError:
     from weights_config import clamp_learnable_vector, normalize_vector
+
+
+def validate_weights_schema(weights, *, name="<weights>") -> None:
+    if not isinstance(weights, dict):
+        raise ValueError(f"{name}: root must be dict")
+
+    for ont in ("T", "R", "H"):
+        if ont not in weights:
+            raise ValueError(f"{name}: missing ontology '{ont}'")
+
+        block = weights[ont]
+        if not isinstance(block, dict):
+            raise ValueError(f"{name}.{ont}: must be dict")
+
+        for key, val in block.items():
+            if not isinstance(val, list):
+                raise ValueError(
+                    f"{name}.{ont}.{key}: expected list, got {type(val).__name__}"
+                )
+            if len(val) == 0:
+                raise ValueError(f"{name}.{ont}.{key}: empty vector")
+
+            for i, x in enumerate(val):
+                if not isinstance(x, numbers.Real):
+                    raise ValueError(
+                        f"{name}.{ont}.{key}[{i}]: expected float, got {type(x).__name__}"
+                    )
+
+
+def validate_consistency(weight_list: list[dict[str, dict[str, np.ndarray]]]) -> None:
+    if not weight_list:
+        return
+    ref = weight_list[0]
+    for w in weight_list[1:]:
+        for ont in ("T", "R", "H"):
+            for key in ref[ont]:
+                if key not in w[ont]:
+                    raise ValueError(f"Missing {ont}.{key} in one run")
+                if len(ref[ont][key]) != len(w[ont][key]):
+                    raise ValueError(
+                        f"Length mismatch for {ont}.{key}: "
+                        f"{len(ref[ont][key])} vs {len(w[ont][key])}"
+                    )
 
 
 def _defaults() -> dict[str, dict[str, np.ndarray]]:
@@ -47,8 +91,7 @@ def _defaults() -> dict[str, dict[str, np.ndarray]]:
     }
 
 
-def _load_weights(path: Path) -> dict[str, dict[str, np.ndarray]]:
-    payload = json.loads(path.read_text())
+def _weights_from_payload(payload: dict) -> dict[str, dict[str, np.ndarray]]:
     weights = payload.get("weights", payload)
     out: dict[str, dict[str, np.ndarray]] = {}
     for ont, group in weights.items():
@@ -56,6 +99,11 @@ def _load_weights(path: Path) -> dict[str, dict[str, np.ndarray]]:
         for name, vec in group.items():
             out[ont][name] = np.array(vec, dtype=np.float32)
     return out
+
+
+def _load_weights(path: Path) -> dict[str, dict[str, np.ndarray]]:
+    payload = json.loads(path.read_text())
+    return _weights_from_payload(payload)
 
 
 def _aggregate(
@@ -93,9 +141,18 @@ def main() -> None:
         raise SystemExit("No weight files found.")
 
     default = _defaults()
-    stacks: dict[str, dict[str, list[np.ndarray]]] = {}
+
+    payloads: list[dict] = []
     for path in paths:
-        weights = _load_weights(path)
+        payload = json.loads(path.read_text())
+        validate_weights_schema(payload, name=str(path))
+        payloads.append(payload)
+
+    weight_dicts = [_weights_from_payload(payload) for payload in payloads]
+    validate_consistency(weight_dicts)
+
+    stacks: dict[str, dict[str, list[np.ndarray]]] = {}
+    for weights in weight_dicts:
         for ont, group in weights.items():
             stacks.setdefault(ont, {})
             for name, vec in group.items():

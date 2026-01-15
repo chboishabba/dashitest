@@ -17,6 +17,13 @@ Legend: (EXEC) implementation, (DECISION) policy decision, (ANALYSIS) analysis/v
 - [x] (DASHBOARD) Guard training_dashboard_pg.py against trade-log selection (auto-select per-step log or show clear error).
 - [ ] (EXEC) Implement explicit baseline simulation for regret (sell-all-at-t0 path).
 - [ ] (EXEC) Add realized-volatility regime feature (continuous + ternary regime flag) and log it.
+- [x] (EXEC) Harden the Phase-4 density monitor: per-ontology balance, bin persistence windows, effect-size floor, and two-check debounce before OPEN.
+- [ ] (EXEC) Phase-4.1 training remains blocked on the strict Phase-4 gate (waiting for density rather than code changes); rerun `scripts/check_esnq_ingestion.py` to prove the contract each time.
+- [ ] (EXEC) Ingest the ES/NQ intraday tape (proposals + prices) so the gate has something real to evaluate and the verifier sees the rows in `configs/phase4_monitor_targets.json`.
+- [x] (EXEC) Author the ES/NQ intraday tape plan (data contract + loader notes) so the Phase-4 gate has a higher-density regime to monitor.
+- [x] (DOC) Clarify in Phase-4 strategy notes that synthetic/amplitude-injected runs prove the monitor mechanically but do not count as legitimate OPENs, and note how to flag those runs in the gate log.
+- [x] (ANALYSIS) Add a lightweight guard that marks amplitude-injected Phase-4 monitor executions so they can never be confused with data-driven readiness (`--test-vector` now tags monitor logs).
+- [x] (EXEC) Create the Phase-5 execution simulator (deterministic + size-dependent friction, logging realized cost) that consumes proposal logs.
 - [x] (DECISION) Lock quotient feature set + window (log-returns, MAD norm, W1=64/W2=256, E/C/S + deltas).
 - [x] (EXEC) Implement quotient extractor in `features/quotient.py` and log `q_*` fields.
 - [ ] (EXEC) Add quotient-gated ACCEPT/HOLD/BAN path to `strategy/triadic_strategy.py` (no direction control).

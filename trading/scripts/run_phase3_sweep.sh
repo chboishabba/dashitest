@@ -51,7 +51,7 @@ while IFS=, read -r id tape prices dir_model meta_features inst_model; do
   compare_out="${OUT_DIR}/compare_${id}.txt"
   option_out="${OUT_DIR}/options_${id}.txt"
 
-  cmd_base=(PYTHONPATH=. python scripts/run_proposals.py
+  cmd_base=(env PYTHONPATH=. python scripts/run_proposals.py
     --tape "$tape"
     --prices-csv "$prices"
     --dir-model "$dir_model"
@@ -69,7 +69,7 @@ while IFS=, read -r id tape prices dir_model meta_features inst_model; do
   fi
   "${cmd_base[@]}"
 
-  PYTHONPATH=. python scripts/train_per_ontology.py \
+  env PYTHONPATH=. python scripts/train_per_ontology.py \
     --tape "$tape" \
     --proposal-log "$base_log" \
     --prices-csv "$prices" \
@@ -77,7 +77,7 @@ while IFS=, read -r id tape prices dir_model meta_features inst_model; do
     --out "$weights" \
     ${TRAIN_EXTRA:-}
 
-  cmd_phase3=(PYTHONPATH=. python scripts/run_proposals.py
+  cmd_phase3=(env PYTHONPATH=. python scripts/run_proposals.py
     --tape "$tape"
     --prices-csv "$prices"
     --dir-model "$dir_model"

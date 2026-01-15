@@ -3,10 +3,16 @@ import time
 import random
 import pathlib
 import os
-import requests
+import json
+try:
+    import requests
+except ImportError:
+    requests = None
 import socket
 import pandas as pd
 import numpy as np
+import urllib.parse
+import urllib.request
 
 # Force yfinance to use a writable cache under our data tree (or disable it)
 # before import to avoid readonly sqlite issues on some systems.
@@ -33,6 +39,12 @@ BINANCE_BASE = "https://api.binance.com"
 BINANCE_KLINES = f"{BINANCE_BASE}/api/v3/klines"
 BINANCE_AGG_TRADES = f"{BINANCE_BASE}/api/v3/aggTrades"
 BINANCE_LIMIT = 1000  # max rows per request
+BINANCE_FAPI = "https://fapi.binance.com"
+BINANCE_PREMIUM = f"{BINANCE_FAPI}/fapi/v1/premiumIndex"
+BINANCE_OPEN_INTEREST = f"{BINANCE_FAPI}/futures/data/openInterestHist"
+DERIBIT_BASE = "https://www.deribit.com"
+DERIBIT_INSTRUMENTS = f"{DERIBIT_BASE}/api/v2/public/get_instruments"
+DERIBIT_SUMMARY = f"{DERIBIT_BASE}/api/v2/public/get_book_summary_by_currency"
 
 
 def polite_sleep(source: str):
@@ -83,15 +95,45 @@ def _binance_get(url, params):
     base = 0.5
     for i in range(5):
         try:
-            r = requests.get(url, params=params, timeout=30)
-            if r.status_code != 200:
-                raise RuntimeError(f"Binance error {r.status_code}: {r.text[:200]}")
-            return r.json()
+            payload = _get_json(url, params=params)
+            if payload is None:
+                raise RuntimeError("Binance request returned no data")
+            return payload
         except Exception:
             if i == 4:
                 raise
             time.sleep(min(base * (2 ** i) + random.uniform(0, 0.25), 10.0))
     return []
+
+
+def _http_get(url, params=None, timeout=30):
+    if params:
+        query = urllib.parse.urlencode(params)
+        full_url = f"{url}?{query}"
+    else:
+        full_url = url
+    if requests is not None:
+        resp = requests.get(url, params=params, timeout=timeout)
+        return resp.status_code, resp.text, resp.content
+    with urllib.request.urlopen(full_url, timeout=timeout) as resp:
+        content = resp.read()
+        text = content.decode("utf-8", errors="replace")
+        return resp.status, text, content
+
+
+def _get_json(url, params=None):
+    base = 0.5
+    for i in range(5):
+        try:
+            status, text, content = _http_get(url, params=params, timeout=30)
+            if status != 200:
+                raise RuntimeError(f"HTTP {status}: {text[:200]}")
+            return json.loads(text)
+        except Exception:
+            if i == 4:
+                raise
+            time.sleep(min(base * (2 ** i) + random.uniform(0, 0.25), 10.0))
+    return None
 
 
 def download_stooq(symbol: str, out_dir="data/raw/stooq", overwrite=False):
@@ -115,11 +157,11 @@ def download_stooq(symbol: str, out_dir="data/raw/stooq", overwrite=False):
         try:
             # quick DNS resolve to fail fast if offline
             socket.gethostbyname("stooq.pl")
-            r = requests.get(url, timeout=30)
+            status, text, content = _http_get(url, timeout=30)
             # basic content check: ensure CSV-like response
-            if r.status_code != 200 or b"<html" in r.content[:200].lower():
-                raise RuntimeError(f"Bad response for {symbol}: status={r.status_code}")
-            out_path.write_bytes(r.content)
+            if status != 200 or b"<html" in content[:200].lower():
+                raise RuntimeError(f"Bad response for {symbol}: status={status}")
+            out_path.write_bytes(content)
             return out_path
         except Exception:
             if i == 4:
@@ -465,6 +507,85 @@ def download_btc_binance_seconds(
         f"[binance] saved BTCUSDT 1s bars to {out_path} "
         f"({len(bars)} rows, trades={len(trades)}, requests={requests_made})"
     )
+    return out_path
+
+
+def download_binance_premium(symbol="BTCUSDT", out_path="data/market_meta/binance_premium_BTCUSDT.json", overwrite=False):
+    ensure_dir(pathlib.Path(out_path).parent)
+    out_path = pathlib.Path(out_path)
+    if out_path.exists() and not overwrite:
+        print(f"[binance] premium cache hit: {out_path.name}")
+        return out_path
+    print(f"[binance] downloading premium index for {symbol}")
+    payload = _get_json(BINANCE_PREMIUM, params={"symbol": symbol})
+    if payload is None:
+        raise RuntimeError("Binance premium download failed.")
+    out_path.write_text(json.dumps(payload))
+    return out_path
+
+
+def download_binance_open_interest(
+    symbol="BTCUSDT",
+    period="5m",
+    limit=500,
+    out_path="data/market_meta/binance_open_interest_BTCUSDT_5m.json",
+    overwrite=False,
+):
+    ensure_dir(pathlib.Path(out_path).parent)
+    out_path = pathlib.Path(out_path)
+    if out_path.exists() and not overwrite:
+        print(f"[binance] open interest cache hit: {out_path.name}")
+        return out_path
+    print(f"[binance] downloading open interest for {symbol} period={period}")
+    payload = _get_json(
+        BINANCE_OPEN_INTEREST,
+        params={"symbol": symbol, "period": period, "limit": int(limit)},
+    )
+    if payload is None:
+        raise RuntimeError("Binance open interest download failed.")
+    out_path.write_text(json.dumps(payload))
+    return out_path
+
+
+def download_deribit_options_instruments(
+    currency="BTC",
+    out_path="data/market_meta/deribit_options_instruments_BTC.json",
+    overwrite=False,
+):
+    ensure_dir(pathlib.Path(out_path).parent)
+    out_path = pathlib.Path(out_path)
+    if out_path.exists() and not overwrite:
+        print(f"[deribit] instruments cache hit: {out_path.name}")
+        return out_path
+    print(f"[deribit] downloading instruments for {currency}")
+    payload = _get_json(
+        DERIBIT_INSTRUMENTS,
+        params={"currency": currency, "kind": "option", "expired": "false"},
+    )
+    if payload is None:
+        raise RuntimeError("Deribit instruments download failed.")
+    out_path.write_text(json.dumps(payload))
+    return out_path
+
+
+def download_deribit_options_summary(
+    currency="BTC",
+    out_path="data/market_meta/deribit_options_summary_BTC.json",
+    overwrite=False,
+):
+    ensure_dir(pathlib.Path(out_path).parent)
+    out_path = pathlib.Path(out_path)
+    if out_path.exists() and not overwrite:
+        print(f"[deribit] summary cache hit: {out_path.name}")
+        return out_path
+    print(f"[deribit] downloading summary for {currency}")
+    payload = _get_json(
+        DERIBIT_SUMMARY,
+        params={"currency": currency, "kind": "option"},
+    )
+    if payload is None:
+        raise RuntimeError("Deribit summary download failed.")
+    out_path.write_text(json.dumps(payload))
     return out_path
 
 

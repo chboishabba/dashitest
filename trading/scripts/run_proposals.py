@@ -17,10 +17,17 @@ import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import pandas as pd
 
+from options.chain import (
+    OptionChain,
+    RealOptionChain,
+    SyntheticOptionChain,
+    SyntheticOptionsConfig,
+)
 from utils.weights_config import (
     parse_simple_yaml,
     get_path,
@@ -47,6 +54,15 @@ def _softmax(z: np.ndarray) -> np.ndarray:
     z = z - np.max(z, axis=1, keepdims=True)
     expz = np.exp(z)
     return expz / np.clip(expz.sum(axis=1, keepdims=True), 1e-12, None)
+
+
+def _parse_csv_numbers(raw: str) -> list[float]:
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    return [float(p) for p in parts]
+
+
+def _parse_csv_ints(raw: str) -> list[int]:
+    return [int(float(p)) for p in _parse_csv_numbers(raw)]
 
 
 def _infer_margin(states: np.ndarray, prices: np.ndarray, spec: RegimeSpec) -> np.ndarray:
@@ -148,6 +164,14 @@ def _zscore(arr: np.ndarray) -> np.ndarray:
     return (arr - mean) / std
 
 
+def _parse_csv_ints(raw: str) -> list[int]:
+    return [int(float(p)) for p in _parse_csv_numbers(raw)]
+
+
+def _parse_csv_strings(raw: str) -> list[str]:
+    return [p.strip() for p in raw.split(",") if p.strip()]
+
+
 def _softmax_vec(scores: np.ndarray, temp: float) -> np.ndarray:
     t = max(1e-6, float(temp))
     x = scores / t
@@ -177,6 +201,10 @@ def _median_abs_delta(arr: np.ndarray, floor: float = 1e-6) -> float:
         return float(floor)
     med = float(np.nanmedian(np.abs(diffs)))
     return max(med, float(floor))
+
+
+def _clamp01(val: float) -> float:
+    return float(min(max(val, 0.0), 1.0))
 
 
 def _ontology_support(
@@ -315,6 +343,21 @@ def main() -> None:
     ap.add_argument("--opt-mny-w-hazard", type=float, default=0.8, help="Option mny weight for hazard.")
     ap.add_argument("--opt-mny-w-iv", type=float, default=0.6, help="Option mny weight for IV.")
     ap.add_argument("--horizon", type=int, default=None, help="Override horizon for delta_pnl.")
+    ap.add_argument("--options-source", type=str, choices=["none", "synthetic", "real"], default="none", help="Option candidate source.")
+    ap.add_argument("--options-db", type=Path, default=None, help="Parquet file for real option surface.")
+    ap.add_argument("--options-real-fallback", action="store_true", help="Fall back to synthetic when real data missing.")
+    ap.add_argument("--options-sigma0", type=float, default=0.60, help="Synthetic options base IV.")
+    ap.add_argument("--options-sigma-min", type=float, default=0.20, help="Synthetic options min IV.")
+    ap.add_argument("--options-sigma-max", type=float, default=1.50, help="Synthetic options max IV.")
+    ap.add_argument("--options-k-v", type=float, default=0.50, help="Synthetic options vol sensitivity.")
+    ap.add_argument("--options-k-b", type=float, default=0.10, help="Synthetic options burst sensitivity.")
+    ap.add_argument("--options-tenor-days", type=str, default="2,5,14,41,120", help="Comma-separated tenor days.")
+    ap.add_argument("--options-tenor-bins", type=str, default="e_1_3,e_4_7,e_8_21,e_22_60,e_61_180", help="Canonical tenor labels.")
+    ap.add_argument("--options-mny-bins", type=str, default="m_deep_itm,m_itm,m_atm,m_otm,m_deep_otm", help="Canonical moneyness labels.")
+    ap.add_argument("--options-mny-deltas", type=str, default="-0.2,-0.1,0.0,0.1,0.2", help="Moneyness deltas for synthetic options.")
+    ap.add_argument("--options-mny-cutoffs", type=str, default="-0.15,-0.05,0.05,0.15", help="Cutoffs used for real options binning.")
+    ap.add_argument("--options-max-staleness-ms", type=int, default=1800000, help="Max age (ms) for real surface snapshots.")
+    ap.add_argument("--options-min-candidates", type=int, default=20, help="Min option candidates required when using real surface.")
     ap.add_argument("--min-run-length", type=int, default=3, help="RegimeSpec min_run_length.")
     ap.add_argument("--max-flip-rate", type=float, default=None, help="RegimeSpec max_flip_rate.")
     ap.add_argument("--max-vol", type=float, default=None, help="RegimeSpec max_vol.")
@@ -335,6 +378,8 @@ def main() -> None:
     ap.add_argument("--score-weight-beta", type=float, default=0.1, help="Score weight scale (beta).")
     ap.add_argument("--score-weight-clip", type=float, default=0.05, help="Score weight delta clip.")
     ap.add_argument("--dump-schema", action="store_true", help="Print resolved weight sources.")
+    ap.add_argument("--size-probe", action="store_true", help="Compute diagnostic size_probe_bin.")
+    ap.add_argument("--size-probe-scale", type=float, default=100.0, help="Scale applied to |delta_pnl| when probing size.")
     args = ap.parse_args()
 
     weights = {}
@@ -382,6 +427,49 @@ def main() -> None:
 
     if args.tau_on < args.tau_off:
         raise SystemExit("Require tau-on >= tau-off for hysteresis.")
+
+    tenor_bins = tuple(_parse_csv_strings(args.options_tenor_bins))
+    tenor_days = tuple(_parse_csv_ints(args.options_tenor_days))
+    mny_bins = tuple(_parse_csv_strings(args.options_mny_bins))
+    mny_deltas = tuple(_parse_csv_numbers(args.options_mny_deltas))
+    mny_cutoffs = tuple(_parse_csv_numbers(args.options_mny_cutoffs))
+    if len(tenor_bins) != len(tenor_days):
+        raise SystemExit("tenor_bins and tenor_days must have equal length.")
+    if len(mny_bins) != len(mny_deltas):
+        raise SystemExit("mny_bins and mny_deltas must have equal length.")
+    if len(mny_cutoffs) != len(mny_bins) - 1:
+        raise SystemExit("mny_cutoffs length must equal len(mny_bins)-1.")
+    synthetic_config = SyntheticOptionsConfig(
+        sigma0=float(args.options_sigma0),
+        sigma_min=float(args.options_sigma_min),
+        sigma_max=float(args.options_sigma_max),
+        k_v=float(args.options_k_v),
+        k_b=float(args.options_k_b),
+        tenor_bins=tenor_bins,
+        tenor_days=tenor_days,
+        mny_bins=mny_bins,
+        mny_deltas=mny_deltas,
+    )
+    option_chain: Optional[OptionChain] = None
+    if args.options_source != "none":
+        synthetic_chain = SyntheticOptionChain(synthetic_config)
+        real_chain = None
+        if args.options_source == "real":
+            if args.options_db is None:
+                raise SystemExit("--options-db is required when --options-source real")
+            real_chain = RealOptionChain(
+                args.options_db,
+                stale_ms=float(args.options_max_staleness_ms),
+                tenor_bins=tenor_bins,
+                tenor_days=tenor_days,
+                mny_bins=mny_bins,
+                mny_cutoffs=mny_cutoffs,
+            )
+        option_chain = OptionChain(
+            synthetic=synthetic_chain,
+            real=real_chain,
+            fallback_to_synthetic=args.options_real_fallback,
+        )
 
     price, volume, ts = load_prices(args.prices_csv, return_time=True)
     tape = QFeatTape.from_existing(str(args.tape), rows=price.size)
@@ -499,9 +587,10 @@ def main() -> None:
     scales_path = args.proposal_log.with_suffix(".ontology_scales.json")
     scales_path.parent.mkdir(parents=True, exist_ok=True)
     scales_path.write_text(json.dumps(scales_payload, indent=2))
-    z_hazard = _zscore(
+    hazard_array = (
         args.hazard_a * qfeat[:, 3] + args.hazard_b * qfeat[:, 1] + args.hazard_c * qfeat[:, 0]
     )
+    z_hazard = _zscore(hazard_array)
     z_trend = _zscore(np.abs(qfeat[:, 4]))
     z_ell_margin = _zscore(ell - args.tau_on)
 
@@ -509,6 +598,13 @@ def main() -> None:
     future_ret = np.full(price.shape[0], np.nan, dtype=float)
     if price.size > horizon:
         future_ret[: -horizon] = log_price[horizon:] - log_price[:-horizon]
+
+    log_returns = np.zeros_like(price)
+    if price.size > 1:
+        log_returns[1:] = log_price[1:] - log_price[:-1]
+    s_r = float(max(np.nanmedian(np.abs(log_returns[1:])), 1e-6)) if price.size > 1 else 1e-6
+    risk_ref = float(np.median(np.clip(np.maximum(hazard_array, 0.0), 0.0, None)))
+    risk_ref = max(risk_ref, 1e-6)
 
     spec = RegimeSpec(
         min_run_length=args.min_run_length,
@@ -520,6 +616,8 @@ def main() -> None:
     vols = pd.Series(rets).rolling(spec.window).std().to_numpy()
     acceptable = np.asarray(check_regime(state, vols, spec), dtype=bool)
     margin = _infer_margin(state, price, spec)
+    persist_ema = 0.0
+    persist_alpha = 2.0 / (8.0 + 1.0)
 
     windows = np.lib.stride_tricks.sliding_window_view(qfeat, window_shape=order, axis=0)
     feat_mat = windows.reshape(-1, order * qfeat.shape[1])
@@ -606,6 +704,20 @@ def main() -> None:
 
     for t in range(price.size):
         qrow = qfeat[t]
+        option_candidates = []
+        if option_chain is not None:
+            option_candidates = option_chain.generate(
+                t,
+                float(price[t]),
+                qrow,
+                int(ts_int[t]),
+            )
+            if args.options_source == "real" and len(option_candidates) < int(args.options_min_candidates):
+                raise SystemExit(
+                    f"Not enough real option candidates at t={t}: {len(option_candidates)} < {args.options_min_candidates}"
+                )
+        option_count = len(option_candidates)
+        option_source = option_candidates[0].source if option_candidates else "none"
         ont_probs, ont_raw, ont_conf = _ontology_support(
             qrow,
             means=qfeat_means,
@@ -619,11 +731,9 @@ def main() -> None:
         w_size = _weight_vec(ontology_k, "size_weights", 4)
         w_tenor = _weight_vec(ontology_k, "opt_tenor_weights", 5)
         w_mny = _weight_vec(ontology_k, "opt_mny_weights", 5)
-        hazard = (
-            args.hazard_a * float(qrow[3])
-            + args.hazard_b * float(qrow[1])
-            + args.hazard_c * float(qrow[0])
-        )
+        hazard = float(hazard_array[t])
+        risk_value = max(0.0, float(hazard))
+        delta_pnl = float(future_ret[t])
         ell_t = (
             _close(delta_a[t], s_da)
             * _close(delta_r[t], s_dr)
@@ -682,6 +792,8 @@ def main() -> None:
             "ontology_k": ontology_k,
             "ontology_switched": int(ontology_switched),
             "ontology_confidence": ont_conf,
+            "option_count": option_count,
+            "option_source": option_source,
             "p_ont_t": float(ont_probs[0]),
             "p_ont_r": float(ont_probs[1]),
             "p_ont_h": float(ont_probs[2]),
@@ -743,6 +855,10 @@ def main() -> None:
                     "p_opt_m_otm": float("nan"),
                     "p_opt_m_deep_otm": float("nan"),
                     "size_pred": "0",
+                    "size_pred_v2": "0",
+                    "size_probe_bin": "0",
+                    "size_pred_v2": "0",
+                    "size_probe_bin": "0",
                     "p_size_0": float("nan"),
                     "p_size_0_5": float("nan"),
                     "p_size_1": float("nan"),
@@ -869,27 +985,38 @@ def main() -> None:
         if args.use_learned_weights is not None and learned_weights is not None and dir_pred != 0:
             inst_probs = _apply_weights(inst_probs, w_inst)
         inst_choice = inst_labels[int(np.argmax(inst_probs))]
+        dir_conf = float(max(probs[classes.index(1)], probs[classes.index(-1)])) if dir_pred != 0 else 0.0
+        dir_trend = float(dir_conf) * (1.0 if dir_pred > 0 else -1.0) if dir_pred != 0 else 0.0
+        persist_ema = persist_alpha * dir_trend + (1.0 - persist_alpha) * persist_ema
+        persist = _clamp01((persist_ema + 1.0) * 0.5)
+        impulse01 = _clamp01((abs(log_returns[t]) / (s_r + 1e-9)) / 3.0)
+        z = _clamp01(0.65 * impulse01 + 0.35 * persist)
+        risk01 = _clamp01(risk_value / (risk_ref + 1e-9))
+        z_eff = _clamp01(z * (1.0 - 0.6 * risk01))
+        if dir_pred == 0:
+            size_pred_v2 = "0"
+        elif z_eff < 0.25:
+            size_pred_v2 = "0"
+        elif z_eff < 0.75:
+            size_pred_v2 = "0.5"
+        else:
+            size_pred_v2 = "1"
         size_centers = np.array([0.0, 0.5, 1.0, 2.0], dtype=float)
         size_labels = ["0", "0.5", "1", "2"]
-        size_score = 0.0
-        pnl_weight = 1.0
-        if dir_pred != 0:
-            ell_margin = max(0.0, float(ell[t] - args.tau_on))
-            dir_conf = float(max(probs[classes.index(1)], probs[classes.index(-1)]))
-            risk = max(0.0, float(hazard))
-            key_p = (dir_pred, ell_bin, inst_choice)
-            st = stats.get(key_p)
-            if st is not None and st.n >= args.veto_min_samples:
-                denom = st.std() if math.isfinite(st.std()) and st.std() > 0 else args.pnl_weight_eps
-                z = st.mean / (denom + args.pnl_weight_eps)
-                pnl_weight = 1.0 + args.pnl_weight_k * math.tanh(z)
-                pnl_weight = min(max(pnl_weight, args.pnl_weight_min), args.pnl_weight_max)
-            size_score = pnl_weight * (ell_margin * dir_conf) / (1.0 + risk)
+        size_score = z_eff if dir_pred != 0 else 0.0
         size_logits = -np.abs(size_score - size_centers)
         size_probs = _softmax_vec(size_logits, args.size_temp) if dir_pred != 0 else np.array([1.0, 0.0, 0.0, 0.0])
         if args.use_learned_weights is not None and learned_weights is not None and dir_pred != 0:
             size_probs = _apply_weights(size_probs, w_size)
         size_pred = size_labels[int(np.argmax(size_probs))] if dir_pred != 0 else "0"
+        size_probe_bin = "0"
+        if args.size_probe and dir_pred != 0:
+            probe_score = float(min(max(abs(delta_pnl) * args.size_probe_scale, 0.0), 2.0))
+            probe_logits = -np.abs(probe_score - size_centers)
+            probe_probs = _softmax_vec(probe_logits, args.size_temp)
+            size_probe_bin = size_labels[int(np.argmax(probe_probs))]
+
+        final_size_pred = size_pred_v2 if dir_pred != 0 else "0"
 
         inst_confidence = float(np.sort(inst_probs)[-1] - np.sort(inst_probs)[-2]) if dir_pred != 0 else float("nan")
 
@@ -916,7 +1043,7 @@ def main() -> None:
                     p_size = max(float(size_probs[i_m]), 1e-6)
                     logp_inst = math.log(p_inst)
                     logp_size = math.log(p_size)
-                    score += logp_dir + logp_inst + logp_size
+                    score += logp_dir + logp_inst + 2.0 * logp_size
                     score += 0.8 * ell_margin
                     score -= 0.7 * float(hazard)
                     carry = 0.0
@@ -999,7 +1126,6 @@ def main() -> None:
                 opt_mny_probs = _apply_weights(opt_mny_probs, w_mny)
             opt_mny_pred = opt_mny_labels[int(np.argmax(opt_mny_probs))]
 
-        delta_pnl = float(future_ret[t])
         delta_signed = float(delta_pnl * dir_pred) if math.isfinite(delta_pnl) else float("nan")
         key = (dir_pred, ell_bin, instrument_pred)
         if key not in stats:
@@ -1098,12 +1224,13 @@ def main() -> None:
                 "p_opt_m_atm": float(opt_mny_probs[2]),
                 "p_opt_m_otm": float(opt_mny_probs[3]),
                 "p_opt_m_deep_otm": float(opt_mny_probs[4]),
-                "size_pred": size_pred,
+                "size_pred": final_size_pred,
+                "size_pred_v2": size_pred_v2,
+                "size_probe_bin": size_probe_bin,
                 "p_size_0": float(size_probs[0]),
                 "p_size_0_5": float(size_probs[1]),
                 "p_size_1": float(size_probs[2]),
                 "p_size_2": float(size_probs[3]),
-                "pnl_weight": float(pnl_weight),
                 "score_best": best_score,
                 "score_second": second_score,
                 "score_margin": score_margin,
@@ -1112,6 +1239,27 @@ def main() -> None:
                 "score_margin_eff": score_margin_eff,
             }
         )
+        if args.options_source == "real":
+            required_opt_cols = [
+                "opt_type_pred",
+                "opt_tenor_pred",
+                "opt_mny_pred",
+                "p_opt_call",
+                "p_opt_put",
+                "p_opt_e_1_3",
+                "p_opt_e_4_7",
+                "p_opt_e_8_21",
+                "p_opt_e_22_60",
+                "p_opt_e_61_180",
+                "p_opt_m_deep_itm",
+                "p_opt_m_itm",
+                "p_opt_m_atm",
+                "p_opt_m_otm",
+                "p_opt_m_deep_otm",
+            ]
+            missing = [col for col in required_opt_cols if col not in row]
+            if missing:
+                raise SystemExit(f"Missing option columns in proposals when using real surface: {missing}")
         rows.append(row)
 
     df = pd.DataFrame(rows)
