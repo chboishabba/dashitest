@@ -101,9 +101,19 @@ class TriadicStrategy:
 
         # 3. Epistemic Gating (Confidence/Legitimacy)
         conf = 1.0
+        neutral_exit = False
+        risk_stop = False
         if self.confidence_fn is not None:
             raw_conf = self.confidence_fn(ts, state)
-            if isinstance(raw_conf, tuple):
+            if isinstance(raw_conf, dict):
+                neutral_exit = bool(raw_conf.get("neutral_exit", False))
+                risk_stop = bool(raw_conf.get("risk_stop", False))
+                raw_conf = raw_conf.get("confidence", raw_conf.get("conf", 0.0))
+            elif isinstance(raw_conf, tuple):
+                if len(raw_conf) > 1:
+                    neutral_exit = bool(raw_conf[1])
+                if len(raw_conf) > 2:
+                    risk_stop = bool(raw_conf[2])
                 raw_conf = raw_conf[0]
             try:
                 conf = float(raw_conf)
@@ -134,11 +144,18 @@ class TriadicStrategy:
             reason = "intentional_flat"
         elif state == UNKNOWN:
             # M6 Tension: Abstain from decision. Keep current position.
-            direction = self.position
-            target_exposure = 0.0
-            urgency = 0.0
-            hold_flag = True
-            reason = "epistemic_unknown (⊥)"
+            if risk_stop or neutral_exit:
+                direction = 0
+                target_exposure = 0.0
+                urgency = 0.2 if risk_stop else 0.5
+                hold_flag = False
+                reason = "unknown_risk_stop" if risk_stop else "unknown_neutral_synthesis"
+            else:
+                direction = self.position
+                target_exposure = 0.0
+                urgency = 0.0
+                hold_flag = True
+                reason = "epistemic_unknown (⊥)"
         elif permission == 0:
             direction = self.position
             target_exposure = 0.0

@@ -108,6 +108,76 @@ def _count_sign_flips(values: list[float]) -> int:
     return flips
 
 
+def _phase7_metrics_from_last(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    if not entries:
+        return {}
+    last = entries[-1]
+    metrics = last.get("phase7_metrics") or last.get("metrics") or {}
+    return metrics if isinstance(metrics, dict) else {}
+
+
+def _load_phase7_entries(path: Path | None) -> dict[str, list[dict[str, Any]]]:
+    entries: dict[str, list[dict[str, Any]]] = {}
+    if path is None or not path.exists():
+        return entries
+    with path.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            if not line.strip():
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            target = (
+                payload.get("target")
+                or payload.get("symbol")
+                or payload.get("tape")
+                or payload.get("name")
+                or "default"
+            )
+            if not isinstance(target, str):
+                target = "default"
+            entries.setdefault(target, []).append(payload)
+    return entries
+
+
+def _phase7_status_for(
+    target: str,
+    entries: dict[str, list[dict[str, Any]]],
+    args: Any,
+) -> tuple[bool, str, dict[str, Any]]:
+    candidates = entries.get(target) or entries.get("default") or []
+    if not candidates:
+        return False, "phase7_status_missing", {}
+    window = (
+        candidates[-args.phase7_persistence_window :]
+        if args.phase7_persistence_window > 0
+        else candidates
+    )
+    required = max(1, int(args.phase7_persistence_required))
+    ready_count = sum(1 for entry in window if entry.get("phase7_ready") is True)
+    meta = {
+        "ready_count": ready_count,
+        "window_size": len(window),
+        "required": required,
+    }
+    metrics = _phase7_metrics_from_last(window)
+    if metrics:
+        meta["metrics"] = metrics
+    if len(window) < required:
+        return False, f"phase7_waiting {len(window)}/{required}", meta
+    if ready_count < required:
+        last_reason = ""
+        for entry in reversed(window):
+            reason = entry.get("phase7_reason")
+            if reason:
+                last_reason = str(reason)
+                break
+        reason = last_reason or f"phase7_not_ready {ready_count}/{required}"
+        return False, reason, meta
+    return True, "phase7_ready", meta
+
+
 def _evaluate_gate(payload: dict[str, Any], args: Any, history_entries: deque[dict[str, Any]]) -> tuple[bool, list[str], str]:
     counts = payload.get("counts", {})
     diagnostics = payload.get("diagnostics", {})
@@ -336,6 +406,24 @@ def main() -> None:
         default="",
         help="Optional tag describing synthetic/amplitude-injected runs so OPENs can be traced.",
     )
+    ap.add_argument(
+        "--phase7-log",
+        type=Path,
+        default=Path("logs/phase7/density_status.log"),
+        help="JSONL log with Phase-07 readiness status (per target).",
+    )
+    ap.add_argument(
+        "--phase7-persistence-window",
+        type=int,
+        default=8,
+        help="How many Phase-07 status entries to consider per target.",
+    )
+    ap.add_argument(
+        "--phase7-persistence-required",
+        type=int,
+        default=6,
+        help="How many Phase-07 ready entries are required before Phase-04 can open.",
+    )
     args = ap.parse_args()
     if args.no_debounce:
         args.consecutive_passes = 1
@@ -361,6 +449,7 @@ def main() -> None:
     while True:
         iteration += 1
         now = datetime.utcnow().isoformat()
+        phase7_entries = _load_phase7_entries(args.phase7_log)
         for target in targets:
             try:
                 payload = _run_diagnostics(target, args, args.diag_out_dir)
@@ -368,7 +457,13 @@ def main() -> None:
                 print(f"[{now}] {target.name} diagnostics failed: {exc}", file=sys.stderr)
                 continue
             history = stats_history[target.name]
+            phase7_ready, phase7_reason, phase7_meta = _phase7_status_for(
+                target.name, phase7_entries, args
+            )
             raw_gate_open, blocking_reasons, open_msg = _evaluate_gate(payload, args, history)
+            if not phase7_ready:
+                raw_gate_open = False
+                blocking_reasons.insert(0, phase7_reason)
             consecutive_needed = max(1, args.consecutive_passes)
             consecutive_ok = True
             consecutive_count = 0
@@ -408,6 +503,9 @@ def main() -> None:
                 "blocking_reason": blocking_reason,
                 "diag_out": payload.get("__diag_out"),
                 "test_vector": args.test_vector or None,
+                "phase7_ready": phase7_ready,
+                "phase7_reason": phase7_reason,
+                "phase7_meta": phase7_meta,
             }
             history.append(entry)
             _log_entry(entry)

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
@@ -26,6 +27,37 @@ def _parse_size_map(raw: str | None) -> dict[str, float]:
     except json.JSONDecodeError as exc:
         raise SystemExit(f"--size-map must be valid JSON: {exc}") from exc
     return {str(k): float(v) for k, v in payload.items()}
+
+
+def _safe_float(value: object | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(val):
+        return None
+    return val
+
+
+def _infer_pred_edge(row: pd.Series) -> float:
+    dir_pred = 0
+    if "dir_pred" in row:
+        try:
+            dir_pred = int(float(row["dir_pred"]))
+        except Exception:
+            dir_pred = 0
+    score_margin = _safe_float(row.get("score_margin"))
+    if score_margin is not None and dir_pred != 0:
+        return score_margin * dir_pred
+    ell = _safe_float(row.get("ell"))
+    if ell is not None:
+        return ell
+    score_best = _safe_float(row.get("score_best"))
+    if score_best is not None:
+        return score_best
+    return 0.0
 
 
 def _serialize_rows(rows: Iterable[dict[str, object]], out_path: Path) -> None:
@@ -101,6 +133,7 @@ def main() -> None:
         execution_cost = size * price_t * fee_ratio
         raw_pnl = size * side * (price_h - fill_price)
         realized_pnl = raw_pnl - execution_cost - slippage_cost
+        predicted_edge = _infer_pred_edge(row)
         rows.append(
             {
                 "i": idx,
@@ -117,6 +150,7 @@ def main() -> None:
                 "fee_bps": args.fee_bps,
                 "slippage_cost": slippage_cost,
                 "execution_cost": execution_cost,
+                "pred_edge": predicted_edge,
                 "realized_pnl": realized_pnl,
                 "horizon": args.horizon,
             }

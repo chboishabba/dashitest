@@ -37,6 +37,7 @@ RUN_HISTORY = pathlib.Path("data/run_history.csv")
 RUN_HISTORY.parent.mkdir(parents=True, exist_ok=True)
 PARTICIPATION_CAP = 0.05   # max fraction of bar volume we can trade
 IMPACT_COEFF = 0.0001      # slippage per unit participation
+DECISION_COST_RATE = 0.0005  # per-unit fee/slippage proxy for execution gating
 SIGMA_TARGET = 0.01        # target vol for basic risk parity sizing
 DEFAULT_RISK_FRAC = None   # optional: fraction of equity to risk per trade (futures-style)
 CONTRACT_MULT = 1.0        # notional per contract; leave at 1 unless using real futures
@@ -163,6 +164,9 @@ def run_trading_loop(
     thesis_stress_hi: float = THESIS_STRESS_HI,
     tc_k: float = THESIS_TC_K,
     benchmark_x: float = THESIS_BENCHMARK_X,
+    decision_cost_rate: float = DECISION_COST_RATE,
+    boundary_gate: bool = False,
+    boundary_cost_margin: float = 0.0,
 ):
     def shadow_mdl_for_window(ret_window):
         n = len(ret_window)
@@ -239,7 +243,7 @@ def run_trading_loop(
     avg_entry_price = 0.0
     realized_pnl_total = 0.0
     dz_min = 5e-5  # minimum dead-zone
-    cost = 0.0005
+    cost_rate = max(0.0, decision_cost_rate)
     rows = []
     recent_rets = []
     log_returns = []
@@ -379,6 +383,20 @@ def run_trading_loop(
             capital_pressure=capital_pressure,
             thesis=thesis,
         )
+        pred_edge_proxy = edge_ema
+        boundary_abstain = False
+        boundary_gate_reason = ""
+        boundary_cost_threshold = max(0.0, cost_rate + boundary_cost_margin)
+        if np.isfinite(pred_edge_proxy):
+            boundary_edge_confidence = float(action_signal * pred_edge_proxy)
+        else:
+            boundary_edge_confidence = 0.0
+        if boundary_gate and action_signal != 0:
+            if boundary_edge_confidence <= boundary_cost_threshold:
+                boundary_abstain = True
+                boundary_gate_reason = "edge_below_cost"
+                action_signal = 0
+                boundary_edge_confidence = 0.0
         thesis_hold = False
         thesis_depth_prev = thesis_depth
         hard_veto = permission == -1 or stress_veto
@@ -524,7 +542,7 @@ def run_trading_loop(
             cap=cap,
             cash=cash,
             pos=pos,
-            cost=cost,
+            cost=cost_rate,
             impact_coeff=IMPACT_COEFF,
         )
         pos_prev = pos - fill
@@ -710,6 +728,13 @@ def run_trading_loop(
             "cash_vel": cash_vel,
             "edge_raw": edge_raw,
             "edge_ema": edge_ema,
+            "pred_edge": pred_edge_proxy,
+            "boundary_gate_enabled": int(boundary_gate),
+            "boundary_abstain": int(boundary_abstain),
+            "boundary_cost_threshold": boundary_cost_threshold,
+            "boundary_edge_confidence": boundary_edge_confidence,
+            "boundary_gate_reason": boundary_gate_reason,
+            "boundary_cost_margin": boundary_cost_margin,
             "c_spend": c_spend,
             "goal_prob": goal_prob,
             "goal_align": goal_align,

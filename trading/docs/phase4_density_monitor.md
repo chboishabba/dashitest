@@ -16,8 +16,23 @@ The monitor evaluates the Phase-4 gate for each tape on every iteration:
 * Require each bin to be present in ≥ `--bin-persistence-required` of the last `--bin-persistence-window` runs, preventing single bursts from opening the gate.
 * Gate opens once any ontology (`T` or `R`) meets the density criteria and has ≥ `--min-effect-size` median spread (default `0.0003`).
 * By default the gate only reports `OPEN` when two consecutive checks pass; set `--no-debounce` to disable the hysteresis.
+* Phase-4 only unblocks after Phase-07 is ready; the monitor requires a Phase-07 status log and a persistence window of `phase7_ready=true` before it will open.
 
 You can tweak those parameters to make the gate more or less conservative, but the defaults match the Phase-4 acceptance checklist.
+
+## Phase-07 gating (asymmetry density)
+
+Phase-07 is the asymmetry census: Phase-4 cannot open unless Phase-07 reports persistent readiness. The monitor reads a JSONL status log (default `logs/phase7/density_status.log`) and requires `phase7_ready=true` to appear in at least `--phase7-persistence-required` of the last `--phase7-persistence-window` entries for the same `target`.
+
+The emitter comes from `scripts/phase7_status_emitter.py`, which follows the definitions in `docs/boundary_stable_eigen.md` and writes the contract described in `docs/phase7_status_emitter.md`. Phase-04 only unblocks after the net asymmetry density survives the boundary cost proxy.
+
+Expected JSONL fields (one per line):
+
+```json
+{"timestamp": "2024-01-01T00:00:00Z", "target": "BTC", "phase7_ready": true, "phase7_reason": "asymmetry_density_ok", "phase7_metrics": {"density": 0.62}}
+```
+
+If the Phase-07 log is missing or does not contain matching entries for the target, the Phase-4 gate stays closed with a `phase7_status_missing` blocking reason.
 
 ## Usage
 
@@ -26,6 +41,7 @@ python scripts/phase4_density_monitor.py \
   --target BTC=data/btc/proposals_intraday.csv,data/btc/close.csv \
   --target SPY=data/spy/proposals_daily.csv,data/spy/close.csv \
   --interval 600 \
+  --phase7-log logs/phase7/density_status.log \
   --diag-out-dir logs/phase4/density_monitor \
   --monitor-log logs/phase4/density_monitor.log
 ```

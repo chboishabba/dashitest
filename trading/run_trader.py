@@ -21,6 +21,7 @@ import numpy as np
 from engine.loop import (
     CONTRACT_MULT,
     DEFAULT_RISK_FRAC,
+    DECISION_COST_RATE,
     EDGE_EMA_ALPHA,
     EST_TAX_RATE,
     GOAL_CASH_X,
@@ -69,6 +70,9 @@ def main(
     edge_gate: bool = False,
     edge_decay: float = 0.9,
     edge_alpha: float = EDGE_EMA_ALPHA,
+    boundary_gate: bool = False,
+    boundary_cost_rate: float = DECISION_COST_RATE,
+    boundary_cost_margin: float = 0.0,
     thesis_depth_max: int = THESIS_DEPTH_MAX,
     thesis_memory: bool = THESIS_MEMORY_DEFAULT,
     thesis_a_max: int = THESIS_A_MAX,
@@ -149,11 +153,11 @@ def main(
                     log_path = pathlib.Path(f"{log_prefix}_{csv_path.stem}.csv")
                     trade_log_path = pathlib.Path(f"{log_prefix}_trades_{csv_path.stem}.csv")
                 print(f"[run {idx}/{len(csv_paths)}] {csv_path} -> {log_path}")
-                run_trading_loop(
-                    price=price,
-                    volume=volume,
-                    source=source,
-                    time_index=ts,
+        run_trading_loop(
+            price=price,
+            volume=volume,
+            source=source,
+            time_index=ts,
                     max_steps=max_steps,
                     max_trades=max_trades,
                     max_seconds=max_seconds,
@@ -176,17 +180,23 @@ def main(
                     edge_gate=edge_gate,
                     edge_decay=edge_decay,
                     edge_ema_alpha=edge_alpha,
-                    thesis_depth_max=thesis_depth_max,
-                    thesis_memory=thesis_memory,
-                    thesis_a_max=thesis_a_max,
-                    thesis_cooldown=thesis_cooldown,
-                    thesis_pbad_lo=thesis_pbad_lo,
-                    thesis_pbad_hi=thesis_pbad_hi,
-                    thesis_stress_lo=thesis_stress_lo,
-                    thesis_stress_hi=thesis_stress_hi,
-                    tc_k=tc_k,
-                    benchmark_x=benchmark_x,
-                )
+                    decision_cost_rate=boundary_cost_rate,
+                    boundary_gate=boundary_gate,
+                    boundary_cost_margin=boundary_cost_margin,
+            thesis_depth_max=thesis_depth_max,
+            thesis_memory=thesis_memory,
+            thesis_a_max=thesis_a_max,
+            thesis_cooldown=thesis_cooldown,
+            thesis_pbad_lo=thesis_pbad_lo,
+            thesis_pbad_hi=thesis_pbad_hi,
+            thesis_stress_lo=thesis_stress_lo,
+            thesis_stress_hi=thesis_stress_hi,
+            tc_k=tc_k,
+            benchmark_x=benchmark_x,
+            decision_cost_rate=boundary_cost_rate,
+            boundary_gate=boundary_gate,
+            boundary_cost_margin=boundary_cost_margin,
+        )
                 if not log_combined:
                     emit_geometry(log_path, source)
                 if inter_run_sleep > 0:
@@ -293,6 +303,19 @@ if __name__ == "__main__":
     ap.add_argument("--edge-gate", action="store_true", help="Enable edge-based cap decay gate.")
     ap.add_argument("--edge-decay", type=float, default=0.9, help="Cap multiplier when edge gate triggers.")
     ap.add_argument("--edge-alpha", type=float, default=EDGE_EMA_ALPHA, help="EMA alpha for edge metric.")
+    ap.add_argument("--boundary-gate", action="store_true", help="Hold when predicted edge fails to cover the cost proxy.")
+    ap.add_argument(
+        "--boundary-cost-rate",
+        type=float,
+        default=DECISION_COST_RATE,
+        help="Per-unit cost proxy used by the boundary gate (fees + slippage).",
+    )
+    ap.add_argument(
+        "--boundary-cost-margin",
+        type=float,
+        default=0.0,
+        help="Additional safety margin added to the boundary cost proxy.",
+    )
     ap.add_argument("--thesis-depth-max", type=int, default=THESIS_DEPTH_MAX, help="Max thesis memory depth.")
     ap.add_argument("--thesis-memory", action="store_true", help="Enable thesis memory FSM.")
     ap.add_argument("--thesis-a-max", type=int, default=THESIS_A_MAX, help="Max thesis age.")
@@ -335,6 +358,9 @@ if __name__ == "__main__":
         edge_gate=args.edge_gate,
         edge_decay=args.edge_decay,
         edge_alpha=args.edge_alpha,
+        boundary_gate=args.boundary_gate,
+        boundary_cost_rate=args.boundary_cost_rate,
+        boundary_cost_margin=args.boundary_cost_margin,
         thesis_depth_max=args.thesis_depth_max,
         thesis_memory=args.thesis_memory,
         thesis_a_max=args.thesis_a_max,

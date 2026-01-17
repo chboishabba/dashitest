@@ -30,7 +30,9 @@ Note: This file tracks open analysis questions and design explorations. Implemen
 - [x] Add the Phase-6 friction exposure guard script (`scripts/phase6_exposure_control.py`) so slip >0.5 bps runs are clamped and the `docs/phase6_capital_control.md` story documents the constraint.
 - [x] Extend `data_downloader.py` with Binance streaming helpers and CLI so the gate can ingest live data (`stream_binance_klines` + `python data_downloader.py stream-binance ...`). 
 - [x] Document decision consumer/sink contract for `stream_actions` (delivery semantics, replay, dedupe key).
-- [ ] Outline Phase-7 live density feeder design (rolling windows, memmap vs DuckDB, failure logging).
+- [x] Outline Phase-7 live density feeder design (rolling windows, memmap vs DuckDB, failure logging).
+- [x] Document boundary-stable eigen-event invariants so Phase-07, Phase-04, and learners share the same contract (`docs/boundary_stable_eigen.md`).
+- [x] Implement the Phase-07 asymmetry status emitter that writes `logs/phase7/density_status.log` (`scripts/phase7_status_emitter.py`).
 - [x] Add a read-only probe note for the stream daemon test harness (duckdb read_only for live validation).
 - [x] Log thesis depth per-step and per-trade; update field list in README if new columns are added.
 - [ ] Re-run full-history MSFT with thesis memory enabled; compare trade count, avg duration, and PnL.

@@ -65,9 +65,17 @@ def _build_markdown(entries: dict[tuple[str, str], tuple[datetime, Mapping[str, 
             gate_reasons = payload.get("gate_reasons") or []
             blocking_reason = payload.get("blocking_reason", "not recorded")
             counts = payload.get("counts", {})
+            phase7_ready = payload.get("phase7_ready")
+            phase7_reason = payload.get("phase7_reason")
             lines.append(f"### {target}")
             lines.append(f"- Status: {gate_status}")
             lines.append(f"- Counts: {_format_counts(counts)}")
+            if phase7_ready is None:
+                lines.append("- Phase-07: (not recorded)")
+            else:
+                lines.append(f"- Phase-07: {'ready' if phase7_ready else 'blocked'}")
+                if phase7_reason:
+                    lines.append(f"- Phase-07 reason: {phase7_reason}")
             if gate_reasons:
                 lines.append(f"- Gate reasons: {', '.join(str(r) for r in gate_reasons)}")
             else:

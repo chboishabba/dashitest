@@ -35,6 +35,7 @@ Legend: (EXEC) implementation, (DECISION) policy decision, (ANALYSIS) analysis/v
 - [x] (EXEC) Add a budgeted decision cost gate to `stream_daemon.py` (notional fee + slippage).
 - [x] (DASHBOARD) Render decision targets as step plots, add delta exposure panel, and use notional fees in the live dashboard.
 - [ ] (EXEC) Build Phase-7 live density feeder (rolling windows into memmap or DuckDB) so Phase-4 gates can open on live data.
+- [x] (EXEC) Gate Phase-4 density monitor on Phase-07 readiness using a status log + persistence window.
 - [x] (DECISION) Lock quotient feature set + window (log-returns, MAD norm, W1=64/W2=256, E/C/S + deltas).
 - [x] (EXEC) Implement quotient extractor in `features/quotient.py` and log `q_*` fields.
 - [ ] (EXEC) Add quotient-gated ACCEPT/HOLD/BAN path to `strategy/triadic_strategy.py` (no direction control).
