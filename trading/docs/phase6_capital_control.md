@@ -21,6 +21,12 @@ Phase-6 does not relearn direction or size. It enforces **capital discipline** o
 * `max_exposure[T]`, `max_exposure[R]`: limit the total notional (size × price) per ontology over each window (rolling 1h / 4h).
 * Continue rejecting proposals that would exceed the cap even if Phase-4 suggests a large size bin.
 
+### Friction guard (0.5 bps)
+
+* The Phase-5 friction sweep proved only the 0.5 bps slip track stays profitable; Phase-6 therefore gates exposure on that exact regime.
+* Run `scripts/phase6_exposure_control.py --slip-threshold 0.5` to collapse every Phase-5 log into `logs/phase6/capital_controls_<stamp>.jsonl`, marking slip levels >0.5 bps as `clamped` and the 0.5 bps run as `allowed`.
+* Capital controls only propagate exposures and drawdown stats from the allowed slip track; anything else is treated as an automatic clamp (reduce size or shift to `OBSERVE/UNWIND`).
+
 ### Drawdown-aware damping
 
 * Track worst drawdown in the last `N` bars. When drawdown exceeds threshold, scale `size_pred` probability mass toward smaller bins via a map (e.g., multiply Phase-4 weights by `[(1 − dd_scale), dd_scale]`).
@@ -43,5 +49,5 @@ Phase-6 does not relearn direction or size. It enforces **capital discipline** o
 
 ## Next steps
 
-* Align this logic with Phase-5 so the control decisions are auditable before any live deployment.
+* Align this logic with Phase-5 and the runner’s gating hook (`phase6/Phase6ExposureGate`) so only the allowed 0.5 bps slip track ever escapes to the executor.
 * Build simple simulators that feed synthetic drawdown/hazard sequences to ensure the controls behave as expected.

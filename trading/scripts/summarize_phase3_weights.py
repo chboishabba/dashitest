@@ -19,10 +19,11 @@ except ModuleNotFoundError:
     from weights_config import clamp_learnable_vector, normalize_vector
 
 
-def validate_weights_schema(weights, *, name="<weights>") -> None:
-    if not isinstance(weights, dict):
+def validate_weights_schema(weights_in, *, name="<weights>") -> None:
+    if not isinstance(weights_in, dict):
         raise ValueError(f"{name}: root must be dict")
 
+    weights = weights_in.get("weights", weights_in)
     for ont in ("T", "R", "H"):
         if ont not in weights:
             raise ValueError(f"{name}: missing ontology '{ont}'")

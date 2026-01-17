@@ -1,0 +1,25 @@
+WARNING: --force will rebuild and overwrite the qfeat tape. Any learned ell in slot 6 will be LOST.
+[vk_qfeat] starting host setup (T=100800, S=1)...
+[vk_qfeat] compiling shader (fp64) to /home/c/Documents/code/dashitest/trading/vulkan_shaders/qfeat.fp64.spv...
+[vk_qfeat] creating device and buffers...
+[vk_qfeat] timing host_setup=0.014s gpu=0.200s host_teardown=0.023s
+[runner] progress: 5000/100800 (5.0%)
+[runner] progress: 10000/100800 (9.9%)
+[runner] progress: 15000/100800 (14.9%)
+[runner] progress: 20000/100800 (19.8%)
+[runner] progress: 25000/100800 (24.8%)
+[runner] progress: 30000/100800 (29.8%)
+[runner] progress: 35000/100800 (34.7%)
+[runner] progress: 40000/100800 (39.7%)
+[runner] progress: 45000/100800 (44.6%)
+[runner] progress: 50000/100800 (49.6%)
+[runner] progress: 55000/100800 (54.6%)
+[runner] progress: 60000/100800 (59.5%)
+[runner] progress: 65000/100800 (64.5%)
+[runner] progress: 70000/100800 (69.4%)
+[runner] progress: 75000/100800 (74.4%)
+[runner] progress: 80000/100800 (79.4%)
+[runner] progress: 85000/100800 (84.3%)
+[runner] progress: 90000/100800 (89.3%)
+[runner] progress: 95000/100800 (94.2%)
+[runner] progress: 100000/100800 (99.2%)

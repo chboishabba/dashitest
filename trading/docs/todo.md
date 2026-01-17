@@ -15,6 +15,23 @@ Note: This file tracks open analysis questions and design explorations. Implemen
 - [x] Implement bounded thesis-depth persistence per `docs/buy_hold_degeneracy.md` (state, transitions, exits). Implemented in `step_thesis_memory` with bounded depth + cooldown; remaining work is analysis/visualization only.
 - [x] Replace immediate flat-exit on desired=0 with thesis-depth decay + HOLD.
 - [ ] Add CLI/config for thesis depth max (default + validation).
+- [ ] Track SVO mask evolution so the GPU mask operations stay confined to the packed P/N bitplanes before the next SVO kernel revision.
+- [ ] Finish the GF(3) SWAR operator set (vectorized adders/multipliers/selectors) so the “logic-limited engine” never falls back to scalar code and the M6→M9 cycle stays branchless.
+- [ ] Verify `triadic_xor_bitwise` implements the branchless P/N formulas and document the `+1, -1, 0, ⊥` mapping in `signals/triadic_ops.py` so `scripts/test_ternary_logic.py` reports phase-advance behavior.
+- [ ] Codify the UTES-5 Non-Archimedean NaNs (VOID, PARADOX, qMETA) in tensor metadata so the 27-state backbone always prioritizes severity (`qMETA ≺ qVOID ≺ qPARA`).
+- [x] Run Phase-4.1 size training on ES once the gate reports OPEN twice; learn T/R size weights, pin H, aggregate priors, and lock the resulting schema and checksum (outputs: `logs/esnq/ES_5m/phase4_size_run.json` + `weights_size_run.json`).
+- [x] Run the Phase-5 friction simulator (0.5–2.0 bps slip, 0.5 bps fee) and capture size vs marginal PnL under realistic microstructure taxes (`logs/phase5/es/phase5_execution_*.jsonl` with mean PNLS of 0.108/−0.026/−0.162/−0.297 for slip 0.5/1.0/1.5/2.0 bps).
+- [x] Decide and document the BTC path for Phase-4 (higher-density ingestion, explicit non-expressible posture, or convex-only learning) so the system stops dithering (`docs/btc_phase4_path.md`).
+- [x] Write a short invariants memo that declares UNKNOWN ⊥ ≠ FLAT, keeps the hazard ontology unlearned, and reiterates that the gate stays conservative; use it to guard against “make it trade” regressions (`docs/ternary_invariants.md`).
+- [x] Outline the asymmetry sensors (funding/funding divergence, forced-liquidation proxies, volatility mispricing, convexity signals) needed to unlock profitable M9 regimes for this architecture (implemented the ES↔NQ influence tensor sensor in `scripts/asymmetry_influence_sensor.py` and logged `logs/asymmetry/influence_tensor_*.jsonl`).
+- [x] Convert the Phase-4/Phase-5/Asymmetry plan into tracked work items with owners, deadlines, and checkpoint dates so option A→B→C execution follows the documented fork (`docs/phase4_phase5_asymmetry_plan.md` tracking table).
+- [x] Resample BTC close data to 1m high-density tape via `data_downloader.py resample --freq 1min` so Phase-4 gating can revisit BTC when we have denser substrate (`data/btc/high_density/close.csv`).
+- [x] Integrate the influence tensor monitor into `strategy/triadic_strategy.py` + `runner.py` so triadic permission honors sensor escalations and uses the latest `logs/asymmetry` output.
+- [x] Add the Phase-6 friction exposure guard script (`scripts/phase6_exposure_control.py`) so slip >0.5 bps runs are clamped and the `docs/phase6_capital_control.md` story documents the constraint.
+- [x] Extend `data_downloader.py` with Binance streaming helpers and CLI so the gate can ingest live data (`stream_binance_klines` + `python data_downloader.py stream-binance ...`). 
+- [x] Document decision consumer/sink contract for `stream_actions` (delivery semantics, replay, dedupe key).
+- [ ] Outline Phase-7 live density feeder design (rolling windows, memmap vs DuckDB, failure logging).
+- [x] Add a read-only probe note for the stream daemon test harness (duckdb read_only for live validation).
 - [x] Log thesis depth per-step and per-trade; update field list in README if new columns are added.
 - [ ] Re-run full-history MSFT with thesis memory enabled; compare trade count, avg duration, and PnL.
 - [ ] Aggregate thesis depth at exit (distribution and summary; confirm most exits occur near depth=0).
@@ -57,3 +74,8 @@ Note: This file tracks open analysis questions and design explorations. Implemen
 - [ ] Capture BTC/SPY summaries from `score_quotient_stability.py`.
 - [x] Decide if plot scripts should auto-timestamp `--save` outputs to enforce the no-overwrite policy.
 - [ ] Verify timestamped outputs for plot scripts on a short run.
+- [x] Capture the hierarchical summarisation stack and epistemic boundary in `docs/hierarchical_summarisation.md`.
+- [ ] Build the minutely summariser (`tools/summarise_1s_to_1m.py`) that emits the schema described there.
+- [ ] Materialize DuckDB/Parquet tables/views for `btc_1m`, `btc_15m`, `es_5m`, etc., so Phase-4/5 density and influence sensors can query summarised features.
+- [ ] Wire Phase-4 density, Phase-5 friction, and Phase-6 capital logic to those summarised tables (no raw 1s ticks go directly into live gates).
+- [ ] Formalize the influence tensor tables derived from summarised feature vectors and document how lag/lead dimensions are stored.

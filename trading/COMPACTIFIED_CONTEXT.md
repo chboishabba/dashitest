@@ -8,3 +8,22 @@
 - Added ES/NQ ingestion artifact: 5-minute price files, synthetic proposals, `scripts/check_esnq_ingestion.py`, and a monitor run that now reports ES/NQ gates as `OPEN` once the strict profile runs for ≥6 iterations.
 - Added a clarification in `docs/phase4_phase5_strategy.md` about synthetic/amplitude-injected OPENs being mechanical tests and noted how to flag those runs so Phase-4.1 only fires off real data.
 - `scripts/phase4_density_monitor.py` now accepts `--test-vector` so amplitude-injected runs mark `test_vector` in `logs/phase4/density_monitor.log`, and `docs/phase4_density_monitor.md` explains how to interpret that tag plus how to refresh BTC/ES/NQ data using `python data_downloader.py`.
+- Streaming ingestion now supports live DuckDB writes per closed chunk via `ingest_dataframe`, with optional archive-only mode; chunk duration and run duration accept seconds for faster tests (`data_downloader.py`, `tools/ingest_archives_to_duckdb.py`).
+- Planned Phase 06 live stream daemon: create `.planning/phases/06-live-stream-daemon/01-daemon-contract-PLAN.md` to define the always-on ingest contract, daemon CLI, and test harness.
+- Implemented TCP NDJSON stream daemon contract and tooling: `docs/stream_daemon.md`, `scripts/stream_daemon.py`, `scripts/stream_daemon_test.py`, plus a Phase 06 summary.
+- Planned Phase 06 follow-on work in `.planning/phases/06-live-stream-daemon/02-decision-emit-PLAN.md` for decisions, tail ingest, and metrics.
+- Extended the stream daemon to emit triadic decisions with Phase 6 gating, persist actions/state tables, replay NDJSON via tail mode, and expose a lightweight metrics endpoint; updated docs and test harness.
+- Added decision sinks for stream actions (NDJSON file, TCP fan-out, latest-action view) and a read-only probe option in the stream daemon test harness.
+- Added `scripts/stream_daemon_live.py` to run the daemon and stream live Binance trades in one command.
+- `scripts/stream_daemon_live.py` now supports `--symbols` lists or `--all-symbols` with `--max-symbols` caps.
+- Added `scripts/plot_stream_decisions.py` to plot signed target exposure from decision NDJSON with optional state/urgency/posture overlays.
+- `scripts/plot_stream_decisions.py` now supports live follow mode and WebM timelapse output.
+- `scripts/stream_daemon_live.py` can now spawn the live plotter or WebM timelapse so a single command runs daemon + feed + plot.
+- Drafted Phase 07 live density feeder plan at `.planning/phases/07-live-density/01-live-density-PLAN.md`.
+- Drafted Phase 06.03 plan for fee-aware live dashboard + decision cost gate at `.planning/phases/06-live-stream-daemon/03-fee-aware-dashboard-PLAN.md`.
+- Implemented budgeted decision cost gate flags in `scripts/stream_daemon.py` (cost-aware clamp + metrics) and wired them through `scripts/stream_daemon_live.py`; updated the live dashboard to step-plot targets, add delta exposure markers, and compute notional fees in `scripts/plot_stream_dashboard_pg.py`.
+- Updated M9/all-red spine write-up in `TRADER_CONTEXT.md` to reflect gate-first hazard semantics, non-extractive supervision, and special-code severity ordering.
+- Added post-alignment refusal-first notes in `TRADER_CONTEXT.md` covering eigen-orbit census framing, fee-as-norm completion, and Phase-07 to Phase-04 gating implications.
+- Added false eigen-event and friction boundary term formalization in `TRADER_CONTEXT.md`, plus a Phase-07 asymmetry density gate tied to Phase-04 unblocking.
+- Added a DASHI formalism -> current trader projection section in `TRADER_CONTEXT.md` with explicit gap analysis and operational consequences.
+- Locked in M5/UNKNOWN control-law language and profit eigen-event criteria in `TRADER_CONTEXT.md`.

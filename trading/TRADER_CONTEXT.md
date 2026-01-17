@@ -504,9 +504,13 @@ $M_9$ is defined as the **Retire/Prohibit** motif, and it is the necessary respo
 
 $M_9$ is chosen by the $n=9$ **Meta-witness** (the global supervisor). Its primary job is to ensure **global boundedness and recursive closure**. When a system's state exhibits pervasive harm, $M_9$ is the functional decision that prevents catastrophe, aligning perfectly with "taking control now."
 
-*   **Formal Definition:** $M_9$ is triggered by an **"all-red spine"**. This occurs when all three primary lenses (Self, Norm, and Mirror) report a negative (harmful) state in the present moment ($\mathbf{S}_{3,0}, \mathbf{S}_{6,0}, \mathbf{S}_{9,0}$ are all "–"). This state is described conceptually as the **"Void of connection"** or **"Total Harm"**.
-*   **Action:** Its instruction is explicit: **"Do not use for this goal; pivot"**. This is the necessary policy intervention when a computation has resulted in a demonstrably harmful, non-viable, or unconstrained output, forcing the process to end or restart under new premises.
-*   **Safety Analogy:** The $M_9$ motif is the system's circuit breaker. If the dynamics, despite internal contradictions being managed at Level 6 ($\mathbb{Z}/6\mathbb{Z}$), fail to yield a constructive path, the Level 9 supervisor must intervene to enforce stability.
+*   **Formal Definition:** $M_9$ is triggered by an **"all-red spine"** failure signature. The PDFs describe this as a **gate-first** permission check that runs before state commitment to catch catastrophic failure motifs (including M7 fatigue overflow) early. It is **not** pinned to a single explicit triple-equality test; it is a supervisory hazard condition over the $(S_3,S_6,S_9)$ backbone. Semantic labels for these components are interpretive rather than canonical.
+*   **Action:** Its instruction is explicit: **"Do not use for this goal; pivot"**. This is the necessary policy intervention when a computation has resulted in a demonstrably harmful, non-viable, or unconstrained output. In the PDFs, $M_9$ can be a correct refusal (non-extractive) until asymmetry is proven in data.
+*   **Safety Analogy:** The $M_9$ motif is the system's circuit breaker or stall/shutdown guard. When dynamics fail to yield a constructive path, the Level 9 supervisor intervenes to prevent commitment, rather than to finalize closure.
+
+Supervisory propagation is not limited to ternary triples. The 5-bit cell includes special codes (VOID/PARADOX), and escalation follows a "max severity wins" ordering (qMETA < qVOID < qPARA). This is part of why $M_9$ is not defined as a single clean equality test.
+
+The PDFs also treat $M_6$ as a through-state: resolution is achieved by applying the $M_9$ "mod" over $M_6$ (the "smash past 6" rule) to re-enter the cycle at higher order, not by collapsing to a binary shutdown.
 
 ### 2. Conceptual Alignment with Control
 
@@ -517,7 +521,7 @@ The interpretation "I'm taking control now" works because the emergence of coher
 
 The structural gradient that describes temporal integration within the framework is the **$7 \to 9$ gradient**.
 
-This progression represents the move from acknowledging multiple contradictions to achieving **bidirectional stabilization** and comprehensive self-coherence over time.
+This progression represents the move from acknowledging multiple contradictions toward supervisory integration, without assuming guaranteed closure.
 
 The stages of this structural gradient are:
 
@@ -537,12 +541,118 @@ This level represents **metacognition**, enabling the system to observe its own 
 
 ### 3. Level 9: Meta-Witness / Region of Convergence (ROC)
 
-This is the ultimate point of **bidirectional stabilization** and resolution, where the framework achieves systemic closure.
+This level is the supervisory boundary condition for temporal integration. It is allowed to stall or shut down when tension cannot be resolved, and it does not guarantee closure.
 
 *   **Function:** The Meta-Witness acts as the **global supervisor** that directs attention, integrates dual temporal arrows, and **chooses boundary conditions wisely**.
-*   **Bidirectional Causality:** This level formalizes **temporal integration** by achieving a **stable limit cycle** where constraints from the past (memories, prior expectations) and constraints from the future (attractors, desired goals) converge. The system is compelled to choose a narrative that stabilizes updates instead of dissolving into relativistic drift.
+*   **Bidirectional Causality:** This level formalizes **temporal integration** by keeping constraints from the past (memories, prior expectations) and the future (attractors, desired goals) in play while preventing unsafe commitment. It is allowed to withhold extraction until asymmetry is proven.
 
 This process ensures that the inherent tension running through the lower levels is not erased, but encoded and resolved within a final, coherent topological structure.
+
+### Post-alignment structural implications (refusal-first)
+
+The alignment did not change the kernel or trading logic. It changed what claims are allowed about them. The governing invariant is:
+
+Nothing extracts certainty before asymmetry is proven.
+
+Pre-alignment assumptions tended to read as:
+
+- Kernel -> closure
+- Closure -> stability
+- Stability -> extractable action
+- Extractable action -> profit (modulo noise)
+
+The PDFs do not guarantee that chain. The corrected trajectory is:
+
+- Kernel -> consistency projection
+- Consistency -> admissible eigen-objects
+- Eigen-objects -> filtering by norms
+- Filtering -> refusal dominates until asymmetry appears
+
+Profit is therefore not a default outcome. Refusal is.
+
+#### Why fees changed apparent profitability
+
+Fees did not break the system. They completed the norm projection. Pre-fee trading admitted degenerate asymmetries near indifference surfaces. Once fees are present, those paths become norm-invalid and the system correctly refuses them.
+
+#### Phase implication
+
+This is not "strategy tuning." It is an eigen-orbit census:
+
+- catalog fixed points, low-action cycles, rare asymmetry bursts
+- characterize duration, entropy, cost sensitivity, scale persistence
+- accept that most markets imply refusal
+
+Phase 7 density exists to test live asymmetry under cost. Phase 4 should only unblock when that asymmetry survives the norm filter without M9 gate intervention.
+
+### False eigen-events and friction boundary terms
+
+The "made money before fees" outcome is a false eigen-event: an apparent invariant in a lifted objective (gross PnL) that disappears once the missing boundary term is restored.
+
+Let x_t be exposure and m_t be midprice. Let h_t be half-spread and f_t be a fee + slippage rate. Define Delta x_t = x_t - x_{t-1}. A first-order decomposition:
+
+Delta Pi_t approx x_{t-1} * Delta m_t - (h_t + f_t) * m_t * |Delta x_t|.
+
+The first term is gross edge. The second is a boundary/defect cost attached to state transitions. Evaluating the system without that term is evaluating in the wrong quotient.
+
+#### False eigen-event class
+
+A window is a false eigen-event if gross profit is positive but net profit is not:
+
+sum x_{t-1} * Delta m_t > 0, but sum Delta Pi_t <= 0.
+
+These are churn modes that do not survive the boundary constraint. They are non-semantic lifts, not stable eigen-objects.
+
+#### Asymmetry density (Phase 7 estimator)
+
+Define edge proxy e_t = x_{t-1} * Delta m_t and friction burn c_t = (h_t + f_t) * m_t * |Delta x_t|.
+Define the rolling density over window W:
+
+rho_A(t) = sum_{k in W} e_k / (sum_{k in W} c_k + eps).
+
+"Enough asymmetry" requires clearance (rho_A >= 1 + delta), persistence (P consecutive windows), and robustness under small execution perturbations. This is the intended Phase 7 output.
+
+#### Phase 7 -> Phase 4 bridge
+
+Phase 4 should only unblock when the density clears threshold with persistence and no special-code escalation is active. This makes the gate friction-aware and filters out false eigen-events before extraction.
+
+### DASHI formalism -> current trader projection
+
+The canonical object is a ternary field s_t in S = T^{G x C} with kernel K and synchronous dynamics s_{t+1} = K(s_t). Meaningful objects are kernel-saturated states, low-action cycles, and quotient classes in Q = S / G that survive all admissible quotients (including boundary costs).
+
+The current trader is a projection of that object onto a cost-free, single-channel slice. Formally, it reduces the carrier to a single time-window scalar (recent closes), applies a degenerate local projector (triadic sign after EWMA normalization), and uses the result to drive an external control loop:
+
+x_{t+1} = F(x_t, K_triadic(m_{t-N:t})).
+
+This is not kernel iteration; it is kernel-driven control. It is allowed, but it weakens convergence claims.
+
+#### Explicit gap analysis
+
+Gap 1: Boundary terms are not in the kernel or permission logic.
+Effect: Churn-heavy trajectories pass kernel checks but fail once friction is restored (false eigen-events).
+
+Gap 2: No asymmetry density estimator (rho_A).
+Effect: Phase 4 unblocking lacks a friction-aware invariant and admits noise-asymmetry.
+
+Gap 3: Kernel operates post-aggregation, not on the native field.
+Effect: Structural cancellations and warnings in the full field are invisible; eigen-claims are only about the collapsed representative.
+
+Gap 4: No explicit special-code escalation in the decision loop.
+Effect: The system may act through VOID/PARADOX regimes where the theory calls for refusal.
+
+Gap 5: Scheduler is not the kernel.
+Effect: Stability must be treated empirically; theoretical closure does not directly apply.
+
+#### Consequence
+
+The current trader is best described as a probe for asymmetry, not an extractor. Profit appears only when a projected mode survives the full quotient (including boundary costs) and persists under live density constraints.
+
+### Clarified control-law and eigen-event criteria
+
+M5 is not a missing symbol; it is a control-law correction. UNKNOWN (⊥) does not imply FLAT (0). The rule is: ⊥ -> HOLD unless a risk stop or a validated neutral synthesis requires liquidation. Epistemic suspension is a buffer, not an exit.
+
+False eigen-events are now defined precisely as trajectories with positive gross edge but non-positive net surplus once boundary costs are restored. Profit is a quotient-stable eigen-event: it must survive boundary terms, persist as a low-action object, and avoid escalation under max-severity special-code propagation (VOID/PARADOX).
+
+Phase-07 becomes the checkable gate: asymmetry density must clear a friction-aware threshold with persistence before Phase-04 can unblock. This prevents frictionless lifts from masquerading as admissible structure.
 
 why is M₅ is missing too?
 
@@ -618,24 +728,9 @@ implicitly selects motifs that share one property:
 
 They can represent unambiguous global failure when projected across all three lenses.
 
-These motifs can collectively generate an all-red spine
+These motifs can collectively generate an all-red spine pressure across the $(S_3,S_6,S_9)$ backbone. The PDFs treat this as a supervisory hazard condition, not a single fixed triple-equality test.
 
-(S3,0,S6,0,S9,0)=(−,−,−)
-(S
-3,0
-	​
-
-,S
-6,0
-	​
-
-,S
-9,0
-	​
-
-)=(−,−,−).
-
-That is what authorizes the Meta-Witness (Level 9) to intervene.
+That is what authorizes the Meta-Witness (Level 9) to intervene via a gate-first permission check before exposure is committed.
 
 2. What 
 M5

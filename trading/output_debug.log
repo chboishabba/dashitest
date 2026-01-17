@@ -1,1 +1,36 @@
 WARNING: --force will rebuild and overwrite the qfeat tape. Any learned ell in slot 6 will be LOST.
+[vk_qfeat] timing host_setup=0.032s gpu=0.200s host_teardown=0.041s
+Traceback (most recent call last):
+  File "/home/c/Documents/code/dashitest/trading/scripts/run_with_vulkan_tape.py", line 134, in <module>
+    main()
+  File "/home/c/Documents/code/dashitest/trading/scripts/run_with_vulkan_tape.py", line 122, in main
+    run_bars(
+  File "/home/c/Documents/code/dashitest/trading/runner.py", line 165, in run_bars
+    pd.DataFrame([logs[-1]]).to_csv(
+  File "/home/c/Documents/code/dashitest/venv/lib/python3.12/site-packages/pandas/util/_decorators.py", line 333, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/c/Documents/code/dashitest/venv/lib/python3.12/site-packages/pandas/core/generic.py", line 3989, in to_csv
+    return DataFrameRenderer(formatter).to_csv(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/c/Documents/code/dashitest/venv/lib/python3.12/site-packages/pandas/io/formats/format.py", line 1014, in to_csv
+    csv_formatter.save()
+  File "/home/c/Documents/code/dashitest/venv/lib/python3.12/site-packages/pandas/io/formats/csvs.py", line 270, in save
+    self._save()
+  File "/home/c/Documents/code/dashitest/venv/lib/python3.12/site-packages/pandas/io/formats/csvs.py", line 275, in _save
+    self._save_body()
+  File "/home/c/Documents/code/dashitest/venv/lib/python3.12/site-packages/pandas/io/formats/csvs.py", line 313, in _save_body
+    self._save_chunk(start_i, end_i)
+  File "/home/c/Documents/code/dashitest/venv/lib/python3.12/site-packages/pandas/io/formats/csvs.py", line 320, in _save_chunk
+    res = df._get_values_for_csv(**self._number_format)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/c/Documents/code/dashitest/venv/lib/python3.12/site-packages/pandas/core/frame.py", line 1414, in _get_values_for_csv
+    mgr = self._mgr.get_values_for_csv(
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/c/Documents/code/dashitest/venv/lib/python3.12/site-packages/pandas/core/internals/managers.py", line 485, in get_values_for_csv
+    return self.apply(
+           ^^^^^^^^^^^
+  File "/home/c/Documents/code/dashitest/venv/lib/python3.12/site-packages/pandas/core/internals/managers.py", line 363, in apply
+    applied = getattr(b, f)(**kwargs)
+              ^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt

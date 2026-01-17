@@ -24,3 +24,4 @@ class Intent:
     ttl_ms: int
     hold: bool = False  # when True, executor should not change exposure
     actionability: float = 1.0  # logged; executor ignores
+    reason: str = "" # diagnostic audit trail

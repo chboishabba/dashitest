@@ -22,19 +22,26 @@ try:
     from trading.bar_exec import BarExecution
     from trading.hft_exec import LOBReplayExecution
     from trading.intent import Intent
-    from trading.strategy.triadic_strategy import TriadicStrategy
-    from trading.strategy.learner_adapter import LearnerAdapter
+    from trading.posture import Posture
     from trading.regime import RegimeSpec, check_regime
+    from trading.strategy.learner_adapter import LearnerAdapter
+    from trading.strategy.triadic_strategy import TriadicStrategy
+    from trading.signals.asymmetry_sensor import InfluenceTensorMonitor
+    from trading.phase6.gate import Phase6ExposureGate
 except ModuleNotFoundError:
     from bar_exec import BarExecution
     from hft_exec import LOBReplayExecution
     from intent import Intent
-    from strategy.triadic_strategy import TriadicStrategy
-    from strategy.learner_adapter import LearnerAdapter
+    from posture import Posture
     from regime import RegimeSpec, check_regime
+    from strategy.learner_adapter import LearnerAdapter
+    from strategy.triadic_strategy import TriadicStrategy
+    from signals.asymmetry_sensor import InfluenceTensorMonitor
+    from phase6.gate import Phase6ExposureGate
 import math
 import pandas as pd
 import pathlib
+from pathlib import Path
 import numpy as np
 
 
@@ -55,6 +62,8 @@ def run_bars(
     tau_conf_exit: float = 0.0,
     use_stub_adapter: bool = False,
     adapter_kwargs: dict = None,
+    influence_log_dir: str | Path | None = "logs/asymmetry",
+    phase6_log_dir: str | Path | None = "logs/phase6",
 ):
     """
     bars: DataFrame with columns [ts, close, state] (state ∈ {-1,0,+1})
@@ -98,12 +107,22 @@ def run_bars(
                 pass
             return out
 
+    influence_monitor = (
+        InfluenceTensorMonitor(influence_log_dir)
+        if influence_log_dir
+        else None
+    )
+    phase6_gate = (
+        Phase6ExposureGate(phase6_log_dir) if phase6_log_dir else None
+    )
+
     # strategy emits intents from triadic state
     strategy = TriadicStrategy(
         symbol=symbol,
         confidence_fn=confidence_fn,
         tau_on=tau_conf_enter,
         tau_off=tau_conf_exit,
+        influence_monitor=influence_monitor,
     )
     executor = get_executor(symbol, mode)
     logs = []
@@ -132,7 +151,9 @@ def run_bars(
         if prev_price is not None:
             ret = (price / prev_price) - 1.0
             equity *= (1 + prev_exposure * ret)
-        intent = strategy.step(ts=ts, state=state)
+        enabled = phase6_gate.is_allowed() if phase6_gate else True
+        current_posture = posture if enabled else Posture.OBSERVE
+        intent = strategy.step(ts=ts, state=state, posture=current_posture)
         result = executor.execute(intent, price)
         equity += result.get("pnl", 0.0)
         logs.append(
@@ -153,6 +174,7 @@ def run_bars(
                 "pnl": equity - 1.0,
                 "exposure": result["exposure"],
                 "slippage": result["slippage"],
+                "reason": intent.reason,
                 # dashboard-friendly fields
                 "price": price,
                 "volume": volume,
@@ -165,6 +187,8 @@ def run_bars(
             pd.DataFrame([logs[-1]]).to_csv(
                 log_file, mode="a", header=not log_file.exists(), index=False
             )
+        if (i + 1) % 5000 == 0:
+            print(f"[runner] progress: {i+1}/{len(bars)} ({(i+1)/len(bars)*100:.1f}%)")
         prev_price = price
         prev_exposure = result["exposure"]
     return pd.DataFrame(logs)

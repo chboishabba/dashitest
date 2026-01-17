@@ -14320,3 +14320,424 @@ If you want, next I can:
 * or sketch Phase-6 capital logic so it’s ready when Phase-4 opens.
 
 Just tell me which.
+
+“Formalise quotient map first”
+
+“Rebuild rotation + DuckDB helpers now (minimal, mechanical)”
+
+“Design non-destructive summariser next”
+
+“Define influence tensor formally”
+
+
+Cool — we can treat this as a **4-deliverable spec + minimal tooling drop** that keeps the architecture honest:
+
+1. **Quotient map formalisation (spec + interface)**
+2. **Rotation + DuckDB ingestion helpers (mechanical only)**
+3. **Non-destructive summariser (what “allowed summaries” mean)**
+4. **Influence tensor (formal object + how it’s computed on quotients)**
+
+Below is a concrete design you can paste into your repo as docs + starter modules.
+
+---
+
+# 1) Formalise the quotient map first
+
+## 1.1 Objects
+
+Let raw observations be per-instrument, per-timestamp “field samples”:
+
+* ( x_{t}^{(i)} ) = raw micro observations (price/vol/aggTrades, etc.) for instrument (i)
+
+Define a **quotient map** (Q) that produces canonical, *symmetry-reduced* representatives:
+
+* ( q_{t}^{(i)} = Q(x_{\le t}^{(i)}; \theta) \in \mathbb{R}^{d} )
+
+And a legitimacy surface:
+
+* ( \ell_{t}^{(i)} = L(q_{t}^{(i)}; \phi) \in [0,1] )
+
+**Design requirement:** (Q) must be deterministic, stable, and parity-checkable (CPU oracle vs GPU kernel).
+
+## 1.2 Symmetries (Q) must respect
+
+You can (and should) explicitly state which nuisance symmetries are quotiented out:
+
+### Required invariances
+
+* **Price translation:** (p \mapsto p + c) shouldn’t change (q) (use returns / differences).
+* **Scale / denomination:** (p \mapsto a p) should not change geometry (use log returns, normalized quantities).
+* **Time sampling jitter (within the bar):** summaries must preserve key invariants even if micro events shift slightly inside a 1s bucket.
+* **Microstructure noise:** (Q) should prefer features stable under small bid/ask bounce.
+
+### Allowed non-invariances (explicit)
+
+* **Regime / volatility level changes** may change (q).
+* **Liquidity / spread / funding** changes may change (q) (these are *structure*, not nuisance).
+
+## 1.3 Interface (the “contract”)
+
+Create a tiny interface that everything else targets (summariser + influence tensor + GPU):
+
+```python
+# trading/summarisation/quotient_map.py
+from __future__ import annotations
+from dataclasses import dataclass
+import numpy as np
+
+@dataclass(frozen=True)
+class QuotientSpec:
+    w_fast: int = 64
+    w_slow: int = 256
+    eps: float = 1e-12
+    version: str = "qfeat_v1"   # bump when semantics change
+
+class QuotientMap:
+    """
+    Q: raw -> quotient representatives.
+    Deterministic float32 semantics; GPU must match within tolerance.
+    """
+    def __init__(self, spec: QuotientSpec):
+        self.spec = spec
+
+    def compute(self, close: np.ndarray) -> np.ndarray:
+        """
+        close: float32 array shaped [T] or [N,T] if batched instruments
+        returns: float32 array shaped [T, D] or [N,T,D]
+        """
+        close = np.asarray(close, dtype=np.float32)
+        if close.ndim == 1:
+            return self._compute_1d(close)
+        if close.ndim == 2:
+            return np.stack([self._compute_1d(close[i]) for i in range(close.shape[0])], axis=0)
+        raise ValueError(f"close must be 1d or 2d, got {close.shape}")
+
+    def _compute_1d(self, close: np.ndarray) -> np.ndarray:
+        # placeholder: wire to your existing compute_qfeat oracle
+        # IMPORTANT: keep fixed order, float32 ops, NaN/Inf squash
+        from features.quotient import compute_qfeat
+        return compute_qfeat(close[None, :])[0]  # adapt to your oracle shape
+```
+
+**Doc it as a contract:**
+
+* fixed feature order
+* float32
+* NaN/Inf squash semantics
+* windowing semantics
+* versioned spec
+
+This prevents “semantic drift” when you start summarising.
+
+---
+
+# 2) Rebuild rotation + DuckDB helpers now (minimal, mechanical)
+
+These helpers must be **field-plane only** (no learning, no gate decisions).
+
+## 2.1 Rotation helper
+
+Goal: keep per-second stream manageable; archive closed chunks; keep a stable “latest” pointer.
+
+Directory convention (suggested):
+
+* `logs/binance_stream/raw/` → current `.csv.gz` chunks
+* `logs/binance_stream/archive/` → older chunks
+* `logs/binance_stream/latest.csv.gz` → symlink or copy of most recent closed chunk
+
+```python
+# tools/rotate_chunks.py
+from __future__ import annotations
+import argparse
+import shutil
+from pathlib import Path
+from datetime import datetime, timezone
+
+def utc_stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+def rotate_dir(src_dir: Path, archive_dir: Path, keep_latest_link: Path | None) -> int:
+    src_dir.mkdir(parents=True, exist_ok=True)
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    chunks = sorted(src_dir.glob("*.csv.gz"))
+    if not chunks:
+        return 0
+
+    # archive all but the newest
+    newest = chunks[-1]
+    moved = 0
+    for p in chunks[:-1]:
+        dst = archive_dir / p.name
+        if not dst.exists():
+            shutil.move(str(p), str(dst))
+            moved += 1
+
+    # update latest pointer to newest (copy or symlink)
+    if keep_latest_link is not None:
+        keep_latest_link.parent.mkdir(parents=True, exist_ok=True)
+        tmp = keep_latest_link.with_suffix(f".tmp.{utc_stamp()}")
+        shutil.copyfile(newest, tmp)
+        tmp.replace(keep_latest_link)
+
+    return moved
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--src", default="logs/binance_stream", help="Directory where gz chunks are written")
+    ap.add_argument("--archive", default="logs/binance_stream/archive", help="Directory to move old chunks into")
+    ap.add_argument("--latest", default="logs/binance_stream/latest.csv.gz", help="Write latest closed chunk here")
+    args = ap.parse_args()
+
+    moved = rotate_dir(Path(args.src), Path(args.archive), Path(args.latest) if args.latest else None)
+    print(f"rotated={moved}")
+
+if __name__ == "__main__":
+    main()
+```
+
+This is intentionally boring: it’s **log hygiene**, not inference.
+
+## 2.2 DuckDB ingestion helper
+
+Goal: load archived chunks into DuckDB for *research* queries without ever touching live gating.
+
+DuckDB schema suggestion (raw table, no semantics):
+
+* timestamp (UTC)
+* symbol
+* o, h, l, c
+* v (volume)
+* trades (count if you have it)
+* source_file (lineage)
+
+```python
+# tools/ingest_archives_to_duckdb.py
+from __future__ import annotations
+import argparse
+from pathlib import Path
+import duckdb
+
+DDL = """
+CREATE TABLE IF NOT EXISTS ohlc_1s (
+  timestamp TIMESTAMP,
+  symbol VARCHAR,
+  open DOUBLE,
+  high DOUBLE,
+  low DOUBLE,
+  close DOUBLE,
+  volume DOUBLE,
+  trades BIGINT,
+  source_file VARCHAR
+);
+"""
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--archive-dir", default="logs/binance_stream/archive", help="Where closed .csv.gz chunks live")
+    ap.add_argument("--db", default="logs/research/market.duckdb", help="DuckDB file path")
+    ap.add_argument("--symbol", default="BTCUSDT", help="Symbol for these chunks if not present in CSV")
+    ap.add_argument("--glob", default="*.csv.gz", help="Which files to ingest")
+    ap.add_argument("--parquet-out", default="logs/research/ohlc_1s.parquet", help="Optional parquet mirror")
+    args = ap.parse_args()
+
+    archive_dir = Path(args.archive_dir)
+    db_path = Path(args.db)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    con = duckdb.connect(str(db_path))
+    con.execute(DDL)
+
+    files = sorted(archive_dir.glob(args.glob))
+    if not files:
+        print("no files matched")
+        return
+
+    # idempotence: track ingested files
+    con.execute("CREATE TABLE IF NOT EXISTS ingest_log (source_file VARCHAR PRIMARY KEY);")
+    ingested = set(r[0] for r in con.execute("SELECT source_file FROM ingest_log").fetchall())
+
+    loaded = 0
+    for f in files:
+        if str(f) in ingested:
+            continue
+
+        # Expect CSV columns like: timestamp,open,high,low,close,volume,trades
+        # If symbol column exists, keep it. Else add constant.
+        con.execute("""
+            INSERT INTO ohlc_1s
+            SELECT
+              CAST(timestamp AS TIMESTAMP) AS timestamp,
+              COALESCE(symbol, ?) AS symbol,
+              CAST(open AS DOUBLE),
+              CAST(high AS DOUBLE),
+              CAST(low AS DOUBLE),
+              CAST(close AS DOUBLE),
+              CAST(volume AS DOUBLE),
+              CAST(COALESCE(trades, 0) AS BIGINT),
+              ? AS source_file
+            FROM read_csv_auto(?, compression='gzip')
+        """, [args.symbol, str(f), str(f)])
+
+        con.execute("INSERT INTO ingest_log VALUES (?)", [str(f)])
+        loaded += 1
+
+    if args.parquet_out:
+        pq = Path(args.parquet_out)
+        pq.parent.mkdir(parents=True, exist_ok=True)
+        con.execute(f"COPY ohlc_1s TO '{pq}' (FORMAT PARQUET);")
+
+    print(f"loaded_files={loaded} db={db_path}")
+
+if __name__ == "__main__":
+    main()
+```
+
+**Key boundary rule:** DuckDB ingestion is for research/summarisation/influence **only**. Live gates read the *latest chunk* directly.
+
+---
+
+# 3) Design a non-destructive summariser next
+
+“Summarise to minutely then hourly” is correct **only if the summary is not information-destroying for the invariants we care about.**
+
+So we define summarisation as a **homomorphism on quotient reps**, not on prices.
+
+## 3.1 Two-plane model
+
+### Plane A: Raw field (what you store)
+
+* 1s OHLCV (and optionally trade microfields)
+* immutable gz chunks
+* join across instruments happens here only as an **alignment operation**
+
+### Plane B: Quotient & sufficient statistics (what you learn on)
+
+Instead of storing “minute OHLC” and hoping:
+
+* compute (q_t) at 1s (or on a sliding window)
+* summarise **the quotient stream** into stable statistics
+
+## 3.2 What “non-destructive” means (operationally)
+
+A summary operator (S) is admissible if it preserves the ability to compute (within tolerance):
+
+* the quotient features (q) at the coarser scale
+* the legitimacy (\ell) distributional tests (density gates)
+* persistence/monotonicity signals used in Phase-4 strict profile
+* and the audit layer residuals you care about (PnL / surprise / MDL surrogates)
+
+So we build:
+
+* ( q_t = Q(x_{\le t}) )
+* ( s_{k} = S({q_t}_{t \in \text{window } k}) )
+
+Where (s_k) contains **sufficient statistics**, e.g.
+
+* robust location/scale (median/MAD)
+* tail mass estimates (quantiles)
+* run-length / persistence counts (how long in a regime)
+* curvature / burstiness aggregates (not just mean)
+
+This makes “minute” and “hourly” summaries **meaning-preserving** because they’re about the quotient representatives, not raw candles.
+
+## 3.3 Minimal summariser spec (v1)
+
+Per (instrument, window):
+
+* count
+* median of each qfeat dimension
+* MAD or IQR of each qfeat dimension
+* tail quantiles (p01/p05/p95/p99)
+* persistence: longest run above/below threshold for key dims
+* “event markers”: extreme curvature, extreme drawdown, extreme burstiness indices
+
+That is enough to:
+
+* reproduce density gates
+* build influence tensors on stable objects
+* do “could we have seen this coming?” analysis via markers + persistence
+
+---
+
+# 4) Define the influence tensor formally
+
+Now the fun bit: influence is **not** “join prices and correlate.”
+Influence is an operator on **quotient representatives** (and optionally legitimacy).
+
+## 4.1 Definition
+
+Let (q_t^{(i)} \in \mathbb{R}^d) be the quotient rep for instrument (i).
+
+Define an influence tensor:
+
+[
+\mathcal{I}_{i\to j}(\tau) \in \mathbb{R}^{d \times d}
+]
+
+interpreted as:
+
+> how changes in quotient dimension(s) of (i) at lag (\tau) predict/explain changes in quotient dimensions of (j).
+
+You can also define scalar projections:
+
+* (I^{\ell}_{i\to j}(\tau)): influence of (q^{(i)}) on legitimacy (\ell^{(j)})
+* (I^{\Delta}_{i\to j}(\tau)): influence on state transitions (ACT/HOLD/BAN frequency)
+
+## 4.2 Computation (practical, incremental, free-data-friendly)
+
+Start with a *regularised lagged linear map* on quotient deltas:
+
+* (\Delta q_t^{(i)} = q_t^{(i)} - q_{t-1}^{(i)})
+
+Estimate for each lag (\tau):
+
+[
+\Delta q_t^{(j)} \approx W_{i\to j}(\tau),\Delta q_{t-\tau}^{(i)}
+]
+
+Where (W) is learned via ridge regression (online or batched). Then define:
+
+[
+\mathcal{I}*{i\to j}(\tau) = W*{i\to j}(\tau)
+]
+
+And add **legitimacy gating**:
+
+* only include samples when both streams are “valid” (not UNKNOWN)
+* optionally weight samples by (\ell_t^{(i)}\ell_t^{(j)}) so “meaningful regimes” dominate
+
+## 4.3 Multi-instrument joining (your “wtf??” point)
+
+Yes: **raw 1s chunks must be joinable across instruments** for live decisioning *but only as alignment*, not as meaning.
+
+So define a canonical aligned frame:
+
+* bar-time 1s grid (UTC seconds)
+* for each instrument:
+
+  * last observation carried forward
+  * plus a **staleness** field (seconds since last update)
+* any downstream operator can downweight stale contributions
+
+This lets you do:
+
+* influence tensor updates
+* “market X influences Y” lag/lead
+* “sensitivity of ETH to BTC” *on quotients* not raw prices
+
+---
+
+# Concrete next actions (what I’d do first)
+
+If you want the **fastest correct path**:
+
+1. Add the quotient map interface (`trading/summarisation/quotient_map.py`) + doc section stating invariances & fixed feature order.
+2. Add the two helpers under `tools/`:
+
+   * `rotate_chunks.py`
+   * `ingest_archives_to_duckdb.py`
+3. Add `docs/influence_tensor.md` with the formal definition above + the join/staleness rule.
+4. Add `docs/non_destructive_summariser.md` describing “summaries on quotients” and the minimal stats.
+
+If you want, paste your expected CSV columns for the 1s trade-resample output (timestamp/open/high/low/close/volume/trades/symbol?) and I’ll adapt the ingestion script to exactly match your on-disk format without assumptions.

@@ -78,20 +78,25 @@ def _pairwise_rank_step(weights: np.ndarray, pos: int, neg: int, lr: float) -> n
 def _prepare_training_rows(
     df: pd.DataFrame, forward: np.ndarray, horizon: int
 ) -> pd.DataFrame:
-    would_act = df["would_act"] if "would_act" in df else pd.Series(False, index=df.index)
-    act_mask = (
-        (df["action"] == "ACT")
-        | would_act.fillna(False).astype(bool)
-        | (df.get("state", 0) == 1)
-    )
+    # 1. Actionability Filtering: Only ingest rows where we actually ACTED or intended to ACT.
+    # Exclude 'HOLD' and 'UNKNOWN_ABSTAIN' (⊥) to ensure we don't bootstrap from non-trade states.
+    if "would_act" in df.columns:
+        # would_act is logged as string: "ACT_LONG", "ACT_SHORT", "HOLD", "UNKNOWN_ABSTAIN"
+        act_mask = df["would_act"].astype(str).str.startswith("ACT")
+    else:
+        # Fallback for old logs
+        act_mask = (df.get("action", 0) != 0) | (df.get("state", 0).isin([1, -1]))
+
     rows = df[act_mask].copy()
     if rows.empty:
         return rows
+        
     rows["i"] = rows["i"].astype(int)
     valid = (rows["i"] >= 0) & (rows["i"] + horizon < len(forward))
     rows = rows[valid].copy()
     idx = rows["i"].to_numpy()
     rows["proxy"] = forward[idx]
+    
     return rows
 
 

@@ -22,8 +22,19 @@ Legend: (EXEC) implementation, (DECISION) policy decision, (ANALYSIS) analysis/v
 - [ ] (EXEC) Ingest the ES/NQ intraday tape (proposals + prices) so the gate has something real to evaluate and the verifier sees the rows in `configs/phase4_monitor_targets.json`.
 - [x] (EXEC) Author the ES/NQ intraday tape plan (data contract + loader notes) so the Phase-4 gate has a higher-density regime to monitor.
 - [x] (DOC) Clarify in Phase-4 strategy notes that synthetic/amplitude-injected runs prove the monitor mechanically but do not count as legitimate OPENs, and note how to flag those runs in the gate log.
+- [x] (DOC) Align M9/all-red spine write-up with PDFs (gate-first hazard, non-extractive M9, special-code severity ordering).
+- [x] (DOC) Lock M5/UNKNOWN control-law and eigen-event clarifications in TRADER_CONTEXT.
 - [x] (ANALYSIS) Add a lightweight guard that marks amplitude-injected Phase-4 monitor executions so they can never be confused with data-driven readiness (`--test-vector` now tags monitor logs).
 - [x] (EXEC) Create the Phase-5 execution simulator (deterministic + size-dependent friction, logging realized cost) that consumes proposal logs.
+- [x] (EXEC) Add decision consumers/sinks for `stream_actions` (NDJSON file, TCP fan-out, latest-action view) with at-least-once semantics.
+- [x] (EXEC) Add a read-only decision probe option for the stream daemon test harness (avoid DuckDB write locks).
+- [x] (EXEC) Add a combined live daemon + Binance feed runner (`scripts/stream_daemon_live.py`) for one-command testing.
+- [x] (EXEC) Extend `stream_daemon_live.py` to support symbol lists or streaming all symbols with caps.
+- [x] (EXEC) Add an NDJSON decision plotter (signed exposure + optional state/urgency overlays).
+- [x] (EXEC) Support live-follow plotting and WebM output in `plot_stream_decisions.py`.
+- [x] (EXEC) Add a budgeted decision cost gate to `stream_daemon.py` (notional fee + slippage).
+- [x] (DASHBOARD) Render decision targets as step plots, add delta exposure panel, and use notional fees in the live dashboard.
+- [ ] (EXEC) Build Phase-7 live density feeder (rolling windows into memmap or DuckDB) so Phase-4 gates can open on live data.
 - [x] (DECISION) Lock quotient feature set + window (log-returns, MAD norm, W1=64/W2=256, E/C/S + deltas).
 - [x] (EXEC) Implement quotient extractor in `features/quotient.py` and log `q_*` fields.
 - [ ] (EXEC) Add quotient-gated ACCEPT/HOLD/BAN path to `strategy/triadic_strategy.py` (no direction control).

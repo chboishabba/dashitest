@@ -40,12 +40,12 @@ from utils.weights_config import (
 
 try:
     from trading.regime import RegimeSpec, check_regime
-    from trading.signals.triadic import compute_triadic_state
+    from trading.signals.triadic import compute_triadic_state, UNKNOWN, PARADOX
     from trading.trading_io.prices import load_prices
     from trading.vk_qfeat import QFeatTape
 except ModuleNotFoundError:
     from regime import RegimeSpec, check_regime
-    from signals.triadic import compute_triadic_state
+    from signals.triadic import compute_triadic_state, UNKNOWN, PARADOX
     from trading_io.prices import load_prices
     from vk_qfeat import QFeatTape
 
@@ -1140,7 +1140,25 @@ def main() -> None:
         bucket_q = float("nan")
         bucket_cvar = float("nan")
 
-        if dir_pred == 0:
+        # Ternary Sovereignty: Determine Scaffolding Variable (A)
+        # A = -1 (Rotten Market) if hazard is extreme or liquidity is missing
+        scaffolding_a = 0
+        if hazard > args.hazard_threshold * 2.0: # Extreme hazard
+             scaffolding_a = -1
+        
+        # 1. Hard Closure (Pre-failure Detection)
+        if scaffolding_a == -1:
+            veto = 1
+            veto_reason = "rotten_market (A=-1)"
+        elif state[t] == PARADOX:
+            # 2. Paradox (Systemic Collapse Risk)
+            veto = 1
+            veto_reason = "paradox (⚡)"
+        elif state[t] == UNKNOWN:
+            # 3. Epistemic Uncertainty (Abstain/Hold)
+            veto = 1
+            veto_reason = "unknown_state (⊥)"
+        elif dir_pred == 0:
             veto_reason = "flat"
         elif args.hazard_veto and hazard > args.hazard_threshold:
             veto = 1
@@ -1170,11 +1188,19 @@ def main() -> None:
             veto = 1
             veto_reason = "low_margin"
 
-        if dir_pred == 0 or veto == 1:
+        if state[t] == PARADOX:
+            would_act = "PARADOX_EXIT"
+            action = 0
+            is_holding = False # Force exit
+        elif state[t] == UNKNOWN and is_holding:
+            would_act = "UNKNOWN_ABSTAIN"
+            action = 0
+            is_holding = True
+        elif dir_pred == 0 or veto == 1:
             would_act = "HOLD"
             action = 0
             is_holding = True
-            if veto == 1 and veto_reason not in {"insufficient_samples", "flat"}:
+            if veto == 1 and veto_reason not in {"insufficient_samples", "flat", "unknown_state (⊥)", "paradox (⚡)"}:
                 cooldown = max(cooldown, int(args.veto_cooldown))
         else:
             would_act = "ACT_LONG" if dir_pred > 0 else "ACT_SHORT"

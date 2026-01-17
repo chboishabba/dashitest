@@ -13,6 +13,10 @@ import pandas as pd
 import numpy as np
 import urllib.parse
 import urllib.request
+import gzip
+
+from tools.rotate_chunks import rotate_dir
+from tools.ingest_archives_to_duckdb import ingest_archives, ingest_dataframe
 
 # Force yfinance to use a writable cache under our data tree (or disable it)
 # before import to avoid readonly sqlite issues on some systems.
@@ -134,6 +138,310 @@ def _get_json(url, params=None):
                 raise
             time.sleep(min(base * (2 ** i) + random.uniform(0, 0.25), 10.0))
     return None
+
+
+def resample_csv(
+    source_path: str | pathlib.Path,
+    target_path: str | pathlib.Path,
+    freq: str = "1min",
+    method: str = "ffill",
+    start: str | None = None,
+    end: str | None = None,
+    overwrite: bool = False,
+):
+    source_path = pathlib.Path(source_path)
+    target_path = pathlib.Path(target_path)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if target_path.exists() and not overwrite:
+        print(f"[resample] cache hit: {target_path}")
+        return target_path
+
+    df = pd.read_csv(source_path)
+    if "timestamp" not in df.columns:
+        raise ValueError(f"{source_path} missing 'timestamp' column")
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    df = df.set_index("timestamp").sort_index()
+
+    if start:
+        df = df[df.index >= pd.to_datetime(start, utc=True)]
+    if end:
+        df = df[df.index <= pd.to_datetime(end, utc=True)]
+
+    if method not in {"ffill", "bfill"}:
+        raise ValueError("method must be 'ffill' or 'bfill'")
+
+    resampled = df.resample(freq).first()
+    if method == "ffill":
+        resampled = resampled.ffill()
+    else:
+        resampled = resampled.bfill()
+
+    resampled = resampled.dropna(subset=["close"])
+    resampled = resampled.reset_index()
+    resampled.to_csv(target_path, index=False)
+    print(f"[resample] wrote {len(resampled)} rows to {target_path}")
+    return target_path
+
+
+def _binance_klines(symbol, interval, limit=500, start_time=None):
+    params = {
+        "symbol": symbol.upper(),
+        "interval": interval,
+        "limit": min(limit, 1000),
+    }
+    if start_time is not None:
+        params["startTime"] = int(start_time)
+    return _binance_get(BINANCE_KLINES, params)
+
+
+def _klines_to_df(klines, include_close=True):
+    import pandas as pd
+
+    rows = []
+    for entry in klines:
+        ts = int(entry[0])
+        rows.append(
+            {
+                "timestamp": pd.to_datetime(ts, unit="ms", utc=True),
+                "open": float(entry[1]),
+                "high": float(entry[2]),
+                "low": float(entry[3]),
+                "close": float(entry[4]),
+                "volume": float(entry[5]),
+            }
+        )
+    df = pd.DataFrame(rows)
+    if not include_close:
+        df = df.drop(columns=["close"])
+    return df
+
+
+def stream_binance_klines(
+    symbol,
+    interval="1m",
+    out_path="data/raw/binance_stream.csv",
+    duration_minutes=60,
+    poll_interval=30,
+    limit=500,
+):
+    ensure_dir(pathlib.Path(out_path).parent)
+    target_dir = pathlib.Path(out_path).parent
+    metadata = pathlib.Path(out_path).with_suffix(".meta.json")
+    last_ts = None
+    if metadata.exists():
+        try:
+            payload = json.loads(metadata.read_text())
+            last_ts = int(payload.get("last_ts"))
+        except Exception:
+            last_ts = None
+    end_time = duration_minutes * 60
+    start_monotonic = time.monotonic()
+    while time.monotonic() - start_monotonic < end_time:
+        start = last_ts + 1 if last_ts is not None else None
+        klines = _binance_klines(symbol, interval, limit, start)
+        if not klines:
+            time.sleep(poll_interval)
+            continue
+        df = _klines_to_df(klines)
+        if df.empty:
+            time.sleep(poll_interval)
+            continue
+        if last_ts is not None:
+            df = df[df["timestamp"] > pd.to_datetime(last_ts, unit="ms", utc=True)]
+        if df.empty:
+            time.sleep(poll_interval)
+            continue
+        chunk_stamp = df["timestamp"].min().strftime("%Y%m%dT%H%M%SZ")
+        chunk_path = target_dir / f"binance_klines_{chunk_stamp}.csv"
+        df.to_csv(chunk_path, index=False)
+        last_ts = int(df["timestamp"].max().value // 10**6)
+        metadata.write_text(json.dumps({"last_ts": last_ts}))
+        time.sleep(poll_interval)
+    return pathlib.Path(out_path)
+
+
+def stream_binance_trades(
+    symbol="BTCUSDT",
+    out_dir="logs/binance_stream",
+    duration_minutes=60,
+    duration_seconds: float | None = None,
+    poll_interval=5,
+    compress=True,
+    chunk_size_minutes=5,
+    chunk_size_seconds: float | None = None,
+    live_ingest: bool = True,
+):
+    ensure_dir(out_dir)
+    target_dir = pathlib.Path(out_dir)
+    raw_dir = target_dir / "raw"
+    archive_dir = target_dir / "archive"
+    latest_link = target_dir / "latest.csv.gz"
+    ensure_dir(raw_dir)
+    ensure_dir(archive_dir)
+    start_monotonic = time.monotonic()
+    chunk_buffer = []
+    chunk_start = time.monotonic()
+    duration_target = duration_seconds if duration_seconds is not None else duration_minutes * 60
+    chunk_span = chunk_size_seconds if chunk_size_seconds is not None else chunk_size_minutes * 60
+
+    def _flush_buffer() -> None:
+        nonlocal chunk_start
+        if not chunk_buffer:
+            return
+        chunk_df = pd.concat(chunk_buffer)
+        chunk_stamp = pd.Timestamp.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        chunk_base = raw_dir / f"binance_trades_{symbol}_{chunk_stamp}.csv"
+        if compress:
+            chunk_path = chunk_base.with_suffix(".csv.gz")
+            with gzip.open(str(chunk_path), "wt", encoding="utf-8") as fh:
+                chunk_df.to_csv(fh, index=True)
+        else:
+            chunk_path = chunk_base
+            chunk_df.to_csv(chunk_path, index=True)
+        chunk_buffer.clear()
+        chunk_start = time.monotonic()
+        rotate_dir(raw_dir, archive_dir, latest_link)
+        if live_ingest:
+            archive_hint = archive_dir / chunk_path.name
+            ingest_dataframe(
+                frame=chunk_df.reset_index(),
+                symbol=symbol,
+                source_file=archive_hint,
+            )
+        else:
+            ingest_archives(archive_dir=archive_dir, symbol=symbol, parquet_out=None)
+
+    while time.monotonic() - start_monotonic < duration_target:
+        trades = _binance_get(BINANCE_AGG_TRADES, {"symbol": symbol, "limit": 1000})
+        if not trades:
+            time.sleep(poll_interval)
+            continue
+        rows = []
+        for trade in trades:
+            if isinstance(trade, dict):
+                ts = trade.get("T") or trade.get("t")
+                price = trade.get("p") or trade.get("price")
+                qty = trade.get("q") or trade.get("qty")
+            else:
+                ts = trade[0]
+                price = trade[1]
+                qty = trade[2]
+            if ts is None or price is None or qty is None:
+                continue
+            rows.append(
+                {
+                    "timestamp": int(ts),
+                    "price": float(price),
+                    "qty": float(qty),
+                }
+            )
+        if not rows:
+            time.sleep(poll_interval)
+            continue
+        df = pd.DataFrame(rows)
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+        df = df.set_index("timestamp").resample("1s").agg(
+            {"price": ["first", "max", "min", "last"], "qty": "sum"}
+        )
+        df.columns = ["open", "high", "low", "close", "volume"]
+        df = df.dropna(subset=["open"])
+        chunk_buffer.append(df)
+        if time.monotonic() - chunk_start >= chunk_span:
+            _flush_buffer()
+        time.sleep(poll_interval)
+    _flush_buffer()
+
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Data downloader helpers.")
+    subparsers = parser.add_subparsers(dest="command", required=False)
+
+    resample_parser = subparsers.add_parser(
+        "resample", help="Resample existing CSV to denser frequency"
+    )
+    resample_parser.add_argument("--source", required=True, help="Source CSV with columns timestamp & close.")
+    resample_parser.add_argument("--target", required=True, help="Output CSV path.")
+    resample_parser.add_argument("--freq", default="1min", help="Target pandas frequency string.")
+    resample_parser.add_argument(
+        "--method",
+        choices=["ffill", "bfill"],
+        default="ffill",
+        help="Fill method after resampling.",
+    )
+    resample_parser.add_argument("--start", help="Optional ISO timestamp to cut the start.")
+    resample_parser.add_argument("--end", help="Optional ISO timestamp to cut the end.")
+    resample_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite target even if it exists.",
+    )
+
+    bootstrap_parser = subparsers.add_parser(
+        "bootstrap", help="Run the default sample downloads (Stooq/CoinGecko/Binance/YOuhoo)."
+    )
+    stream_parser = subparsers.add_parser(
+        "stream-binance", help="Stream Binance klines into a CSV for density tuning."
+    )
+    stream_parser.add_argument("--symbol", default="BTCUSDT", help="Binance symbol to stream.")
+    stream_parser.add_argument("--interval", default="1m", help="Kline interval.")
+    stream_parser.add_argument("--out", default="data/raw/binance_stream.csv", help="Target CSV path.")
+    stream_parser.add_argument("--duration-minutes", type=int, default=120, help="Target collection minutes.")
+    stream_parser.add_argument("--poll-interval", type=int, default=30, help="Seconds between polls.")
+    stream_parser.add_argument("--limit", type=int, default=500, help="Klines per request.")
+    stream_trades_parser = subparsers.add_parser(
+        "stream-binance-trades", help="Stream Binance aggTrades + resample to 1s OHLC."
+    )
+    stream_trades_parser.add_argument("--symbol", default="BTCUSDT", help="Binance symbol.")
+    stream_trades_parser.add_argument("--out-dir", default="logs/binance_stream", help="Target directory.")
+    stream_trades_parser.add_argument("--duration-minutes", type=float, default=60, help="Run time in minutes.")
+    stream_trades_parser.add_argument("--duration-seconds", type=float, default=None, help="Override duration in seconds.")
+    stream_trades_parser.add_argument("--poll-interval", type=int, default=5, help="Seconds between polls.")
+    stream_trades_parser.add_argument("--chunk-size-minutes", type=float, default=5, help="Chunk duration before compression.")
+    stream_trades_parser.add_argument("--chunk-size-seconds", type=float, default=None, help="Override chunk size in seconds.")
+    stream_trades_parser.add_argument("--no-live-ingest", action="store_true", help="Disable live DuckDB ingest.")
+
+    args = parser.parse_args()
+    if args.command == "resample":
+        resample_csv(
+            source_path=args.source,
+            target_path=args.target,
+            freq=args.freq,
+            method=args.method,
+            start=args.start,
+            end=args.end,
+            overwrite=args.overwrite,
+        )
+    elif args.command == "bootstrap":
+        run_bootstrap()
+    elif args.command == "stream-binance":
+        stream_binance_klines(
+            symbol=args.symbol,
+            interval=args.interval,
+            out_path=args.out,
+            duration_minutes=args.duration_minutes,
+            poll_interval=args.poll_interval,
+            limit=args.limit,
+        )
+    elif args.command == "stream-binance-trades":
+        stream_binance_trades(
+            symbol=args.symbol,
+            out_dir=args.out_dir,
+            duration_minutes=args.duration_minutes,
+            duration_seconds=args.duration_seconds,
+            poll_interval=args.poll_interval,
+            chunk_size_minutes=args.chunk_size_minutes,
+            chunk_size_seconds=args.chunk_size_seconds,
+            live_ingest=not args.no_live_ingest,
+        )
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()
 
 
 def download_stooq(symbol: str, out_dir="data/raw/stooq", overwrite=False):
@@ -666,37 +974,3 @@ def bulk_yahoo(symbols, **kwargs):
         except Exception as e:
             print(f"[yahoo] failed {s}: {e}")
     return paths
-
-
-if __name__ == "__main__":
-    # Simple CLI demo: download a few symbols from Stooq (including btc) and Yahoo
-    symbols = ["spy.us", "msft.us", "aapl.us", "btc.us"]
-    print("Downloading sample symbols from Stooq...")
-    try:
-        bulk_stooq(symbols)
-    except Exception as e:
-        print(f"Stooq download failed (possibly offline): {e}")
-    print("Downloading BTC from CoinGecko...")
-    try:
-        download_btc_coingecko()
-    except Exception as e:
-        print(f"CoinGecko BTC download failed: {e}")
-    print("Downloading BTC-USD intraday (1m, ~70d) via Binance...")
-    try:
-        download_btc_binance_intraday()
-    except Exception as e:
-        print(f"Binance intraday download failed: {e}")
-    print("Downloading BTC-USD per-second (~10h) via Binance aggregated trades...")
-    try:
-        download_btc_binance_seconds()
-    except Exception as e:
-        print(f"Binance per-second download failed: {e}")
-    if yf is not None:
-        print("Downloading sample symbols from Yahoo (1d, 1y)...")
-        bulk_yahoo(["SPY", "MSFT", "AAPL", "BTC-USD"], interval="1d", period="1y")
-        print("Downloading BTC-USD daily (full history) via yfinance...")
-        download_btc_yahoo()
-        print("Downloading BTC-USD intraday (1m, ~7d) via yfinance with size cap...")
-        download_btc_yahoo_intraday()
-    else:
-        print("yfinance not installed; skipping Yahoo download.")
