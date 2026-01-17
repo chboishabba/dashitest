@@ -82,13 +82,20 @@ When `--emit-decisions` is enabled, the daemon derives a triadic state per symbo
 Tables:
 
 - `stream_state(timestamp, symbol, close, state, gate_open, posture, source_file)`
-- `stream_actions(timestamp, symbol, state, direction, target_exposure, urgency, hold, actionability, reason, gate_open, posture, source_file)`
+- `stream_actions(timestamp, symbol, state, direction, target_exposure, urgency, hold, actionability, reason, gate_open, posture, phase6_gate, source_file)`
 
 Gate behavior:
 
 - Gate uses `logs/phase6` by default and sets posture to `OBSERVE` when closed.
 - Influence sensor inputs are read from `logs/asymmetry` if enabled.
 - Decisions are derived per completed 1s bar (no intrabar emission).
+
+Interpretation notes:
+
+- If `gate_open=false`, posture is forced to `OBSERVE`, and the triadic strategy emits `direction=0`, `target_exposure=0`, `hold=true`, and `reason="posture_observe (M4/M6)"`.
+- When the Phase-6 log is missing or contains no `allowed=true` entries, the gate stays closed. The daemon still emits decisions, but they remain observational.
+- Phase-07 asymmetry is computed from execution logs, not `stream_actions`. If posture is pinned to observe, the supported event set is empty and Phase-07 will report no density.
+- Decision payloads now include a `phase6_gate` snapshot: `{"open": bool, "source": "capital_controls_<stamp>.jsonl", "allowed_slip_bps": float | null, "reason": str | null}` for faster refusal diagnostics.
 
 ### Decision cost gate (optional)
 
@@ -141,6 +148,36 @@ Use `--tail` to replay existing NDJSON files through the same handler loop. `--t
 ## Metrics endpoint
 
 Provide `--metrics-host` and `--metrics-port` to expose a lightweight HTTP endpoint that returns ingest counters, queue depth, and last-write timestamps.
+
+## Live Binance runner: data sources + storage
+
+`scripts/stream_daemon_live.py` runs the TCP daemon plus a Binance poller that fetches market data directly from the Binance REST API and forwards it into the daemon.
+
+Data sources (network):
+
+- `https://api.binance.com/api/v3/exchangeInfo` for the symbol list when using `--all-symbols` or when validating `--symbols`.
+- `https://api.binance.com/api/v3/aggTrades` for per-symbol trade ticks (polling with `--poll-interval`).
+
+Local storage / outputs (filesystem):
+
+- DuckDB: `--db` (default `logs/research/market_live_binance.duckdb`) for `ohlc_1s`, decision tables, and summariser outputs.
+- Decision NDJSON: `logs/decisions.ndjson` when `--plot-follow`/`--plot-*` is enabled and no `--decision-sink file:...` is provided.
+- OHLC NDJSON: `logs/ohlc_1s.ndjson` when `--plot-follow` is enabled in `ohlcv` or `dashboard` mode and no `--ohlc-sink file:...` is provided.
+- Phase 6 gate logs: `logs/phase6` when `--emit-decisions` is enabled.
+- Influence sensor logs: `logs/asymmetry` when `--emit-decisions` is enabled.
+
+Resetting live runner data:
+
+- Stop the daemon/runner.
+- Delete the DuckDB file and any NDJSON sinks you used.
+- Optionally clear `logs/phase6` and `logs/asymmetry` if you want to reset decision gate history.
+
+Example reset (adjust paths if you changed flags):
+
+```
+rm -f logs/research/market_live_binance.duckdb logs/decisions.ndjson logs/ohlc_1s.ndjson
+rm -rf logs/phase6 logs/asymmetry
+```
 
 ## Example usage
 

@@ -46,6 +46,13 @@ Phase-6 does not relearn direction or size. It enforces **capital discipline** o
 
 * `logs/phase6/capital_controls_<stamp>.jsonl`: each entry records the incoming proposal, the capital condition triggered, and the final acceptance/size modification (if any).
 * Summary table: exposures, drawdown, hazard ratio, gating status per tape.
+* Live gate wiring: `phase6/Phase6ExposureGate` scans the latest `capital_controls_*.jsonl` and reports `gate_open` only when an `allowed=true` slip entry exists. If the log is missing or no slip is approved, live posture defaults to `OBSERVE`.
+
+## Live gate invariants (current state)
+
+- A closed gate forces `posture_observe`, which pins `direction=0`, `target_exposure=0`, `hold=true`, and `actionability=0`; Phase-07 is empty because it is conditional on actions, not on market movement alone.
+- The only wake-up condition is a Phase-6 capital-control log with at least one `allowed=true` entry. Missing logs or logs without `allowed=true` keep the system frozen by design.
+- Recommended wake-up proof: write a small slip approval (e.g., `{"timestamp": "<iso>", "allowed": true, "reason": "manual_test"}`) into `logs/phase6/capital_controls_<stamp>.jsonl`, restart `scripts/stream_daemon_live.py`, and verify `gate_open=true`, posture leaves OBSERVE, and Phase-07 starts accumulating actions. If the gate stays closed, investigate wiring before touching asymmetry logic.
 
 ## Next steps
 

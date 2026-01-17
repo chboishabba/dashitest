@@ -84,3 +84,74 @@ Phase-5 execution logs now emit `pred_edge` (score-margin × direction when avai
 When the log is missing or contains no eligible rows, `phase7_ready` stays `false`; Phase-04 reports `phase7_status_missing` or `net_asymmetry_nonpositive` accordingly.
 
 Phase-04 stays closed until enough `phase7_ready=true` lines accumulate (see `scripts/phase4_density_monitor.py`), keeping the entire stack grounded on boundary-stable eigen-events.
+
+## Diagnostics: why net asymmetry is missing
+
+Use `scripts/phase7_asymmetry_diagnostics.py report` to separate “no edge here” from “measurement/gating is miswired.” The report mirrors Phase-07’s median logic and adds scale checks.
+
+```bash
+python scripts/phase7_asymmetry_diagnostics.py report \
+  --execution-log logs/phase5/phase5_execution_20260114T122144Z.jsonl \
+  --window 256 \
+  --group-by-horizon
+```
+
+The report highlights:
+
+- Horizon mismatch: if horizons differ inside the log, the per-horizon medians show whether net asymmetry only appears at longer holds.
+- Cost dominance: compare `median_abs_move` vs `cost_est`. If `median_abs_move < cost_est`, net asymmetry is structurally negative at that horizon.
+- Pred-edge scale checks: if `pred_edge` exists, the report prints its scale relative to realized moves and cost.
+
+If the report is negative even after removing costs (see below), you likely have a direction/horizon mismatch rather than a fee issue.
+
+## Controlled wake-up tests (known asymmetry)
+
+Use the same diagnostics tool to generate “known asymmetry” logs for sanity tests. These do **not** change trading behavior; they only validate the Phase-07 → Phase-04 wiring.
+
+### Test 1: zero-cost sanity
+
+```bash
+python scripts/phase7_asymmetry_diagnostics.py zero-cost \
+  --execution-log logs/phase5/phase5_execution_20260114T122144Z.jsonl \
+  --output logs/phase7/phase5_zero_cost.jsonl
+```
+
+Run the emitter on the zero-cost copy. If `rho_A_net` still stays ≤ 0, the issue is not fees but direction/horizon.
+
+### Test 2: injected drift
+
+```bash
+python scripts/phase7_asymmetry_diagnostics.py inject-drift \
+  --execution-log logs/phase5/phase5_execution_20260114T122144Z.jsonl \
+  --output logs/phase7/phase5_injected_drift.jsonl \
+  --drift-margin 5.0
+```
+
+This rewrites `price_t_h` so every active row is profitable by `cost_per_unit + drift_margin`. Running the emitter against this log should flip `rho_A_net` positive and unblock Phase-04 after persistence. If it does not, the wiring (parsing, sign conventions, support definition) is wrong.
+
+## Live finding: boundary-dominated orbit at 1–3s cadence
+
+The first live run with `phase6_gate.open=true` and coherent posture (+1) showed monotone long ramps (e.g., NEOUSDT) with non-empty support \(m_t=1\). Phase-07 still reports net asymmetry ≤ 0 because boundary costs dominate: exposure changes arrive every 1–3 seconds, price moves at that horizon are spread/noise-sized, and cost is paid on each \(\Delta x_t\). This is a valid eigen-orbit that collapses inside the friction boundary, not a wiring bug.
+
+Experiments to confirm and resolve:
+
+- **Horizon lift**: hold exposure for 30–120s, charge cost only on entry/exit, and recompute medians. Expect net to flip if a slow trend exists.
+- **Zero-cost sanity**: set boundary cost to 0 with all else identical; net should turn positive immediately, proving the measurement path.
+- **Actuation alignment**: choose one of (a) slower controller clock, (b) batched/impulse exposure changes, or (c) charge boundary cost only on sign flips/regime exits. This aligns continuous-time control with discrete-time surplus measurement and prevents cost-only decay.
+
+## Phase-8 intent: net-surplus gate on live
+
+Phase-8 = a live system that trades only when Phase-07 shows the action stream is net extractable (actuator + horizon + costs), and it proves that claim on real execution logs end-to-end.
+
+Prereqs (Phase-7.x hardening):
+
+- **Phase-7.1 (Actuator testability)**: add live decision decimation/impulse modes so supported events are sparse and boundary-aware. Examples: `--hold-seconds {30,60,120}` to freeze exposure between updates; `--impulse`/`--deadband` to jump once then hold until exit.
+- **Phase-7.2 (Live execution ledger)**: emit a live ledger (even paper) in the Phase-07 schema (`timestamp, symbol, x_prev, x, mid, delta_mid, cost_est, realized_pnl, pred_edge`) so `scripts/phase7_status_emitter.py` runs unmodified on live logs.
+- **Phase-7.3 (Horizon sweep)**: harness to run the same live log through Phase-07 at multiple horizons (e.g., 10s/30s/60s/120s/300s) to locate any horizon with positive net density or prove absence.
+
+Phase-8 entry gate (all must be true):
+
+- Actuator mode fixed and logged (decimation/impulse parameters).
+- Phase-07 ready persists on live logs (your persistence policy, e.g., N of last M windows).
+- Boundary gate enforced at runtime: if `phase7_ready=false`, trades clamp to HOLD/OBSERVE.
+- One-command audit emits session summary (net/gross density, activity rate, cost share vs move share, worst drawdown).

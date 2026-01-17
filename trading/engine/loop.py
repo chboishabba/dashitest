@@ -842,6 +842,7 @@ def run_trading_loop(
             "thesis_override": thesis_override,
             "state_age": state_age,
             "align_age": align_age,
+            "symbol": tape_id if tape_id else source,
         }
         rows.append(row)
         emit_step_row(row, log_path)

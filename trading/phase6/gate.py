@@ -20,7 +20,7 @@ class Phase6ExposureGate:
     def _entries(self) -> Iterator[dict]:
         latest = self._latest_file()
         if latest is None or not latest.exists():
-            return
+            return iter(())
         with latest.open("r", encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
@@ -33,15 +33,45 @@ class Phase6ExposureGate:
 
     def allowed_slip(self) -> float | None:
         """Return the slip threshold currently marked as allowed."""
-        for entry in self._entries():
-            if entry.get("allowed"):
-                slip = entry.get("slip_bps")
-                try:
-                    return float(slip)
-                except (TypeError, ValueError):
-                    continue
-        return None
+        allowed = self._latest_allowed()
+        if allowed is None:
+            return None
+        try:
+            return float(allowed.get("slip_bps"))
+        except (TypeError, ValueError):
+            return None
 
     def is_allowed(self) -> bool:
         """Returns True when a slip level is currently approved."""
         return self.allowed_slip() is not None
+
+    def snapshot(self) -> dict[str, object]:
+        """Return a diagnostic snapshot of the current gate verdict."""
+        latest = self._latest_file()
+        allowed = self._latest_allowed()
+        snapshot: dict[str, object] = {
+            "open": allowed is not None,
+            "source": latest.name if latest else None,
+            "allowed_slip_bps": None,
+            "reason": None,
+        }
+        if allowed is None:
+            return snapshot
+        slip = allowed.get("slip_bps")
+        try:
+            snapshot["allowed_slip_bps"] = float(slip) if slip is not None else None
+        except (TypeError, ValueError):
+            snapshot["allowed_slip_bps"] = None
+        if "reason" in allowed:
+            snapshot["reason"] = allowed.get("reason")
+        if "timestamp" in allowed:
+            snapshot["timestamp"] = allowed.get("timestamp")
+        return snapshot
+
+    def _latest_allowed(self) -> dict | None:
+        """Return the latest allowed entry from the current log."""
+        allowed_entry = None
+        for entry in self._entries():
+            if entry.get("allowed"):
+                allowed_entry = entry
+        return allowed_entry

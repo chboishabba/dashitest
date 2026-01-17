@@ -131,7 +131,7 @@ class DecisionEngine:
             self.strategies[symbol] = strategy
         return strategy
 
-    def update(self, row: dict[str, Any]) -> tuple[int, Any, bool, Posture] | None:
+    def update(self, row: dict[str, Any]) -> tuple[int, Any, bool, Posture, dict[str, Any] | None] | None:
         try:
             symbol = str(row["symbol"])
             ts_ms = int(row["timestamp"])
@@ -141,10 +141,14 @@ class DecisionEngine:
         closes = self.state_buffers.setdefault(symbol, deque(maxlen=self.state_window))
         closes.append(close)
         state = int(compute_triadic_state(list(closes), window=self.state_window)[-1])
-        gate_open = self.phase6_gate.is_allowed() if self.phase6_gate else True
+        gate_snapshot = None
+        gate_open = True
+        if self.phase6_gate:
+            gate_snapshot = self.phase6_gate.snapshot()
+            gate_open = bool(gate_snapshot.get("open")) if gate_snapshot else False
         posture = Posture.TRADE_NORMAL if gate_open else Posture.OBSERVE
         intent = self._strategy_for(symbol).step(ts=ts_ms, state=state, posture=posture)
-        return state, intent, gate_open, posture
+        return state, intent, gate_open, posture, gate_snapshot
 
 
 class DecisionStorage:
@@ -174,6 +178,7 @@ class DecisionStorage:
             "reason",
             "gate_open",
             "posture",
+            "phase6_gate",
             "source_file",
         ]
         self.pending_states: list[dict[str, Any]] = []
@@ -208,14 +213,18 @@ class DecisionStorage:
                 reason VARCHAR,
                 gate_open BOOLEAN,
                 posture INTEGER,
+                phase6_gate VARCHAR,
                 source_file VARCHAR
             );
             """
         )
+        self.con.execute(
+            "ALTER TABLE stream_actions ADD COLUMN IF NOT EXISTS phase6_gate VARCHAR"
+        )
         action_columns = ", ".join(self.action_columns)
         self.con.execute(
             f"""
-            CREATE VIEW IF NOT EXISTS stream_actions_latest AS
+            CREATE OR REPLACE VIEW stream_actions_latest AS
             SELECT {action_columns}
             FROM (
                 SELECT {action_columns},
@@ -700,7 +709,7 @@ class StreamDaemon:
         decision = self.decision_engine.update(row)
         if decision is None:
             return
-        state, intent, gate_open, posture = decision
+        state, intent, gate_open, posture, gate_snapshot = decision
         try:
             ts_ms = int(row["timestamp"])
             symbol = str(row["symbol"])
@@ -737,6 +746,7 @@ class StreamDaemon:
             "reason": str(gate_payload["reason"]) if gate_payload else str(intent.reason),
             "gate_open": gate_open,
             "posture": int(posture),
+            "phase6_gate": json.dumps(gate_snapshot) if gate_snapshot else None,
         }
         self.decision_storage.append_state(state_row)
         self.decision_storage.append_action(action_row)
@@ -745,6 +755,7 @@ class StreamDaemon:
         self.last_state_ts_ms = ts_ms
         payload = {
             **action_row,
+            "phase6_gate": gate_snapshot,
             "run_id": self.run_id,
             "source": "stream_daemon",
         }

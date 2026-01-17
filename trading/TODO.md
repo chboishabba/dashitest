@@ -34,8 +34,25 @@ Legend: (EXEC) implementation, (DECISION) policy decision, (ANALYSIS) analysis/v
 - [x] (EXEC) Support live-follow plotting and WebM output in `plot_stream_decisions.py`.
 - [x] (EXEC) Add a budgeted decision cost gate to `stream_daemon.py` (notional fee + slippage).
 - [x] (DASHBOARD) Render decision targets as step plots, add delta exposure panel, and use notional fees in the live dashboard.
+- [ ] (ANALYSIS) When `posture_observe` persists in live decisions, capture the Phase-6 gate status (latest `capital_controls_*.jsonl`, allowed slip) and note whether the log is missing or unapproved.
+- [ ] (ANALYSIS) Prove the live wake-up path by writing an `allowed=true` slip entry to `logs/phase6/capital_controls_*.jsonl`, restarting `scripts/stream_daemon_live.py`, and confirming `gate_open=true` plus nonzero exposure.
+- [x] (EXEC) Add a Phase-6 gate snapshot to decision payloads/sinks (open flag, source log, allowed slip, reason) to make refusal observable.
+- [ ] (ANALYSIS) Run the Phase-07 horizon-lift experiment: hold exposure changes for 30–120s, charge cost only on entry/exit, and recompute net/gross medians to test for slow-horizon edge.
+- [ ] (ANALYSIS) Run the zero-cost sanity for the live execution log (boundary_cost_rate=0) to confirm Phase-07 flips positive when costs are removed; if it does not, debug wiring.
+- [ ] (DECISION) Choose an actuation/measurement alignment: slower controller clock, batched/impulse exposure changes, or cost charged only on sign flips/regime exits (document the choice before implementing).
+- [ ] (EXEC) Phase-7.1: add live decision decimation/impulse modes (e.g., `--hold-seconds {30,60,120}` and `--impulse/--deadband`) so supported events are sparse and boundary-aware.
+- [ ] (EXEC) Phase-7.2: emit a live execution ledger (paper is fine) matching the Phase-07 schema (`timestamp, symbol, x_prev, x, mid, delta_mid, cost_est, realized_pnl, pred_edge`) so `phase7_status_emitter` runs unchanged.
+- [ ] (ANALYSIS) Phase-7.3: build a horizon sweep harness to run a live log through Phase-07 at multiple horizons (10s/30s/60s/120s/300s) and identify any positive net density or prove absence.
+- [ ] (DECISION) Phase-8 entry gate: document and enforce that Phase-07 readiness persists on live logs, actuator mode is fixed/logged, boundary gate clamps when ready=false, and one-command audit emits net/gross density, activity rate, cost vs move share, and worst drawdown per session.
+- [ ] (EXEC) Phase-9 capital ledger kernel: track capital \(C_t\) with legitimacy tax \(\Lambda_t\); enforce \(\Delta x_t \le f(C_t, \text{drawdown}, \text{Phase-07})\); log capital justification per action.
+- [ ] (ANALYSIS) Phase-9 eigen-regime census: certify profitability in ≥1 regime and preservation in all others; hostile regimes collapse exposure to convex-only or zero; Phase-07 negative edge must be obeyed.
+- [ ] (DECISION) Phase-9 learning budget: gate learning updates on capital/variance budget; halt learning when variance rises without surplus.
+- [ ] (EXEC) Phase-9 Meta-Witness: implement self-audit that can freeze learning, force OBSERVE, or require re-certification when assumptions fail or costs dominate.
+- [ ] (DOC) Phase-9 justification chain: ensure every action stores regime → posture → actuator → cost model → expected surplus → realized surplus; gate future actions if a link is missing.
 - [ ] (EXEC) Build Phase-7 live density feeder (rolling windows into memmap or DuckDB) so Phase-4 gates can open on live data.
 - [x] (EXEC) Gate Phase-4 density monitor on Phase-07 readiness using a status log + persistence window.
+- [ ] (ANALYSIS) Run Phase-07 asymmetry diagnostics (per-horizon medians, cost vs move, pred-edge scale) and capture a timestamped report.
+- [ ] (ANALYSIS) Run Phase-07 wake-up tests (zero-cost and injected-drift logs) and verify Phase-07/Phase-04 readiness toggles as expected.
 - [x] (DECISION) Lock quotient feature set + window (log-returns, MAD norm, W1=64/W2=256, E/C/S + deltas).
 - [x] (EXEC) Implement quotient extractor in `features/quotient.py` and log `q_*` fields.
 - [ ] (EXEC) Add quotient-gated ACCEPT/HOLD/BAN path to `strategy/triadic_strategy.py` (no direction control).
