@@ -40,3 +40,4 @@ Added a narrative capture of the posture_observe doc/TODO update process in `doc
 Added `scripts/phase07_eigen_boundary_check.py` stub to compute rho_A across horizons with cost perturbation robustness checks.
 Formalized Phase-8 entry criteria and boundary clamp semantics in `COMPACTIFIED_CONTEXT.md`.
 Added kernel-Vulkan implementation contract appendix in `docs/appendix_kernel_vulkan.md`.
+Dashboard internals now skip tower-only plots when the tower log is missing, keeping the view empty with a one-time warning instead of crashing (`training_dashboard_pg.py`).

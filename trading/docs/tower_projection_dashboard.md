@@ -74,6 +74,7 @@ The runner emits a tower projection log alongside the per-step CSV. It is NDJSON
 - Default path: `logs/trading_log*_tower.ndjson` (same stem as the CSV log).
 - Disable emission with `run_trader.py --no-tower-log`.
 - Fields are null when the projection is not computed. Each P_k carries `available` to avoid semantic leakage.
+- If the tower log is missing, the internals view stays empty and prints a one-time warning instead of failing.
 
 Example record (current emission contract):
 
@@ -145,3 +146,25 @@ Notes:
 - P1 uses quotient feature proxies until kappa/eps closure is computed.
 - P6 proxies come from `1 - p_bad` and `pred_edge`; they are labeled as proxies and keep `available=false`.
 - P7 boundary certificate remains empty until Phase-7.3 horizon sweeps are wired; boundary gate metrics are logged under `boundary_gate` as a proxy only.
+
+## Phase-8 readiness overlay (optional)
+
+If you have a Phase-8 audit log from the stream daemon, you can overlay readiness directly:
+
+```
+PYTHONPATH=. python training_dashboard_pg.py \
+  --log logs/trading_log.csv \
+  --graph-internals \
+  --phase8-log logs/phase8/phase8_gate.log
+```
+
+If the Phase-8 audit log is missing, the Phase-8 curves stay empty and the dashboard warns once.
+
+To persist Phase-8 into the tower log for offline review, merge it:
+
+```
+PYTHONPATH=. python scripts/merge_tower_phase8.py \
+  --tower-log logs/trading_log_tower.ndjson \
+  --phase8-log logs/phase8/phase8_gate.log \
+  --out logs/trading_log_tower_phase8.ndjson
+```

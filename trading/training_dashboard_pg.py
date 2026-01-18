@@ -15,6 +15,8 @@ Usage:
   PYTHONPATH=. python trading/training_dashboard_pg.py --log logs/trading_log.csv --refresh 1.0 --progressive-days
   # Tower projection internals (requires *_tower.ndjson log)
   PYTHONPATH=. python trading/training_dashboard_pg.py --log logs/trading_log.csv --graph-internals
+  # Tower projection internals + Phase-8 readiness overlay
+  PYTHONPATH=. python trading/training_dashboard_pg.py --log logs/trading_log.csv --graph-internals --phase8-log logs/phase8/phase8_gate.log
 """
 
 import argparse
@@ -217,6 +219,7 @@ class Dashboard(QtWidgets.QMainWindow):
         plane_norm_window: int = 0,
         graph_internals: bool = False,
         tower_log_path: pathlib.Path | None = None,
+        phase8_log_path: pathlib.Path | None = None,
     ):
         super().__init__()
         self.log_path = log_path
@@ -232,6 +235,7 @@ class Dashboard(QtWidgets.QMainWindow):
         self.plane_norm_window = plane_norm_window
         self.graph_internals = graph_internals
         self.tower_log_path = tower_log_path
+        self.phase8_log_path = phase8_log_path
         self.day_idx = 0
         self.day_keys = None
         self.progressive_warned = False
@@ -239,6 +243,7 @@ class Dashboard(QtWidgets.QMainWindow):
         self.posture_spans = []
         self.missing_columns_warned = False
         self.missing_tower_warned = False
+        self.missing_phase8_warned = False
         self.init_ui()
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.update_data)
@@ -369,6 +374,13 @@ class Dashboard(QtWidgets.QMainWindow):
         self.ready_count_curve = self.p_ready.plot(pen=pg.mkPen("y", width=1))
         self.required_curve = self.p_ready.plot(pen=pg.mkPen((180, 180, 180), width=1))
         self.a8_curve = self.p_ready.plot(pen=pg.mkPen("c", width=1, style=dash_style))
+        self.phase8_ready_curve = self.p_ready.plot(pen=pg.mkPen("g", width=1))
+        self.phase8_ready_count_curve = self.p_ready.plot(
+            pen=pg.mkPen((255, 120, 0), width=1, style=dash_style)
+        )
+        self.phase8_required_curve = self.p_ready.plot(
+            pen=pg.mkPen((120, 120, 120), width=1, style=dash_style)
+        )
 
         self.p_witness = self.internals_win.addPlot(row=5, col=0, title="P9 refusal + capital pressure")
         self.p_witness.setXLink(self.p_q)
@@ -768,82 +780,114 @@ class Dashboard(QtWidgets.QMainWindow):
             self._update_internals()
 
     def _update_internals(self):
-        if not self.tower_log_path:
-            return
-        tower_log = load_ndjson(self.tower_log_path)
-        if tower_log is None or tower_log.empty:
-            if not self.missing_tower_warned:
-                print(f"[internals] missing tower log {self.tower_log_path}")
-                self.missing_tower_warned = True
-            return
+        tower_log = None
+        if self.tower_log_path:
+            tower_log = load_ndjson(self.tower_log_path)
+            if tower_log is None or tower_log.empty:
+                if not self.missing_tower_warned:
+                    print(f"[internals] missing tower log {self.tower_log_path}")
+                    self.missing_tower_warned = True
+                tower_log = None
 
-        x_src = None
-        if "ts" in tower_log.columns:
-            x_src = tower_log["ts"]
-        elif "t" in tower_log.columns:
-            x_src = tower_log["t"]
-        else:
-            x_src = np.arange(len(tower_log))
-        x_plot = coerce_plot_x(x_src, len(tower_log))
+        if tower_log is not None:
+            x_src = None
+            if "ts" in tower_log.columns:
+                x_src = tower_log["ts"]
+            elif "t" in tower_log.columns:
+                x_src = tower_log["t"]
+            else:
+                x_src = np.arange(len(tower_log))
+            x_plot = coerce_plot_x(x_src, len(tower_log))
 
-        def col(name):
-            if name not in tower_log.columns:
-                return None
-            return pd.to_numeric(tower_log[name], errors="coerce")
+            def col(name):
+                if name not in tower_log.columns:
+                    return None
+                return pd.to_numeric(tower_log[name], errors="coerce")
 
-        q_e = col("P1.q.e64")
-        q_c = col("P1.q.c64")
-        q_s = col("P1.q.s64")
-        q_de = col("P1.q.delta_e")
-        if q_e is not None:
-            self.q_e_curve.setData(x_plot, q_e)
-        if q_c is not None:
-            self.q_c_curve.setData(x_plot, q_c)
-        if q_s is not None:
-            self.q_s_curve.setData(x_plot, q_s)
-        if q_de is not None:
-            self.q_de_curve.setData(x_plot, q_de)
+            q_e = col("P1.q.e64")
+            q_c = col("P1.q.c64")
+            q_s = col("P1.q.s64")
+            q_de = col("P1.q.delta_e")
+            if q_e is not None:
+                self.q_e_curve.setData(x_plot, q_e)
+            if q_c is not None:
+                self.q_c_curve.setData(x_plot, q_c)
+            if q_s is not None:
+                self.q_s_curve.setData(x_plot, q_s)
+            if q_de is not None:
+                self.q_de_curve.setData(x_plot, q_de)
 
-        posture = col("P5.posture")
-        a5 = col("P5.A5")
-        if posture is not None:
-            self.posture_curve.setData(x_plot, posture)
-        if a5 is not None:
-            self.a5_curve.setData(x_plot, a5)
+            posture = col("P5.posture")
+            a5 = col("P5.A5")
+            if posture is not None:
+                self.posture_curve.setData(x_plot, posture)
+            if a5 is not None:
+                self.a5_curve.setData(x_plot, a5)
 
-        legitimacy = col("P6.legitimacy_proxy")
-        exploit = col("P6.exploitability_proxy")
-        if legitimacy is not None:
-            self.legitimacy_curve.setData(x_plot, legitimacy)
-        if exploit is not None:
-            self.exploit_curve.setData(x_plot, exploit)
+            legitimacy = col("P6.legitimacy_proxy")
+            exploit = col("P6.exploitability_proxy")
+            if legitimacy is not None:
+                self.legitimacy_curve.setData(x_plot, legitimacy)
+            if exploit is not None:
+                self.exploit_curve.setData(x_plot, exploit)
 
-        boundary_edge = col("P7.boundary_gate.edge_confidence")
-        boundary_cost = col("P7.boundary_gate.cost_threshold")
-        boundary_abstain = col("P7.boundary_gate.abstain")
-        if boundary_edge is not None:
-            self.boundary_edge_curve.setData(x_plot, boundary_edge)
-        if boundary_cost is not None:
-            self.boundary_cost_curve.setData(x_plot, boundary_cost)
-        if boundary_abstain is not None:
-            self.boundary_abstain_curve.setData(x_plot, boundary_abstain)
+            boundary_edge = col("P7.boundary_gate.edge_confidence")
+            boundary_cost = col("P7.boundary_gate.cost_threshold")
+            boundary_abstain = col("P7.boundary_gate.abstain")
+            if boundary_edge is not None:
+                self.boundary_edge_curve.setData(x_plot, boundary_edge)
+            if boundary_cost is not None:
+                self.boundary_cost_curve.setData(x_plot, boundary_cost)
+            if boundary_abstain is not None:
+                self.boundary_abstain_curve.setData(x_plot, boundary_abstain)
 
-        ready_count = col("P8.ready_count")
-        required = col("P8.required")
-        a8 = col("P8.A8")
-        if ready_count is not None:
-            self.ready_count_curve.setData(x_plot, ready_count)
-        if required is not None:
-            self.required_curve.setData(x_plot, required)
-        if a8 is not None:
-            self.a8_curve.setData(x_plot, a8)
+            ready_count = col("P8.ready_count")
+            required = col("P8.required")
+            a8 = col("P8.A8")
+            if ready_count is not None:
+                self.ready_count_curve.setData(x_plot, ready_count)
+            if required is not None:
+                self.required_curve.setData(x_plot, required)
+            if a8 is not None:
+                self.a8_curve.setData(x_plot, a8)
 
-        a9 = col("P9.A9")
-        capital_pressure = col("P9.capital_pressure")
-        if a9 is not None:
-            self.a9_curve.setData(x_plot, a9)
-        if capital_pressure is not None:
-            self.capital_pressure_curve.setData(x_plot, capital_pressure)
+            a9 = col("P9.A9")
+            capital_pressure = col("P9.capital_pressure")
+            if a9 is not None:
+                self.a9_curve.setData(x_plot, a9)
+            if capital_pressure is not None:
+                self.capital_pressure_curve.setData(x_plot, capital_pressure)
+
+        if self.phase8_log_path:
+            phase8_log = load_ndjson(self.phase8_log_path)
+            if phase8_log is None or phase8_log.empty:
+                if not self.missing_phase8_warned:
+                    print(f"[internals] missing phase8 log {self.phase8_log_path}")
+                    self.missing_phase8_warned = True
+            else:
+                if "timestamp" in phase8_log.columns:
+                    p8_x = phase8_log["timestamp"]
+                elif "ts" in phase8_log.columns:
+                    p8_x = phase8_log["ts"]
+                else:
+                    p8_x = np.arange(len(phase8_log))
+                p8_x_plot = coerce_plot_x(p8_x, len(phase8_log))
+
+                def p8_col(name):
+                    if name not in phase8_log.columns:
+                        return None
+                    return pd.to_numeric(phase8_log[name], errors="coerce")
+
+                phase8_ready = p8_col("phase8_ready")
+                phase8_ready_count = p8_col("phase8_ready_count")
+                phase8_required = p8_col("phase8_required")
+
+                if phase8_ready is not None:
+                    self.phase8_ready_curve.setData(p8_x_plot, phase8_ready)
+                if phase8_ready_count is not None:
+                    self.phase8_ready_count_curve.setData(p8_x_plot, phase8_ready_count)
+                if phase8_required is not None:
+                    self.phase8_required_curve.setData(p8_x_plot, phase8_required)
 
 
 def main():
@@ -877,6 +921,7 @@ def main():
     ap.add_argument("--log-index", type=int, default=None, help="Select log by index from listed logs (1-based).")
     ap.add_argument("--graph-internals", action="store_true", help="Open tower projection internals view.")
     ap.add_argument("--tower-log", type=str, default=None, help="NDJSON tower projection log path.")
+    ap.add_argument("--phase8-log", type=str, default=None, help="NDJSON Phase-8 audit log path.")
     args = ap.parse_args()
 
     log_path = select_log_path(args.log, pathlib.Path(args.logs_dir), choice_idx=args.log_index)
@@ -887,6 +932,7 @@ def main():
             tower_log_path = pathlib.Path(args.tower_log)
         else:
             tower_log_path = log_path.with_name(f"{log_path.stem}_tower.ndjson")
+    phase8_log_path = pathlib.Path(args.phase8_log) if args.phase8_log else None
     app = QtWidgets.QApplication([])
     dash = Dashboard(
         log_path=log_path,
@@ -901,6 +947,7 @@ def main():
         plane_norm_window=args.plane_norm_window,
         graph_internals=args.graph_internals,
         tower_log_path=tower_log_path,
+        phase8_log_path=phase8_log_path,
     )
     dash.show()
     if args.refresh <= 0:

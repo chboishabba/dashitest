@@ -15,6 +15,7 @@ Legend: (EXEC) implementation, (DECISION) policy decision, (ANALYSIS) analysis/v
 - [ ] (DASHBOARD) Add edge_ema panel (or overlay) to the PG dashboard.
 - [ ] (DASHBOARD) Plot stress histogram pane in PG dashboard.
 - [x] (DASHBOARD) Guard training_dashboard_pg.py against trade-log selection (auto-select per-step log or show clear error).
+- [x] (DASHBOARD) Skip internals plots when the tower log is missing (warn once, keep panes empty).
 - [ ] (EXEC) Implement explicit baseline simulation for regret (sell-all-at-t0 path).
 - [ ] (EXEC) Add realized-volatility regime feature (continuous + ternary regime flag) and log it.
 - [x] (EXEC) Harden the Phase-4 density monitor: per-ontology balance, bin persistence windows, effect-size floor, and two-check debounce before OPEN.

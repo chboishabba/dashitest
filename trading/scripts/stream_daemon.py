@@ -841,6 +841,9 @@ class StreamDaemon:
                 "phase8_reason": phase8_snapshot.get("reason"),
                 "phase8_clamped": phase8_clamped,
                 "phase8_meta": phase8_snapshot.get("metrics"),
+                "phase8_ready_count": phase8_snapshot.get("ready_count"),
+                "phase8_required": phase8_snapshot.get("required"),
+                "phase8_window": phase8_snapshot.get("window_size"),
                 "run_id": self.run_id,
                 "source": "stream_daemon",
             }

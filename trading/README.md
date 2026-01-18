@@ -11,6 +11,7 @@ Run from this directory:
 - `python training_dashboard.py --log logs/trading_log.csv --refresh 0.5` for a live matplotlib view.
 - `python training_dashboard_pg.py --log logs/trading_log.csv --refresh 1.0` for the PyQtGraph dashboard.
 - `python training_dashboard_pg.py --log logs/trading_log.csv --graph-internals` for the tower projection internals view.
+- `python training_dashboard_pg.py --log logs/trading_log.csv --graph-internals --phase8-log logs/phase8/phase8_gate.log` to overlay Phase-8 readiness (stream daemon audit log).
 - `bash scripts/run_trader_with_internals.sh` to run the trader and PyQtGraph internals view together.
 - `python ternary_trading_demo.py` for a self-contained demo with synthetic data.
 
@@ -72,6 +73,8 @@ by default; overwriting is not allowed.
   Command: `PYTHONPATH=. python scripts/compute_policy_distance.py --a logs/trading_log.csv --b logs/trading_log.csv`
 - `scripts/compare_trade_alignment.py`: For losing trades, find closest profitable entry inputs (z-score distance).  
   Command: `PYTHONPATH=. python scripts/compare_trade_alignment.py --log logs/trading_log.csv --trade-log logs/trade_log.csv --top-k 1`
+- `scripts/merge_tower_phase8.py`: Merge Phase-8 audit readiness into a tower projection NDJSON log.  
+  Command: `PYTHONPATH=. python scripts/merge_tower_phase8.py --tower-log logs/trading_log_tower.ndjson --phase8-log logs/phase8/phase8_gate.log --out logs/trading_log_tower_phase8.ndjson`
 - `scripts/contextual_news.py`: Fetch contextual news/stress signals (Reuters RSS, TradingEconomics, yfinance).  
   Command: `PYTHONPATH=. python scripts/contextual_news.py` (prints signals for today; use `contextual_events()` in code for custom dates)
 - `scripts/emit_news_windows.py`: Find bad windows and fetch news (GDELT/NewsAPI/RSS).  
