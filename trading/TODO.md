@@ -42,14 +42,20 @@ Legend: (EXEC) implementation, (DECISION) policy decision, (ANALYSIS) analysis/v
 - [ ] (DECISION) Choose an actuation/measurement alignment: slower controller clock, batched/impulse exposure changes, or cost charged only on sign flips/regime exits (document the choice before implementing).
 - [ ] (EXEC) Phase-7.1: add live decision decimation/impulse modes (e.g., `--hold-seconds {30,60,120}` and `--impulse/--deadband`) so supported events are sparse and boundary-aware.
 - [ ] (EXEC) Phase-7.2: emit a live execution ledger (paper is fine) matching the Phase-07 schema (`timestamp, symbol, x_prev, x, mid, delta_mid, cost_est, realized_pnl, pred_edge`) so `phase7_status_emitter` runs unchanged.
+- [x] (EXEC) Implement `scripts/phase07_eigen_boundary_check.py` (inputs: (d_t, m_t) stream, returns, friction model; outputs: rho_A vs horizon, +/-eps cost robustness, classification {false, boundary-unstable, boundary-stable}).
 - [ ] (ANALYSIS) Phase-7.3: build a horizon sweep harness to run a live log through Phase-07 at multiple horizons (10s/30s/60s/120s/300s) and identify any positive net density or prove absence.
-- [ ] (DECISION) Phase-8 entry gate: document and enforce that Phase-07 readiness persists on live logs, actuator mode is fixed/logged, boundary gate clamps when ready=false, and one-command audit emits net/gross density, activity rate, cost vs move share, and worst drawdown per session.
+- [ ] (ANALYSIS) Run Phase-07 perturbation tests on recent live logs (small cost/execution tweaks) to tag false vs boundary-stable eigen-events and record persistence.
+- [x] (DECISION) Phase-8 entry gate: document formal criteria (Phase-07 readiness persists, actuator mode fixed/logged, boundary clamp, audit outputs) in `COMPACTIFIED_CONTEXT.md`.
+- [ ] (EXEC) Phase-8 entry gate enforcement: wire readiness gating + boundary clamp + audit output on live logs per the formal criteria.
 - [ ] (EXEC) Phase-9 capital ledger kernel: track capital \(C_t\) with legitimacy tax \(\Lambda_t\); enforce \(\Delta x_t \le f(C_t, \text{drawdown}, \text{Phase-07})\); log capital justification per action.
 - [ ] (ANALYSIS) Phase-9 eigen-regime census: certify profitability in ≥1 regime and preservation in all others; hostile regimes collapse exposure to convex-only or zero; Phase-07 negative edge must be obeyed.
 - [ ] (DECISION) Phase-9 learning budget: gate learning updates on capital/variance budget; halt learning when variance rises without surplus.
 - [ ] (EXEC) Phase-9 Meta-Witness: implement self-audit that can freeze learning, force OBSERVE, or require re-certification when assumptions fail or costs dominate.
 - [ ] (DOC) Phase-9 justification chain: ensure every action stores regime → posture → actuator → cost model → expected surplus → realized surplus; gate future actions if a link is missing.
 - [ ] (EXEC) Build Phase-7 live density feeder (rolling windows into memmap or DuckDB) so Phase-4 gates can open on live data.
+- [ ] (EXEC) Wire capital kernel + Meta-Witness into `scripts/stream_daemon.py` emission path (before decisions hit sinks): apply refusal/clamp, and log `capital_C`, `capital_dd`, `kappa_t`, `mw_reason`, `mw_refusal_level`, `mw_forced_hold/ban`, `mw_max_exposure`, plus justification chain.
+- [ ] (EXEC) Wire capital kernel + Meta-Witness into `engine/loop.py` (execution path) so backtests and live loop share the same governance.
+- [ ] (EXEC) Emit an M9 state snapshot per decision (quotient residual summaries, posture, boundary cert, capital, witness state, action intent) into sinks; assert witness/refusal is idempotent and acts only on the action channel.
 - [x] (EXEC) Gate Phase-4 density monitor on Phase-07 readiness using a status log + persistence window.
 - [ ] (ANALYSIS) Run Phase-07 asymmetry diagnostics (per-horizon medians, cost vs move, pred-edge scale) and capture a timestamped report.
 - [ ] (ANALYSIS) Run Phase-07 wake-up tests (zero-cost and injected-drift logs) and verify Phase-07/Phase-04 readiness toggles as expected.

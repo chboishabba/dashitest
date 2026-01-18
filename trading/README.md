@@ -10,6 +10,8 @@ Run from this directory:
 - `python run_all.py` to run across all cached markets.
 - `python training_dashboard.py --log logs/trading_log.csv --refresh 0.5` for a live matplotlib view.
 - `python training_dashboard_pg.py --log logs/trading_log.csv --refresh 1.0` for the PyQtGraph dashboard.
+- `python training_dashboard_pg.py --log logs/trading_log.csv --graph-internals` for the tower projection internals view.
+- `bash scripts/run_trader_with_internals.sh` to run the trader and PyQtGraph internals view together.
 - `python ternary_trading_demo.py` for a self-contained demo with synthetic data.
 
 From this directory (or from the parent, add `trading/` prefixes to script/data paths), use `PYTHONPATH=.`:
@@ -37,6 +39,7 @@ PYTHONPATH=. python run_all_two_pointO.py \
 - `run_all_two_pointO.py`: Orchestrator for market summaries, tau sweeps, CA tape preview, and news windows.
 - `docs/decision_alignment_check.md`: Spec for closest-profitable alignment checks on losing trades.
 - `docs/quotient_integration.md`: Quotient-invariant integration plan for learner-gated trader behavior.
+- `docs/tower_projection_dashboard.md`: Spec for tower-aligned M1-M9 projection dashboard (PyQtGraph internals view; diagnostic only).
 - `data_downloader.py`: Data ingestion for Stooq/Yahoo/CoinGecko/Binance; writes `data/raw`.
 - `ternary_trading_demo.py`: Self-contained demo; encodes ternary signals and compares baseline.
 - `training_dashboard.py`: Matplotlib dashboard for `logs/trading_log.csv`.
@@ -136,6 +139,7 @@ by default; overwriting is not allowed.
 - `data/run_history.csv`: Append-only run summaries from `run_trader`.
 - `logs/trading_log.csv`: Primary log for dashboards and analysis scripts.
 - `logs/trading_log_trades_*.csv`: Per-trade logs (one row per closed trade).
+- `logs/trading_log*_tower.ndjson`: Tower projection log (typed M1-M9 projections).
 - `logs/news_events/`: News slices fetched by `emit_news_windows` and `run_all_two_pointO`.
 - `logs/quotient_<timestamp>.png`: Optional quotient feature plot output from `plot_quotient_features.py`.
 
@@ -153,6 +157,7 @@ by default; overwriting is not allowed.
 - `run_trader.py` supports thesis memory (`--thesis-memory`) with per-step logging of thesis state/evidence, position persistence on neutral signals, and optional benchmark-regret reward fields.
 - `training_dashboard_pg.py` can render rolling histograms with `--hist --hist-window N --hist-bins M`.
 - `training_dashboard_pg.py` expects per-step logs (e.g., `logs/trading_log_*.csv` with a `price` column); trade logs (`logs/trading_log_trades_*.csv`) are not supported.
+- `training_dashboard_pg.py --graph-internals` reads the corresponding `*_tower.ndjson` log for tower projections.
 
 ## Sanity test outcomes
 

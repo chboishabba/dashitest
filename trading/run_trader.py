@@ -87,6 +87,7 @@ def main(
     geometry_overlay: bool = True,
     geometry_simplex: bool = True,
     geometry_dir: str = "logs/geometry",
+    tower_log: bool = True,
 ):
     run_ts = pd.Timestamp.utcnow().strftime("%Y%m%dT%H%M%SZ")
 
@@ -127,6 +128,11 @@ def main(
         except Exception as exc:
             print(f"[warn] geometry plots failed for {log_path}: {exc}")
 
+    def resolve_tower_log_path(log_path: pathlib.Path) -> pathlib.Path | None:
+        if not tower_log:
+            return None
+        return log_path.with_name(f"{log_path.stem}_tower.ndjson")
+
     source = "stooq"
     try:
         if run_all:
@@ -152,12 +158,13 @@ def main(
                 else:
                     log_path = pathlib.Path(f"{log_prefix}_{csv_path.stem}.csv")
                     trade_log_path = pathlib.Path(f"{log_prefix}_trades_{csv_path.stem}.csv")
+                tower_log_path = resolve_tower_log_path(log_path)
                 print(f"[run {idx}/{len(csv_paths)}] {csv_path} -> {log_path}")
-        run_trading_loop(
-            price=price,
-            volume=volume,
-            source=source,
-            time_index=ts,
+                run_trading_loop(
+                    price=price,
+                    volume=volume,
+                    source=source,
+                    time_index=ts,
                     max_steps=max_steps,
                     max_trades=max_trades,
                     max_seconds=max_seconds,
@@ -180,23 +187,21 @@ def main(
                     edge_gate=edge_gate,
                     edge_decay=edge_decay,
                     edge_ema_alpha=edge_alpha,
+                    thesis_depth_max=thesis_depth_max,
+                    thesis_memory=thesis_memory,
+                    thesis_a_max=thesis_a_max,
+                    thesis_cooldown=thesis_cooldown,
+                    thesis_pbad_lo=thesis_pbad_lo,
+                    thesis_pbad_hi=thesis_pbad_hi,
+                    thesis_stress_lo=thesis_stress_lo,
+                    thesis_stress_hi=thesis_stress_hi,
+                    tc_k=tc_k,
+                    benchmark_x=benchmark_x,
                     decision_cost_rate=boundary_cost_rate,
                     boundary_gate=boundary_gate,
                     boundary_cost_margin=boundary_cost_margin,
-            thesis_depth_max=thesis_depth_max,
-            thesis_memory=thesis_memory,
-            thesis_a_max=thesis_a_max,
-            thesis_cooldown=thesis_cooldown,
-            thesis_pbad_lo=thesis_pbad_lo,
-            thesis_pbad_hi=thesis_pbad_hi,
-            thesis_stress_lo=thesis_stress_lo,
-            thesis_stress_hi=thesis_stress_hi,
-            tc_k=tc_k,
-            benchmark_x=benchmark_x,
-            decision_cost_rate=boundary_cost_rate,
-            boundary_gate=boundary_gate,
-            boundary_cost_margin=boundary_cost_margin,
-        )
+                    tower_log_path=tower_log_path,
+                )
                 if not log_combined:
                     emit_geometry(log_path, source)
                 if inter_run_sleep > 0:
@@ -258,6 +263,10 @@ def main(
         thesis_stress_hi=thesis_stress_hi,
         tc_k=tc_k,
         benchmark_x=benchmark_x,
+        decision_cost_rate=boundary_cost_rate,
+        boundary_gate=boundary_gate,
+        boundary_cost_margin=boundary_cost_margin,
+        tower_log_path=resolve_tower_log_path(LOG),
     )
     emit_geometry(LOG, source)
 
@@ -333,7 +342,9 @@ if __name__ == "__main__":
     ap.add_argument("--no-geometry-overlay", dest="geometry_overlay", action="store_false")
     ap.add_argument("--geometry-plots", dest="geometry_plots", action="store_true", help="Emit geometry plots.")
     ap.add_argument("--no-geometry-plots", dest="geometry_plots", action="store_false", help="Skip geometry plots.")
-    ap.set_defaults(geometry_plots=True, geometry_overlay=True, geometry_simplex=True)
+    ap.add_argument("--tower-log", dest="tower_log", action="store_true", help="Emit tower projection NDJSON log.")
+    ap.add_argument("--no-tower-log", dest="tower_log", action="store_false", help="Disable tower projection log.")
+    ap.set_defaults(geometry_plots=True, geometry_overlay=True, geometry_simplex=True, tower_log=True)
     args = ap.parse_args()
     main(
         max_steps=args.max_steps,
@@ -375,4 +386,5 @@ if __name__ == "__main__":
         geometry_overlay=args.geometry_overlay,
         geometry_simplex=args.geometry_simplex,
         geometry_dir=args.geometry_dir,
+        tower_log=args.tower_log,
     )

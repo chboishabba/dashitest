@@ -13,9 +13,12 @@ Usage:
   PYTHONPATH=. python trading/training_dashboard_pg.py --log logs/trading_log.csv --refresh 1.0
   # Progressive day-by-day reveal (each refresh adds the next day if ts present)
   PYTHONPATH=. python trading/training_dashboard_pg.py --log logs/trading_log.csv --refresh 1.0 --progressive-days
+  # Tower projection internals (requires *_tower.ndjson log)
+  PYTHONPATH=. python trading/training_dashboard_pg.py --log logs/trading_log.csv --graph-internals
 """
 
 import argparse
+import json
 import pathlib
 import pandas as pd
 import numpy as np
@@ -31,6 +34,24 @@ def load_log(path: pathlib.Path):
         return pd.read_csv(path)
     except Exception:
         return None
+
+
+def load_ndjson(path: pathlib.Path):
+    if not path.exists():
+        return None
+    records = []
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                records.append(json.loads(line))
+    except Exception:
+        return None
+    if not records:
+        return None
+    return pd.json_normalize(records)
 
 
 def synthetic_log(n=1000):
@@ -194,6 +215,8 @@ class Dashboard(QtWidgets.QMainWindow):
         hist_bins: int = 40,
         plane_scale: str = "linear",
         plane_norm_window: int = 0,
+        graph_internals: bool = False,
+        tower_log_path: pathlib.Path | None = None,
     ):
         super().__init__()
         self.log_path = log_path
@@ -207,12 +230,15 @@ class Dashboard(QtWidgets.QMainWindow):
         self.hist_bins = hist_bins
         self.plane_scale = plane_scale
         self.plane_norm_window = plane_norm_window
+        self.graph_internals = graph_internals
+        self.tower_log_path = tower_log_path
         self.day_idx = 0
         self.day_keys = None
         self.progressive_warned = False
         self.cached_log = pd.DataFrame()
         self.posture_spans = []
         self.missing_columns_warned = False
+        self.missing_tower_warned = False
         self.init_ui()
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.update_data)
@@ -303,6 +329,51 @@ class Dashboard(QtWidgets.QMainWindow):
             self.hist_exec = pg.BarGraphItem(x=[], height=[], width=0.9, brush=pg.mkBrush(80, 200, 255, 120))
             self.p_hist.addItem(self.hist_cash)
             self.p_hist.addItem(self.hist_exec)
+
+        self.internals_win = None
+        if self.graph_internals:
+            self._init_internals_ui()
+
+    def _init_internals_ui(self):
+        self.internals_win = pg.GraphicsLayoutWidget(show=True, title="Tower Projection Internals (PyQtGraph)")
+        pg.setConfigOptions(antialias=True)
+
+        self.p_q = self.internals_win.addPlot(row=0, col=0, title="P1 proxy: quotient features (e64/c64/s64)")
+        self.q_e_curve = self.p_q.plot(pen=pg.mkPen("w", width=1))
+        self.q_c_curve = self.p_q.plot(pen=pg.mkPen((255, 180, 0), width=1))
+        self.q_s_curve = self.p_q.plot(pen=pg.mkPen((0, 200, 255), width=1))
+        self.q_de_curve = self.p_q.plot(pen=pg.mkPen((180, 180, 180), width=1))
+
+        self.p_posture_int = self.internals_win.addPlot(row=1, col=0, title="P5 posture + A5")
+        self.p_posture_int.setYRange(-1.5, 1.5)
+        self.p_posture_int.setXLink(self.p_q)
+        self.posture_curve = self.p_posture_int.plot(pen=pg.mkPen("w", width=1))
+        dash_style = getattr(QtCore.Qt, "DashLine", QtCore.Qt.PenStyle.DashLine)
+        self.a5_curve = self.p_posture_int.plot(pen=pg.mkPen("c", width=1, style=dash_style))
+
+        self.p_tension = self.internals_win.addPlot(row=2, col=0, title="P6 proxies: legitimacy vs exploitability")
+        self.p_tension.setXLink(self.p_q)
+        self.legitimacy_curve = self.p_tension.plot(pen=pg.mkPen("g", width=1))
+        self.exploit_curve = self.p_tension.plot(pen=pg.mkPen("m", width=1))
+
+        self.p_boundary = self.internals_win.addPlot(row=3, col=0, title="P7 proxy: boundary gate (edge vs cost)")
+        self.p_boundary.setXLink(self.p_q)
+        self.boundary_edge_curve = self.p_boundary.plot(pen=pg.mkPen("w", width=1))
+        self.boundary_cost_curve = self.p_boundary.plot(pen=pg.mkPen((255, 80, 80), width=1))
+        self.boundary_abstain_curve = self.p_boundary.plot(
+            pen=pg.mkPen((200, 200, 200), width=1, style=dash_style)
+        )
+
+        self.p_ready = self.internals_win.addPlot(row=4, col=0, title="P8 readiness")
+        self.p_ready.setXLink(self.p_q)
+        self.ready_count_curve = self.p_ready.plot(pen=pg.mkPen("y", width=1))
+        self.required_curve = self.p_ready.plot(pen=pg.mkPen((180, 180, 180), width=1))
+        self.a8_curve = self.p_ready.plot(pen=pg.mkPen("c", width=1, style=dash_style))
+
+        self.p_witness = self.internals_win.addPlot(row=5, col=0, title="P9 refusal + capital pressure")
+        self.p_witness.setXLink(self.p_q)
+        self.a9_curve = self.p_witness.plot(pen=pg.mkPen("w", width=1))
+        self.capital_pressure_curve = self.p_witness.plot(pen=pg.mkPen("r", width=1, style=dash_style))
 
     def _clear_posture_spans(self):
         for item in self.posture_spans:
@@ -693,6 +764,87 @@ class Dashboard(QtWidgets.QMainWindow):
             x_arr = np.array(x_plot)
             self._add_posture_spans(x_arr, posture)
 
+        if self.graph_internals:
+            self._update_internals()
+
+    def _update_internals(self):
+        if not self.tower_log_path:
+            return
+        tower_log = load_ndjson(self.tower_log_path)
+        if tower_log is None or tower_log.empty:
+            if not self.missing_tower_warned:
+                print(f"[internals] missing tower log {self.tower_log_path}")
+                self.missing_tower_warned = True
+            return
+
+        x_src = None
+        if "ts" in tower_log.columns:
+            x_src = tower_log["ts"]
+        elif "t" in tower_log.columns:
+            x_src = tower_log["t"]
+        else:
+            x_src = np.arange(len(tower_log))
+        x_plot = coerce_plot_x(x_src, len(tower_log))
+
+        def col(name):
+            if name not in tower_log.columns:
+                return None
+            return pd.to_numeric(tower_log[name], errors="coerce")
+
+        q_e = col("P1.q.e64")
+        q_c = col("P1.q.c64")
+        q_s = col("P1.q.s64")
+        q_de = col("P1.q.delta_e")
+        if q_e is not None:
+            self.q_e_curve.setData(x_plot, q_e)
+        if q_c is not None:
+            self.q_c_curve.setData(x_plot, q_c)
+        if q_s is not None:
+            self.q_s_curve.setData(x_plot, q_s)
+        if q_de is not None:
+            self.q_de_curve.setData(x_plot, q_de)
+
+        posture = col("P5.posture")
+        a5 = col("P5.A5")
+        if posture is not None:
+            self.posture_curve.setData(x_plot, posture)
+        if a5 is not None:
+            self.a5_curve.setData(x_plot, a5)
+
+        legitimacy = col("P6.legitimacy_proxy")
+        exploit = col("P6.exploitability_proxy")
+        if legitimacy is not None:
+            self.legitimacy_curve.setData(x_plot, legitimacy)
+        if exploit is not None:
+            self.exploit_curve.setData(x_plot, exploit)
+
+        boundary_edge = col("P7.boundary_gate.edge_confidence")
+        boundary_cost = col("P7.boundary_gate.cost_threshold")
+        boundary_abstain = col("P7.boundary_gate.abstain")
+        if boundary_edge is not None:
+            self.boundary_edge_curve.setData(x_plot, boundary_edge)
+        if boundary_cost is not None:
+            self.boundary_cost_curve.setData(x_plot, boundary_cost)
+        if boundary_abstain is not None:
+            self.boundary_abstain_curve.setData(x_plot, boundary_abstain)
+
+        ready_count = col("P8.ready_count")
+        required = col("P8.required")
+        a8 = col("P8.A8")
+        if ready_count is not None:
+            self.ready_count_curve.setData(x_plot, ready_count)
+        if required is not None:
+            self.required_curve.setData(x_plot, required)
+        if a8 is not None:
+            self.a8_curve.setData(x_plot, a8)
+
+        a9 = col("P9.A9")
+        capital_pressure = col("P9.capital_pressure")
+        if a9 is not None:
+            self.a9_curve.setData(x_plot, a9)
+        if capital_pressure is not None:
+            self.capital_pressure_curve.setData(x_plot, capital_pressure)
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -723,10 +875,18 @@ def main():
     )
     ap.add_argument("--logs-dir", type=str, default="logs", help="Directory to search for CSV logs when --log not set.")
     ap.add_argument("--log-index", type=int, default=None, help="Select log by index from listed logs (1-based).")
+    ap.add_argument("--graph-internals", action="store_true", help="Open tower projection internals view.")
+    ap.add_argument("--tower-log", type=str, default=None, help="NDJSON tower projection log path.")
     args = ap.parse_args()
 
     log_path = select_log_path(args.log, pathlib.Path(args.logs_dir), choice_idx=args.log_index)
     print(f"Using log: {log_path}")
+    tower_log_path = None
+    if args.graph_internals:
+        if args.tower_log:
+            tower_log_path = pathlib.Path(args.tower_log)
+        else:
+            tower_log_path = log_path.with_name(f"{log_path.stem}_tower.ndjson")
     app = QtWidgets.QApplication([])
     dash = Dashboard(
         log_path=log_path,
@@ -739,6 +899,8 @@ def main():
         hist_bins=args.hist_bins,
         plane_scale=args.plane_scale,
         plane_norm_window=args.plane_norm_window,
+        graph_internals=args.graph_internals,
+        tower_log_path=tower_log_path,
     )
     dash.show()
     if args.refresh <= 0:

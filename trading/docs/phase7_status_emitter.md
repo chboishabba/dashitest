@@ -149,6 +149,44 @@ Prereqs (Phase-7.x hardening):
 - **Phase-7.2 (Live execution ledger)**: emit a live ledger (even paper) in the Phase-07 schema (`timestamp, symbol, x_prev, x, mid, delta_mid, cost_est, realized_pnl, pred_edge`) so `scripts/phase7_status_emitter.py` runs unmodified on live logs.
 - **Phase-7.3 (Horizon sweep)**: harness to run the same live log through Phase-07 at multiple horizons (e.g., 10s/30s/60s/120s/300s) to locate any horizon with positive net density or prove absence.
 
+### Phase-7.3 horizon sweep: noise-floor annotation
+
+Phase-7 is epistemic, not economic. The horizon sweep must annotate short-horizon inflation without introducing capital-equivalent deltas.
+
+For each horizon \(\tau\), compute a null-normalized score:
+
+1. **Shuffle control**: compute \(\rho_A^{(0)}(\tau)\) using one of:
+   - shuffled returns
+   - shuffled directions
+   - time-shifted returns (\(\Delta \gg \tau\))
+2. **Excess signal**:
+   \[
+   \Delta \rho_A(\tau) = \rho_A(\tau) - \rho_A^{(0)}(\tau)
+   \]
+3. **Noise ratio**:
+   \[
+   \text{noise\_ratio} = \frac{\rho_A(\tau)}{\rho_A^{(0)}(\tau) + \epsilon}
+   \]
+
+Add these columns to the Phase-7.3 output (CSV/JSONL):
+
+```csv
+horizon_s,
+rho_A,
+rho_A_null,
+delta_rho_A,
+noise_ratio,
+robust_pass,
+class_label
+```
+
+Interpretation rule (documented, not gated):
+
+- High \(\rho_A\) at small \(\tau\) is **non-diagnostic** unless \(\Delta \rho_A(\tau)\) remains positive and monotone as \(\tau\) increases.
+- Small-\(\tau\) spikes are kinematic; \(\tau\)-stable plateaus are eigen-structural.
+
+Do **not** add capital-equivalent deltas in Phase-7. Those belong to Phase-8+ after horizon, persistence, and boundary stability are fixed.
+
 Phase-8 entry gate (all must be true):
 
 - Actuator mode fixed and logged (decimation/impulse parameters).

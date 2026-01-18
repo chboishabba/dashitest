@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import pandas as pd
 
 
@@ -17,6 +18,15 @@ def emit_trade_row(trade_row: dict, trade_log_path) -> None:
     pd.DataFrame([trade_row]).to_csv(
         trade_log_path, mode="a", header=not trade_log_path.exists(), index=False
     )
+
+
+def emit_tower_row(row: dict, log_path) -> None:
+    if log_path is None:
+        return
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row, ensure_ascii=True, allow_nan=False))
+        fh.write("\n")
 
 
 def emit_run_summary(summary: dict, run_history_path) -> None:

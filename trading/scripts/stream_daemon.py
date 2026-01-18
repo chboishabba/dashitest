@@ -24,6 +24,7 @@ try:
     from tools.ingest_archives_to_duckdb import ingest_dataframe
     from trading.summarisation.summariser import Summariser, SummarySpec
     from phase6.gate import Phase6ExposureGate
+    from phase7.gate import Phase7ReadinessGate
     from strategy.triadic_strategy import TriadicStrategy
     from signals.triadic import compute_triadic_state
     from posture import Posture
@@ -35,6 +36,7 @@ except ModuleNotFoundError:  # pragma: no cover - support running from scripts/
     from tools.ingest_archives_to_duckdb import ingest_dataframe
     from trading.summarisation.summariser import Summariser, SummarySpec
     from phase6.gate import Phase6ExposureGate
+    from phase7.gate import Phase7ReadinessGate
     from strategy.triadic_strategy import TriadicStrategy
     from signals.triadic import compute_triadic_state
     from posture import Posture
@@ -465,6 +467,16 @@ class DecisionCostGate:
         }
 
 
+@dataclass
+class ClampIntent:
+    direction: int
+    target_exposure: float
+    urgency: float
+    hold: bool
+    actionability: float
+    reason: str
+
+
 class StreamDaemon:
     def __init__(
         self,
@@ -488,6 +500,12 @@ class StreamDaemon:
         decision_cost_window: float,
         phase6_log_dir: str | None,
         influence_log_dir: str | None,
+        phase7_log: str | None,
+        phase7_target: str | None,
+        phase7_persistence_window: int,
+        phase7_persistence_required: int,
+        phase8_enforce: bool,
+        phase8_audit_sinks: list[str] | None,
         decision_sinks: list[str] | None,
         ohlc_sinks: list[str] | None,
         tail_path: str | None,
@@ -520,6 +538,18 @@ class StreamDaemon:
         self.run_id = uuid.uuid4().hex
         self.decision_sinks = [DecisionSink(spec) for spec in decision_sinks or []]
         self.ohlc_sinks = [NdjsonSink(spec) for spec in ohlc_sinks or []]
+        self.phase7_gate = None
+        if phase7_log:
+            self.phase7_gate = Phase7ReadinessGate(
+                log_path=phase7_log,
+                target=phase7_target,
+                persistence_window=phase7_persistence_window,
+                persistence_required=phase7_persistence_required,
+            )
+        self.phase8_enforce = phase8_enforce
+        self.phase8_audit_sinks = [NdjsonSink(spec) for spec in phase8_audit_sinks or []]
+        if self.phase8_enforce and not self.phase8_audit_sinks:
+            self.phase8_audit_sinks = [NdjsonSink("file:logs/phase8/phase8_gate.log")]
         self.last_bar_ts_ms: int | None = None
         self.last_action_ts_ms: int | None = None
         self.last_state_ts_ms: int | None = None
@@ -540,6 +570,7 @@ class StreamDaemon:
             "decisions": 0,
             "decisions_blocked": 0,
             "decision_cost_estimate": 0.0,
+            "phase8_clamps": 0,
         }
         if summarise_window:
             spec = SummarySpec(window_seconds=summarise_window)
@@ -716,6 +747,43 @@ class StreamDaemon:
             close = float(row["close"])
         except (KeyError, TypeError, ValueError):
             return
+        phase8_snapshot = None
+        phase8_ready = True
+        if self.phase7_gate:
+            target_name = None
+            if not self.phase7_gate.target:
+                target_name = symbol
+            phase8_snapshot = self.phase7_gate.snapshot(target_name)
+            phase8_ready = bool(phase8_snapshot.get("open"))
+        elif self.phase8_enforce:
+            phase8_ready = False
+            phase8_snapshot = {
+                "open": False,
+                "reason": "phase7_gate_missing",
+                "target": symbol,
+            }
+        phase8_clamped = bool(self.phase8_enforce and not phase8_ready)
+        if phase8_clamped:
+            gate_reason = ""
+            if phase8_snapshot:
+                gate_reason = str(phase8_snapshot.get("reason", "")).strip()
+            base_reason = str(getattr(intent, "reason", "")).strip()
+            if gate_reason:
+                clamp_reason = f"phase8_clamp ({gate_reason})"
+            else:
+                clamp_reason = "phase8_clamp"
+            if base_reason:
+                clamp_reason = f"{base_reason} + {clamp_reason}"
+            intent = ClampIntent(
+                direction=0,
+                target_exposure=0.0,
+                urgency=0.0,
+                hold=True,
+                actionability=0.0,
+                reason=clamp_reason,
+            )
+            posture = Posture.OBSERVE
+            self.stats["phase8_clamps"] += 1
         state_row = {
             "timestamp": ts_ms,
             "symbol": symbol,
@@ -759,10 +827,25 @@ class StreamDaemon:
             "run_id": self.run_id,
             "source": "stream_daemon",
         }
+        if phase8_snapshot:
+            payload["phase8_gate"] = phase8_snapshot
         if self.decision_stdout:
             print(json.dumps(payload), flush=True)
         for sink in self.decision_sinks:
             sink.send(payload)
+        if self.phase8_audit_sinks and phase8_snapshot:
+            audit_payload = {
+                "timestamp": ts_ms,
+                "symbol": symbol,
+                "phase8_ready": bool(phase8_snapshot.get("open")),
+                "phase8_reason": phase8_snapshot.get("reason"),
+                "phase8_clamped": phase8_clamped,
+                "phase8_meta": phase8_snapshot.get("metrics"),
+                "run_id": self.run_id,
+                "source": "stream_daemon",
+            }
+            for sink in self.phase8_audit_sinks:
+                sink.send(audit_payload)
 
     def _emit_ohlc(self, row: dict[str, Any]) -> None:
         if not self.ohlc_sinks:
@@ -829,6 +912,7 @@ class StreamDaemon:
             "decisions": self.stats["decisions"],
             "decisions_blocked": self.stats["decisions_blocked"],
             "decision_cost_estimate": self.stats["decision_cost_estimate"],
+            "phase8_clamps": self.stats["phase8_clamps"],
             "pending_rows": len(self.pending_rows),
             "last_flush_age_s": flush_age,
             "last_bar_ts_ms": self.last_bar_ts_ms,
@@ -857,6 +941,8 @@ class StreamDaemon:
         for sink in self.decision_sinks:
             sink.close()
         for sink in self.ohlc_sinks:
+            sink.close()
+        for sink in self.phase8_audit_sinks:
             sink.close()
         for conn in list(self.buffers.keys()):
             self._close_conn(conn)
@@ -914,6 +1000,39 @@ def main() -> None:
     ap.add_argument("--phase6-log-dir", default="logs/phase6", help="Phase 6 gate log dir")
     ap.add_argument("--influence-log-dir", default="logs/asymmetry", help="Influence log dir")
     ap.add_argument(
+        "--phase7-log",
+        default="logs/phase7/density_status.log",
+        help="Phase-07 readiness log (JSONL).",
+    )
+    ap.add_argument(
+        "--phase7-target",
+        default="",
+        help="Phase-07 target name override (defaults to symbol).",
+    )
+    ap.add_argument(
+        "--phase7-persistence-window",
+        type=int,
+        default=8,
+        help="Phase-07 readiness window size.",
+    )
+    ap.add_argument(
+        "--phase7-persistence-required",
+        type=int,
+        default=6,
+        help="Phase-07 ready count required to open Phase-8.",
+    )
+    ap.add_argument(
+        "--phase8-enforce",
+        action="store_true",
+        help="Clamp decisions to OBSERVE when Phase-07 readiness is not persistent.",
+    )
+    ap.add_argument(
+        "--phase8-audit-sink",
+        action="append",
+        default=[],
+        help="Phase-8 audit sinks: file:/path.ndjson or tcp://host:port (repeatable)",
+    )
+    ap.add_argument(
         "--decision-sink",
         action="append",
         default=[],
@@ -951,6 +1070,12 @@ def main() -> None:
         decision_cost_window=args.decision_cost_window,
         phase6_log_dir=args.phase6_log_dir if args.emit_decisions else None,
         influence_log_dir=args.influence_log_dir if args.emit_decisions else None,
+        phase7_log=args.phase7_log if args.emit_decisions else None,
+        phase7_target=args.phase7_target if args.emit_decisions else None,
+        phase7_persistence_window=args.phase7_persistence_window,
+        phase7_persistence_required=args.phase7_persistence_required,
+        phase8_enforce=args.phase8_enforce if args.emit_decisions else False,
+        phase8_audit_sinks=args.phase8_audit_sink if args.emit_decisions else [],
         decision_sinks=args.decision_sink if args.emit_decisions else [],
         ohlc_sinks=args.ohlc_sink,
         tail_path=args.tail_path,

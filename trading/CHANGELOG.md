@@ -37,3 +37,6 @@ Phase-4 density monitor now requires Phase-07 readiness via a JSONL status log (
 Added Phase-07 diagnostics and wake-up tooling: `scripts/phase7_asymmetry_diagnostics.py` reports per-horizon medians and cost-vs-move checks, and emits zero-cost / injected-drift logs for wiring validation; `docs/phase7_status_emitter.md` documents the workflow and TODOs track the required runs.
 Documented live decision interpretation for `posture_observe` and Phase-6 gating in `docs/stream_daemon.md` and `docs/phase6_capital_control.md`, and added a TODO to capture gate status when observe persists.
 Added a narrative capture of the posture_observe doc/TODO update process in `docs/posture_observe_notes.md`.
+Added `scripts/phase07_eigen_boundary_check.py` stub to compute rho_A across horizons with cost perturbation robustness checks.
+Formalized Phase-8 entry criteria and boundary clamp semantics in `COMPACTIFIED_CONTEXT.md`.
+Added kernel-Vulkan implementation contract appendix in `docs/appendix_kernel_vulkan.md`.

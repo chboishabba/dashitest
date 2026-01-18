@@ -28,7 +28,9 @@ from trading_io.logs import (
     emit_trade_close_print,
     emit_trade_print,
     emit_trade_row,
+    emit_tower_row,
 )
+from trading_io.tower_projection import build_tower_projection
 from utils.stats import norm_cdf, norm_pdf, norm_ppf
 
 LOG = pathlib.Path("logs/trading_log.csv")
@@ -167,6 +169,9 @@ def run_trading_loop(
     decision_cost_rate: float = DECISION_COST_RATE,
     boundary_gate: bool = False,
     boundary_cost_margin: float = 0.0,
+    tower_log_path: pathlib.Path | None = None,
+    run_id: str | None = None,
+    posture_stable_min: int = 3,
 ):
     def shadow_mdl_for_window(ret_window):
         n = len(ret_window)
@@ -198,6 +203,18 @@ def run_trading_loop(
         trade_log_path.parent.mkdir(parents=True, exist_ok=True)
         if not log_append:
             trade_log_path.unlink(missing_ok=True)
+    if tower_log_path:
+        tower_log_path = pathlib.Path(tower_log_path)
+        tower_log_path.parent.mkdir(parents=True, exist_ok=True)
+        if not log_append:
+            tower_log_path.unlink(missing_ok=True)
+    if run_id is None:
+        if log_path is not None:
+            run_id = log_path.stem
+        elif tower_log_path is not None:
+            run_id = tower_log_path.stem
+        else:
+            run_id = source
     # Precompute triadic states and structural stress (for bad_day signal)
     pre_states = compute_triadic_state(price)
     p_bad, bad_flag = compute_structural_stress(price, pre_states)
@@ -846,6 +863,13 @@ def run_trading_loop(
         }
         rows.append(row)
         emit_step_row(row, log_path)
+        if tower_log_path:
+            tower_row = build_tower_projection(
+                row,
+                run_id=run_id,
+                posture_stable_min=posture_stable_min,
+            )
+            emit_tower_row(tower_row, tower_log_path)
         if trade_closed and trade_log_path:
             trade_row = {
                 "t": t,
