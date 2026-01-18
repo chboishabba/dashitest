@@ -31,6 +31,7 @@ Group D - boundary certificate + Phase-7.3 horizon sweep (M7):
 Group E - readiness gate (M8):
 - ready_count / required / window.
 - phase8_gate.open and reason codes.
+- M8.precheck (non-binding) from boundary stability + Phase-8 readiness + actuator/ledger readiness.
 
 Group F - witness / capital (M9):
 - refusal state (NONE/HOLD/BAN).
@@ -74,6 +75,7 @@ The runner emits a tower projection log alongside the per-step CSV. It is NDJSON
 - Default path: `logs/trading_log*_tower.ndjson` (same stem as the CSV log).
 - Disable emission with `run_trader.py --no-tower-log`.
 - Fields are null when the projection is not computed. Each P_k carries `available` to avoid semantic leakage.
+- M8 is emitted as a precheck-only projection until Phase-7.3 horizon sweeps are wired.
 - If the tower log is missing, the internals view stays empty and prints a one-time warning instead of failing.
 
 Example record (current emission contract):
@@ -127,6 +129,22 @@ Example record (current emission contract):
     }
   },
   "P8": {"available": false, "ready_count": null, "required": null, "window": null, "open": null, "reason": null, "A8": null},
+  "M8": {
+    "available": true,
+    "precheck": false,
+    "open": false,
+    "A8": null,
+    "components": {
+      "boundary_stable": false,
+      "phase8_ready": false,
+      "actuator_mode_fixed": false,
+      "ledger_ready": false,
+      "horizon_certified": false
+    },
+    "horizon": {"tau_s": null, "rho_A": null, "rho_null": null, "net_positive": null, "robust_eps": null},
+    "reason": "missing_horizon_cert",
+    "run_id": "trading_log"
+  },
   "P9": {
     "available": true,
     "permission": 1,
@@ -146,6 +164,7 @@ Notes:
 - P1 uses quotient feature proxies until kappa/eps closure is computed.
 - P6 proxies come from `1 - p_bad` and `pred_edge`; they are labeled as proxies and keep `available=false`.
 - P7 boundary certificate remains empty until Phase-7.3 horizon sweeps are wired; boundary gate metrics are logged under `boundary_gate` as a proxy only.
+- M8.precheck is diagnostic only and does not open promotion; M8.open stays false until horizon certification is implemented.
 
 ## Phase-8 readiness overlay (optional)
 
@@ -167,4 +186,29 @@ PYTHONPATH=. python scripts/merge_tower_phase8.py \
   --tower-log logs/trading_log_tower.ndjson \
   --phase8-log logs/phase8/phase8_gate.log \
   --out logs/trading_log_tower_phase8.ndjson
+```
+
+## M8 -> M9 handoff invariants (must-hold)
+
+- I1 Promotion implies prerequisites: `M8.open -> M8.precheck` (else clamp to HOLD and log).
+- I2 Promotion implies horizon certificate: `M8.open -> M8.components.horizon_certified == true`.
+- I3 Phase-6 closure dominates: `phase6_closed -> M8.open == false` and `M9.action == 0`.
+- I4 M8 is supervisory only: it may gate action emission but never mutates P1..P7, posture, or learner outputs.
+- I5 Action justification chain: if `M9.action.m == 1`, record `M8` snapshot + `P7` summary + witness state.
+- I6 Witness dominates promotion: `M9.refusal in {HOLD,BAN} -> M9.action == 0` even if `M8.open`.
+- I7 Idempotence: replaying the same tower rows yields identical `M8.*` and `M9` clamps (no hidden state).
+- I8 Separation of evidence vs accounting: Phase-7.3 evidence is capital-free; capital updates never feed back into Phase-7.3.
+
+Reference checker: `trading_io/m8_m9_invariants.py` provides a record-level validator for these rules.
+
+## Near-miss ranking (post-hoc)
+
+Use `trading_io/near_miss_rank.py` to rank windows where M8 prerequisites nearly hold or M9 refuses.
+
+Example:
+
+```
+PYTHONPATH=. python -m trading_io.near_miss_rank \
+  --tower-log logs/trading_log_tower.ndjson \
+  --out logs/near_miss/near_miss_rank_YYYYMMDD_HHMMSS.ndjson
 ```

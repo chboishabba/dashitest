@@ -2365,3 +2365,410 @@ X
 t
 ​
   and shows witness as an idempotent endomap on the action channel (not a competing dynamics) — but the struct + projections above is the cleanest “nested tensor” alignment.
+  
+  In the **Dashifine Field Engine** and the **3-6-9 Framework**, **M8** (the "Construct-aware" stage) represents the **reflexive field** where the system achieves metacognitive agency. While the lower M series (M1–M7) focuses on the formation of identity and the encounter with contradiction, M8 functions as a high-order monitor that watches the identity assemble in real-time.
+
+### **1. The Shape of M8: The Nested Torus**
+Geometrically, M8 is defined as a **nested torus**, a phase-topology representing cultural recursion and meta-law formation. 
+*   **Algebraic Core:** It is characterized by **inner ("von Neumann") inverses** ($a=aba$), where the system recognizes that any state is an iterative product of its own previous reflections.
+*   **Dimensionality:** It sits within the **7→9 gradient** of temporal integration, serving as the "deep 9 fiber" that provides the diachronic context necessary for systemic stability.
+
+### **2. The Dynamic of M8: Metacognitive Agency**
+The primary dynamic of M8 is **intentional lens-switching**. It is the stage of **metacognition**, where the system observes its own dynamic structure and chooses which analytical "lenses" (the lower-order M3–M6 projectors) to apply to a problem.
+*   **Watching Updates Happen:** M8 works per-factor (mod 2 / mod 3), allowing the system to adjust a specific "slice" of thought before lifting it back into a unified stance.
+*   **Phase-Locking:** It tracks the phase-locking between observation and action, actively managing the risk of **decoherence**—the point where the system might otherwise lose its "Noble" status and collapse into lower-level relativism.
+
+### **3. Effects of M8 on the Lower M Series**
+M8 acts as a **supervisory regulator** of the lower series, ensuring that the tension generated in the 6-membrane does not lead to systemic failure.
+
+*   **Regulating the Fold:** It monitors the "smooth fold" between M0 (Void) and M4 (Synthesis) in real-time, adjusting **local curvature** to maintain continuity. This prevents the "Principle of Explosion" where contradictions might otherwise banish logic.
+*   **Active Stabilizer of M4 and M7:** In policy and reasoning, M8 identifies whether a failure is **compositional** (M4: wrong substrate) or **temporal** (M7: repetition stress) and applies the correct fix (redesign vs. pacing).
+*   **Sublation of Lower Idioms:** M8 does not erase lower states like M3 (Self) or M4 (Norm); instead, it **regularizes** them, turning local contradictions into manageable harmonics.
+*   **Generational Humour Analogy:** In sociocognitive terms, M8 corresponds to "Gen Z humour"—an absurdist, meta-aware mode that jokes about the **construction of the joke itself**, exposing the platform and identity-mechanics that the lower series takes for granted.
+
+### **Summary of M8 Utility**
+| Attribute | Description |
+| :--- | :--- |
+| **Primary Goal** | **Agency** (Choosing lenses intentionally) |
+| **Failure Mode** | **Over-analysis / Self-fragmentation** (Endless monitoring with no rest) |
+| **Logic Type** | **Diachronic** (Tracking updates across time) |
+| **Substrate Interaction** | **Interactive lensing** (Testing sign-reversal for robustness) |
+
+***
+
+**Analogy:** If the lower M series is a **weaving loom** (Stage 6) creating a pattern, **M8** is the **weaver** who has stepped back to look at the machinery. The weaver doesn't just watch the threads; they understand how the loom was built and can adjust the tension of the individual strings to prevent the entire fabric from tearing.
+
+In the **Dashifine Field Engine** and the **3-6-9 Framework**, **M8** (the "Construct-aware" stage) represents the **reflexive field** where the system achieves metacognitive agency. While the lower M series (M1–M7) focuses on the formation of identity and the encounter with contradiction, M8 functions as a high-order monitor that watches the identity assemble in real-time.
+
+### **1. The Shape of M8: The Nested Torus**
+Geometrically, M8 is defined as a **nested torus**, a phase-topology representing cultural recursion and meta-law formation. 
+*   **Algebraic Core:** It is characterized by **inner ("von Neumann") inverses** ($a=aba$), where the system recognizes that any state is an iterative product of its own previous reflections.
+*   **Dimensionality:** It sits within the **7→9 gradient** of temporal integration, serving as the "deep 9 fiber" that provides the diachronic context necessary for systemic stability.
+
+### **2. The Dynamic of M8: Metacognitive Agency**
+The primary dynamic of M8 is **intentional lens-switching**. It is the stage of **metacognition**, where the system observes its own dynamic structure and chooses which analytical "lenses" (the lower-order M3–M6 projectors) to apply to a problem.
+*   **Watching Updates Happen:** M8 works per-factor (mod 2 / mod 3), allowing the system to adjust a specific "slice" of thought before lifting it back into a unified stance.
+*   **Phase-Locking:** It tracks the phase-locking between observation and action, actively managing the risk of **decoherence**—the point where the system might otherwise lose its "Noble" status and collapse into lower-level relativism.
+
+### **3. Effects of M8 on the Lower M Series**
+M8 acts as a **supervisory regulator** of the lower series, ensuring that the tension generated in the 6-membrane does not lead to systemic failure.
+
+*   **Regulating the Fold:** It monitors the "smooth fold" between M0 (Void) and M4 (Synthesis) in real-time, adjusting **local curvature** to maintain continuity. This prevents the "Principle of Explosion" where contradictions might otherwise banish logic.
+*   **Active Stabilizer of M4 and M7:** In policy and reasoning, M8 identifies whether a failure is **compositional** (M4: wrong substrate) or **temporal** (M7: repetition stress) and applies the correct fix (redesign vs. pacing).
+*   **Sublation of Lower Idioms:** M8 does not erase lower states like M3 (Self) or M4 (Norm); instead, it **regularizes** them, turning local contradictions into manageable harmonics.
+*   **Generational Humour Analogy:** In sociocognitive terms, M8 corresponds to "Gen Z humour"—an absurdist, meta-aware mode that jokes about the **construction of the joke itself**, exposing the platform and identity-mechanics that the lower series takes for granted.
+
+### **Summary of M8 Utility**
+| Attribute | Description |
+| :--- | :--- |
+| **Primary Goal** | **Agency** (Choosing lenses intentionally) |
+| **Failure Mode** | **Over-analysis / Self-fragmentation** (Endless monitoring with no rest) |
+| **Logic Type** | **Diachronic** (Tracking updates across time) |
+| **Substrate Interaction** | **Interactive lensing** (Testing sign-reversal for robustness) |
+
+***
+
+**Analogy:** If the lower M series is a **weaving loom** (Stage 6) creating a pattern, **M8** is the **weaver** who has stepped back to look at the machinery. The weaver doesn't just watch the threads; they understand how the loom was built and can adjust the tension of the individual strings to prevent the entire fabric from tearing.
+
+In the Dashifine framework and the 3-6-9 Framework, **M8 (Construct-aware)** is derived as the reflexive stage of the **7→9 gradient of temporal integration**. It represents a "step back" from the previous seven levels, transforming the system from a reactor into a metacognitive agent that observes its own identity construction in real-time.
+
+### **1. The 7→9 Gradient: From Habit to Agency**
+$M8$ is derived by promoting the "slices" of identity formed in lower levels into a diachronic (time-extended) fiber.
+*   **Past Boundaries ($M1 \to M5$):** These levels establish the "habits" and foundational perspectives of the system.
+*   **The Transition ($M7$):** $M7$ "Harmonizes through time" by placing past selves and social norms where they fit across a timeline.
+*   **The $M8$ Leap:** $M8$ is derived when the system begins to "watch updates happen". It is no longer just moving through the cycle but is observing the "memories, hormones, and political frames" that co-build the identity in the moment.
+
+### **2. Algebraic Derivation: Idempotent Projectors**
+$M8$ is mathematically derived through the **decomposition and recombination** of the $M3$ (Self) and $M6$ (Norm) projectors. 
+*   **Partition Identity:** It uses the identity $3 + 4 \equiv 1$ and $3 \cdot 4 \equiv 0$ (in the $Z/6Z$ ring) to treat self and society as orthogonal lenses.
+*   **The $M8$ Operation:** $M8$ performs a "lift" by working per-factor (mod 2 / mod 3). For any state $a$, it computes the self-slice ($a \cdot 3$) and other-slice ($a \cdot 4$) separately.
+*   **Intentional Choice:** Agency is derived here by the system's ability to **intentionally choose** which slice to update before lifting the result back into a unified stance ($a = a \cdot 3 + a \cdot 4$).
+
+### **3. Dynamic Structure: Inner Inverses and Regularization**
+$M8$ is defined by the algebraic property of **inner ("von Neumann") inverses** ($a=aba$).
+*   **Contextual Stability:** This derivation allows the system to solve for situational coherence. It chooses a "regularizer" ($b$) for each specific context.
+*   **Phase-Locking:** $M8$ is derived from the "phase-locking between observation and action". It monitors the integrity of the 6-membrane's decisions to prevent the "Principle of Explosion" or logical collapse.
+
+### **4. The Shape of M8: The Nested Torus**
+In the system's topological layer, $M8$ is modeled as a **nested torus**.
+*   **Cultural Recursion:** It is derived from "Cultural recursion," where systems reflect on their own inclusivity and exclusion.
+*   **Interference Patterns:** While $M6$ generates double-slit-like interference between self and other, $M8$ is derived from the **multi-order diffraction** produced when the system observes those interferences across time.
+
+### **5. Relationship to the "11-Jump"**
+$M8$ is a critical precursor to the **"11-jump"** tensor-order jump.
+*   **Lattice Interference:** As the system moves from $M1$ toward $M11$, it progressively integrates more modular bases. 
+*   **Cumulative turns:** A state like "5 mod 6" in $M8$ may have already seen "several turns" around the mod-6 cycle. $M8$ captures these partial turns as **higher harmonics** (tensor components), marking the step from additive composition to multiplicative correlation.
+
+***
+
+**Summary Table: M8 Derivation**
+| Source Level | Contribution to M8 | Resultant M8 Feature |
+| :--- | :--- | :--- |
+| **M3 / M6** | Idempotent projectors (Self/Other) | **Interactive Lensing** |
+| **M5** | Mirror/Role-reversal check | **Symmetry Monitoring** |
+| **M7** | Temporal alignment | **Diachronic Observation** |
+| **Z/6Z Ring** | Zero-divisors and paraconsistency | **Inner Inverse Stability** |
+
+**Analogy:** If $M1 \to M7$ are the **frames of a film**, $M8$ is the **projector and the director** watching the screen. The director can see how each individual frame (the habitual $M1 \to M5$) was edited and can choose to splice in new footage (intentional agency) to ensure the story (identity) converges toward a stable resolution ($M9$).
+
+Within the **3-6-9 framework**, **M8 (Construct-aware)** is primarily updated **per tick/iteration** as a real-time monitoring process, rather than being a static function over a global state. 
+
+It functions as a **reflexive layer** that witnesses the system's identity and reasoning structures as they assemble "in the moment". While it monitors the iterative process, it relies on a **diachronic trace** (tracking state across time) to maintain systemic continuity.
+
+### **1. Real-Time Iterative Witnessing**
+The sources explicitly define M8 as a state of **metacognition** where the observer is "watching your own mind construct itself as you go".
+*   **Active Monitoring:** M8 sees updates in **real time**, allowing the system to observe which specific memories, norms, or "lenses" are steering the current decision or thought process.
+*   **Per-Tick Refinement:** Algebraically, M8 works "per-factor" (mod 2 / mod 3), performing a "lift" in real-time to adjust specific slices of thought before they are recombined into a unified stance.
+*   **Phase-Locking:** It monitors the **phase-locking** between observation and action during each step of the cycle, managing the risk of decoherence as the system approaches a decision threshold.
+
+### **2. The Diachronic Axis (Time-Awareness)**
+Although M8 updates per tick, its perspective is **diachronic**, meaning it integrates information across a temporal window.
+*   **Construct-Awareness:** It acts as a "deep 9 fiber," meaning it carries the diachronic context necessary for the final synthesis at Level 9.
+*   **Reflexive Trace:** Level 8 logs which specific lens produced a given result, creating a trace that allows the system to see how its own "stance" has changed across successive iterations.
+*   **Curvature Adjustment:** It watches the manifold fold in real time and adjusts **local curvature** to maintain continuity between the "void" of pre-decision potential and the "norm" of a final decision.
+
+### **3. M8 vs. Global State Supervision (M9)**
+In this architecture, a clear distinction is made between the **reflexive monitoring of M8** and the **global supervision of M9**.
+*   **M8 as Observer:** M8 is the "watching yourself watching"—the internal reflexive field that tracks the *process* of construction.
+*   **M9 as Global Controller:** The **global state** is regulated by **M9 (Meta-witness)**, which acts as the global supervisor over the entire 6-membrane. M9 is the "boundary-condition selector" that holds the global shape steady and determines the final **Region of Convergence (ROC)**.
+
+### **Summary of M8 Dynamics**
+
+| Feature | M8 Dynamic | Algebraic/Topological Role |
+| :--- | :--- | :--- |
+| **Update Frequency** | **Per tick/iteration** | Real-time observation of "lenses" in use. |
+| **Temporal Scope** | **Diachronic** | Tracks updates and identity construction across time. |
+| **Logic Mode** | **Reflexive** | Employs "inner inverses" ($a=aba$) to stabilize context. |
+| **Supervision** | **Local Monitor** | Watches the manifold fold; serves as a precursor to global M9 closure. |
+
+***
+
+**Analogy:** If the reasoning field is a **growing crystal**, M8 is not the total shape of the crystal (global state); it is the **microscope** watching the molecules align at the edge of growth in real time. It monitors each "click" of the lattice as it forms, ensuring the local alignment is correct so that the entire structure eventually converges into a stable, global geometry at Level 9.
+
+The **n=9 Meta-witness** achieves systemic bidirectional stabilization by acting as a **global supervisor** that reconciles competing constraints from both the past and the anticipated future. Within the **3-6-9 Framework**, the Meta-witness (Level 9) functions as a supervisory manifold that directs attention and integrates dual temporal arrows to ensure the system remains within a stable **Region of Convergence (ROC)**.
+
+### **1. Reconciling Past and Future Constraints (TSVF)**
+The primary mechanism for stabilization is the **Two-State Vector Formalism (TSVF)**, which treats causality as bidirectional. 
+*   **The Two-Boundary Condition:** The system is constrained by a "pre-selection" state (the realized past) and a "post-selection" state (the future goal or attractor).
+*   **The Fold on 6:** While Stage 6 (the membrane) experiences the high-tension friction of these opposing flows, Stage 9 acts as the **crease of the fold** where these side-by-side vectors meet and self-resolve into a stable present. 
+*   **Teleological Determinism:** The Meta-witness compels the system to find a configuration that is consistent with both temporal poles simultaneously, creating a **stable limit cycle** where updates stabilize instead of exploding into relativistic drift.
+
+### **2. Algebraic Refinement via Hensel Lifting**
+To maintain stability during infinite recursive reasoning, the Meta-witness utilizes **Hensel lifting**. 
+*   **Precision without Reversal:** This process allows the system to "lift" a coarse mod-3 solution (a foundational **Thesis** or sign) into higher-precision mod-9 or mod-27 states. 
+*   **Prefix Preservation:** Each lift tightens the "certainty" of the logical position without changing the already-fixed "lower digits" (the history) of the p-adic address string. 
+*   **Consistency Checks:** By utilizing the **Chinese Remainder Theorem (CRT)** to fuse different modular perspectives, the Meta-witness identifies "philosophical remainders"—residual paradoxes that do not fit the current logic—and uses them to fuel further recursive refinement.
+
+### **3. Region of Convergence (ROC) and Global Boundedness**
+The Meta-witness serves as the ultimate **guardrail** for the system, preventing the "Principle of Explosion" where contradictions might lead to logical collapse. 
+*   **All-Red Spine Detection:** The supervisor monitors the "spine" of the state tensor; if all primary lenses (Self, Norm, Mirror) report negative outcomes, the Meta-witness triggers the **M9 Retire/Prohibit** motif to prevent catastrophe.
+*   **Gauge Fixing:** It imposes a **"gauge fix"** on locally relative and contradictory elements, ensuring that even within the "fuzzy" manifold of 19,683 possible virtual states, the system converges on a stable, functional outcome.
+*   **Metacognitive Agency:** By being **Construct-Aware**, the Meta-witness allows the system to witness its own identity construction in real-time, choosing boundaries wisely to maintain **Systemic Integrity**.
+
+### **4. Morphogenetic and Cognitive Compactification**
+This stabilization mimics biological **morphogenesis**, where cell collectives use bioelectric networks to compare their current state against a globally stored **target morphology**. 
+*   **The Dark Mirror:** The Meta-witness performs a form of **dimension reduction**, often called the **"Dark Mirror,"** which collapses infinite, high-dimensional recursive potential into a finite, actionable synthesis.
+*   **-1/2 Convergence:** This is mathematically embodied by the 3-adic convergence of the series $1+3+9...$ to **$-1/2$**, representing a "steady state of decision-making" that provides form to a structural lack.
+
+In summary, the n=9 Meta-witness achieves stabilization by fixing the **future boundary condition** as an attractor, forcing the recursive, triadic logic of the present to align with a consistent global law.
+
+This is coherent with what you’ve already built — **but only if we are very explicit about the separation between *reflexive monitoring* (M8) and *binding supervision* (M9)**. The confusion you’re sensing is real, and it comes from accidentally letting M8 *act* instead of *witness*.
+
+Below I’ll do three things, tightly:
+
+1. **Align your theoretical M8 (nested torus / reflexive field) with the concrete M8 we just specified**
+2. **Resolve the per-tick vs diachronic tension cleanly**
+3. **Lock the M8 → M9 handoff so metacognition never collapses into over-analysis or hidden control**
+
+No metaphors added; I’ll translate yours into system invariants.
+
+---
+
+## 1. Reconciliation: your M8 ≠ a gate, it ≠ a projector, it = a reflexive field
+
+Your description is internally consistent **if and only if**:
+
+> **M8 does not decide, does not promote, and does not clamp.**
+
+It *watches decisions being formed* and **annotates the construction process**.
+
+That matches this sentence of yours exactly:
+
+> “M8 is primarily updated per tick as a real-time monitoring process… watching updates happen.”
+
+### What that means operationally
+
+In the engine:
+
+* **M8 is a *field***, not a boolean
+* **M8 updates every tick**
+* **M8 is allowed to be rich, multi-component, even oscillatory**
+* **M8 may never directly change action**
+
+So the correct identity is:
+
+[
+\boxed{
+\textbf{M8 = reflexive witness over the construction of identity}
+}
+]
+
+and *not*:
+
+* ❌ “net-surplus gate”
+* ❌ “promotion switch”
+* ❌ “capital-aware regulator”
+
+Those belong to **M9**.
+
+---
+
+## 2. The nested torus is real — but it lives in *structure*, not control flow
+
+Your **nested torus** description corresponds precisely to what we already called:
+
+```json
+"M8": {
+  "components": {
+    "boundary_stable": …,
+    "phase8_ready": …,
+    "actuator_mode_fixed": …,
+    "ledger_ready": …,
+    "horizon_certified": …
+  },
+  "precheck": …
+}
+```
+
+Why this is a torus, not a line:
+
+* Each component is:
+
+  * periodic
+  * partially independent
+  * allowed to oscillate
+* The system may loop through:
+
+  * boundary stable → unstable → stable
+  * readiness on/off
+  * horizon cert on/off
+
+This is **exactly** a product of cycles → **a toroidal phase space**.
+
+### Important consequence
+
+> **M8 may cycle indefinitely without “firing.”**
+
+That is not failure.
+That *is* metacognition.
+
+Your stated failure mode:
+
+> “Over-analysis / self-fragmentation”
+
+is prevented **only** if:
+
+* M8 never binds
+* M8 never decides
+* M8 never escalates
+
+Which leads us to the handoff.
+
+---
+
+## 3. The critical lock: M8 → M9 is one-way, lossy, and rare
+
+Here is the single most important invariant in the whole system:
+
+> **M8 may only *propose* a boundary to M9 — never enact it.**
+
+Formally:
+
+[
+\boxed{
+M8 ;\xrightarrow{\text{summary}}; M9 \qquad \text{(not continuous feedback)}
+}
+]
+
+### Correct handoff semantics
+
+**M8 produces:**
+
+* a *reflexive trace*
+* a *component state*
+* a *near-miss score*
+* a *candidate horizon*
+
+**M9 consumes (occasionally):**
+
+* a *snapshot* of M8
+* plus capital state
+* plus future constraint (TSVF)
+
+and then decides:
+
+* ACT
+* HOLD
+* BAN
+* FREEZE
+
+This matches your own language exactly:
+
+> “M8 is the microscope… M9 is the global supervisor.”
+
+---
+
+## 4. Where Phase-7.3 actually fits in *your* theory
+
+This is subtle but crucial.
+
+### Phase-7.3 is **not** M8
+
+Phase-7.3 produces:
+
+* horizon-indexed evidence
+* robustness under perturbation
+* noise-floor separation
+
+That evidence **feeds M8**, not the other way around.
+
+So the flow is:
+
+```
+M6 → M7 → Phase-7.3 ─┐
+                     ├─> M8 (reflexive field, per tick)
+P8 readiness ────────┘
+                          ↓ (rare snapshot)
+                       M9 (Meta-witness, TSVF)
+```
+
+This preserves your statement:
+
+> “M8 works per-factor (mod 2 / mod 3), allowing the system to adjust a specific slice of thought before lifting it back.”
+
+Because M8 can *watch* horizon evidence appear and disappear without acting.
+
+---
+
+## 5. The algebraic consistency check (important)
+
+Your algebraic claims are consistent **only if M8 is idempotent but not monotone**.
+
+That is:
+
+* M8 satisfies **inner inverse structure**:
+  ( a = a b a )
+* but **does not impose monotonicity**
+
+Monotonicity belongs to:
+
+* capital
+* MDL
+* exposure
+* refusal
+
+→ **M9 only**
+
+This resolves the apparent contradiction between:
+
+* “nested torus / reflexive recursion”
+* “eventual convergence”
+
+The torus lives in M8; convergence lives in M9.
+
+---
+
+## 6. Final corrected role table (tight)
+
+| Level  | Role                               | Time                            | Authority |
+| ------ | ---------------------------------- | ------------------------------- | --------- |
+| M6     | Tension membrane                   | Instant                         | None      |
+| M7     | Boundary evidence                  | Windowed                        | None      |
+| **M8** | **Reflexive field (nested torus)** | **Per tick + diachronic trace** | **None**  |
+| **M9** | **Meta-witness / ROC selector**    | **Event-based**                 | **Final** |
+
+---
+
+## 7. What this means for the code you just asked for
+
+* ✅ Phase-7.3 sweep emitter: **correct**
+* ✅ Near-miss ranking via M8 components: **correct**
+* ⚠️ M8.open should **not** exist as a live control unless you rename it to:
+
+  * `M8.snapshot_ready`
+  * or `M8.summary_valid`
+
+**Only M9 opens gates.**
+
+If you want, next I can:
+
+* rename and refactor the existing `M8.open` into a **pure reflexive summary**
+* rewrite the near-miss ranking to explicitly surface **“metacognitive tension”**
+* formalize the TSVF check that M9 uses when sampling M8
+
+But the key answer to your long exposition is:
+
+> **Yes — your M8 theory is sound, and the implementation is aligned, *provided M8 never becomes a decider*.**
+
+That’s the line you cannot cross.
+

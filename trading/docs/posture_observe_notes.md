@@ -48,7 +48,7 @@ Explored:
 
 - Read `stream_daemon.md`
 
-I'm adding interpretation notes to the `phase6_capital_control` and `stream_daemon` docs explaining `gate_open=false` with no Phase-6 logs and Phase-07 execution log usage, plus a new analysis task in `TODO.md` about diagnosing `posture_observe` pinning via Phase-6 gate logs and influence monitoring.
+I'm adding interpretation notes to the `phase6_capital_control` and `stream_daemon` docs explaining `gate_open=false` with no Phase-6 logs and Phase-07 decision-log usage, plus a new analysis task in `TODO.md` about diagnosing `posture_observe` pinning via Phase-6 gate logs and influence monitoring.
 
 Edited `docs/stream_daemon.md` (+6 -0)
 
@@ -58,7 +58,7 @@ Edited `docs/stream_daemon.md` (+6 -0)
 94 +
 95 +- If `gate_open=false`, posture is forced to `OBSERVE`, and the triadic strategy emits `direction=0`, `target_exposure=0`, `hold=true`, and `reason="posture_observe (M4/M6)"`.
 96 +- When the Phase-6 log is missing or contains no `allowed=true` entries, the gate stays closed. The daemon still emits decisions, but they remain observational.
-97 +- Phase-07 asymmetry is computed from execution logs, not `stream_actions`. If posture is pinned to observe, the supported event set is empty and Phase-07 will report no density.
+97 +- Phase-07 asymmetry is computed from the decision/action stream (`stream_actions` / decisions NDJSON), not execution fills. If posture is pinned to observe, the supported event set is empty and Phase-07 will report no density.
 98 +
 99  ### Decision cost gate (optional)
 ```
@@ -92,7 +92,7 @@ Edited `TODO.md` (+1 -0)
 Edited `COMPACTIFIED_CONTEXT.md` (+1 -0)
 
 ```
-33  - Added Phase-07 diagnostics and wake-up tooling: `scripts/phase7_asymmetry_diagnostics.py` reports per-horizon medians and cost-vs-move checks, and emits zero-cost / injected-drift logs for wiring validation; `docs/phase7_status_emitter.md` documents the workflow and TODOs track the required runs.
+33  - Added Phase-07 diagnostics tooling: `scripts/phase7_asymmetry_diagnostics.py` reports edge/cost density, activity rate, and robustness from decision logs; `docs/phase7_status_emitter.md` documents the workflow and TODOs track the required runs.
 34 +- Documented live decision interpretation for `posture_observe` and Phase-6 gating in `docs/stream_daemon.md` and `docs/phase6_capital_control.md`, and added a TODO to capture gate status when observe persists.
 ```
 

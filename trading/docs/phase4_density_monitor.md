@@ -24,12 +24,12 @@ You can tweak those parameters to make the gate more or less conservative, but t
 
 Phase-07 is the asymmetry census: Phase-4 cannot open unless Phase-07 reports persistent readiness. The monitor reads a JSONL status log (default `logs/phase7/density_status.log`) and requires `phase7_ready=true` to appear in at least `--phase7-persistence-required` of the last `--phase7-persistence-window` entries for the same `target`.
 
-The emitter comes from `scripts/phase7_status_emitter.py`, which follows the definitions in `docs/boundary_stable_eigen.md` and writes the contract described in `docs/phase7_status_emitter.md`. Phase-04 only unblocks after the net asymmetry density survives the boundary cost proxy.
+The emitter comes from `scripts/phase7_status_emitter.py`, which follows the definitions in `docs/boundary_stable_eigen.md` and writes the contract described in `docs/phase7_status_emitter.md`. Phase-04 only unblocks after the action-channel asymmetry density survives the boundary cost proxy.
 
 Expected JSONL fields (one per line):
 
 ```json
-{"timestamp": "2024-01-01T00:00:00Z", "target": "BTC", "phase7_ready": true, "phase7_reason": "asymmetry_density_ok", "phase7_metrics": {"density": 0.62}}
+{"timestamp": "2024-01-01T00:00:00Z", "target": "BTC", "phase7_ready": true, "phase7_reason": "asymmetry_density_ok", "phase7_metrics": {"rho_A": 1.42, "sum_edge": 12.0, "sum_cost": 8.4}}
 ```
 
 If the Phase-07 log is missing or does not contain matching entries for the target, the Phase-4 gate stays closed with a `phase7_status_missing` blocking reason.

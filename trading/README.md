@@ -75,6 +75,12 @@ by default; overwriting is not allowed.
   Command: `PYTHONPATH=. python scripts/compare_trade_alignment.py --log logs/trading_log.csv --trade-log logs/trade_log.csv --top-k 1`
 - `scripts/merge_tower_phase8.py`: Merge Phase-8 audit readiness into a tower projection NDJSON log.  
   Command: `PYTHONPATH=. python scripts/merge_tower_phase8.py --tower-log logs/trading_log_tower.ndjson --phase8-log logs/phase8/phase8_gate.log --out logs/trading_log_tower_phase8.ndjson`
+- `scripts/phase73_horizon_sweep.py`: Phase-7.3 horizon sweep over tower logs (rho_A vs tau, robustness).  
+  Command: `PYTHONPATH=. python scripts/phase73_horizon_sweep.py --tower-log logs/trading_log_tower.ndjson --symbol BTCUSDT --out logs/phase73/phase73_sweep_BTCUSDT.ndjson`
+- `trading_io/near_miss_rank.py`: Rank M8/M9 near-miss windows from a tower log.  
+  Command: `PYTHONPATH=. python -m trading_io.near_miss_rank --tower-log logs/trading_log_tower.ndjson --out logs/near_miss/near_miss_rank_YYYYMMDD_HHMMSS.ndjson`
+- `trading_io/m8_m9_invariants.py`: Validate M8 -> M9 handoff invariants on a tower log.  
+  Command: `PYTHONPATH=. python -m trading_io.m8_m9_invariants --tower-log logs/trading_log_tower.ndjson`
 - `scripts/contextual_news.py`: Fetch contextual news/stress signals (Reuters RSS, TradingEconomics, yfinance).  
   Command: `PYTHONPATH=. python scripts/contextual_news.py` (prints signals for today; use `contextual_events()` in code for custom dates)
 - `scripts/emit_news_windows.py`: Find bad windows and fetch news (GDELT/NewsAPI/RSS).  

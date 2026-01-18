@@ -35,7 +35,7 @@ Add an explicit capital state machine: log \(C_t\), enforce \(\Delta x_t \le f(C
 - Surplus: \(\Pi_t = \Pi^{\text{m2m}}_t - \Lambda^{\text{fric}}_t\).
 - Capital update: \(C_t = C_{t-1} + \Pi_t - \Lambda^{\text{risk}}_t\); clamp to \(C_{\min}\).
 - Budgeted exposure clamp: \(B_t = \beta C_t\); enforce \(|x_t| \le \min(x_{\max}, B_t/(C_t(\kappa_t + \epsilon)))\). If costs dominate, exposure collapses automatically.
-- Phase-07 framing: \(\rho_A^{\text{net}}(W) = \operatorname{median}_{t\in W^+}(x_{t-1}r_t - \kappa_t|\Delta x_t|)\); Phase-07 ready ⇔ \(\rho_A^{\text{net}}(W) > 0\) with persistence.
+- Phase-07 framing: \(\rho_A(W) = \sum_t x_{t-1}\Delta m_t / (\sum_t \kappa_t m_t|\Delta x_t| + \epsilon)\); Phase-07 ready ⇔ \(\rho_A(W) \ge \theta_A\) with persistence and robustness. Capital accounting uses return-minus-cost separately.
 
 ## Meta-Witness refusal conditions (binding)
 
@@ -43,7 +43,7 @@ Add an explicit capital state machine: log \(C_t\), enforce \(\Delta x_t \le f(C
 - **R1 Net surplus ≤ 0**: phase7_ready=false (`net_asymmetry_nonpositive`, etc.) → HOLD; if turnover continues, escalate to BAN.
 - **R2 Sparse support**: \( |W^+|<N_{\min} \) or \(\alpha(W)<\alpha_{\min}\) → HOLD/OBSERVE (no unblock by silence).
 - **R3 Capital drawdown breach**: drawdown > limit → BAN, freeze learning, require re-certification.
-- **R4 Cost-dominated churn**: high turnover with \(\rho_A^{\text{net}}\le 0\) → BAN, flag churn failure.
+- **R4 Cost-dominated churn**: high turnover with \(\rho_A \le \theta_A\) → BAN, flag churn failure.
 - **R5 Policy inconsistency**: refusal active but action emitted → kill-switch (force BAN) and emit `SPECIAL_CODE=PARADOX`.
 
 ## Wiring into existing paths

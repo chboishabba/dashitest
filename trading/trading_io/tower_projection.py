@@ -25,6 +25,31 @@ def _safe_int(value: Any) -> int | None:
         return None
 
 
+def _safe_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "t", "1", "yes", "y"}:
+            return True
+        if lowered in {"false", "f", "0", "no", "n"}:
+            return False
+        return None
+    try:
+        return bool(int(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _pick_first(data: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        if key in data:
+            return data.get(key)
+    return None
+
+
 def _clean_json(value: Any) -> Any:
     if value is None:
         return None
@@ -78,6 +103,30 @@ def build_tower_projection(
     permission = _safe_int(step_row.get("permission"))
     action_t = _safe_int(step_row.get("action_t"))
     boundary_abstain = _safe_int(step_row.get("boundary_abstain"))
+    boundary_stable = None if boundary_abstain is None else boundary_abstain == 0
+    phase8_open = _safe_bool(_pick_first(step_row, ("phase8_open", "phase8_ready", "phase8_gate_open")))
+    actuator_mode_fixed = _safe_bool(step_row.get("actuator_mode_fixed"))
+    ledger_ready = _safe_bool(step_row.get("ledger_ready"))
+    horizon_certified = _safe_bool(step_row.get("horizon_certified"))
+    m8_precheck = (
+        boundary_stable is True
+        and phase8_open is True
+        and actuator_mode_fixed is True
+        and ledger_ready is True
+    )
+    m8_reason = None
+    if boundary_stable is False:
+        m8_reason = "boundary_unstable"
+    elif phase8_open is False:
+        m8_reason = "phase8_closed"
+    elif actuator_mode_fixed is False:
+        m8_reason = "actuator_mode_unfixed"
+    elif ledger_ready is False:
+        m8_reason = "ledger_missing"
+    elif None in {boundary_stable, phase8_open, actuator_mode_fixed, ledger_ready}:
+        m8_reason = "missing_prereqs"
+    elif horizon_certified in {None, False}:
+        m8_reason = "missing_horizon_cert"
     if permission == -1:
         refusal = "BAN"
     elif permission == 0 or boundary_abstain == 1 or action_t == 0:
@@ -157,6 +206,28 @@ def build_tower_projection(
             "open": None,
             "reason": None,
             "A8": None,
+        },
+        "M8": {
+            "available": True,
+            "precheck": m8_precheck,
+            "open": False,
+            "A8": None,
+            "components": {
+                "boundary_stable": boundary_stable,
+                "phase8_ready": phase8_open,
+                "actuator_mode_fixed": actuator_mode_fixed,
+                "ledger_ready": ledger_ready,
+                "horizon_certified": horizon_certified if horizon_certified is not None else False,
+            },
+            "horizon": {
+                "tau_s": None,
+                "rho_A": None,
+                "rho_null": None,
+                "net_positive": None,
+                "robust_eps": None,
+            },
+            "reason": m8_reason,
+            "run_id": run_id or step_row.get("tape_id") or step_row.get("source") or "",
         },
         "P9": {
             "available": True,

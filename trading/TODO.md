@@ -16,6 +16,8 @@ Legend: (EXEC) implementation, (DECISION) policy decision, (ANALYSIS) analysis/v
 - [ ] (DASHBOARD) Plot stress histogram pane in PG dashboard.
 - [x] (DASHBOARD) Guard training_dashboard_pg.py against trade-log selection (auto-select per-step log or show clear error).
 - [x] (DASHBOARD) Skip internals plots when the tower log is missing (warn once, keep panes empty).
+- [x] (EXEC) Emit M8 precheck projection in the tower log (non-binding).
+- [x] (DASHBOARD) Plot M8 precheck (non-binding) in the internals view.
 - [ ] (EXEC) Implement explicit baseline simulation for regret (sell-all-at-t0 path).
 - [ ] (EXEC) Add realized-volatility regime feature (continuous + ternary regime flag) and log it.
 - [x] (EXEC) Harden the Phase-4 density monitor: per-ontology balance, bin persistence windows, effect-size floor, and two-check debounce before OPEN.
@@ -38,14 +40,18 @@ Legend: (EXEC) implementation, (DECISION) policy decision, (ANALYSIS) analysis/v
 - [ ] (ANALYSIS) When `posture_observe` persists in live decisions, capture the Phase-6 gate status (latest `capital_controls_*.jsonl`, allowed slip) and note whether the log is missing or unapproved.
 - [ ] (ANALYSIS) Prove the live wake-up path by writing an `allowed=true` slip entry to `logs/phase6/capital_controls_*.jsonl`, restarting `scripts/stream_daemon_live.py`, and confirming `gate_open=true` plus nonzero exposure.
 - [x] (EXEC) Add a Phase-6 gate snapshot to decision payloads/sinks (open flag, source log, allowed slip, reason) to make refusal observable.
-- [ ] (ANALYSIS) Run the Phase-07 horizon-lift experiment: hold exposure changes for 30–120s, charge cost only on entry/exit, and recompute net/gross medians to test for slow-horizon edge.
-- [ ] (ANALYSIS) Run the zero-cost sanity for the live execution log (boundary_cost_rate=0) to confirm Phase-07 flips positive when costs are removed; if it does not, debug wiring.
+- [ ] (ANALYSIS) Run the Phase-07 horizon-lift experiment: hold exposure changes for 30–120s, charge cost only on entry/exit, and recompute rho_A edge/cost density to test for slow-horizon edge.
+- [ ] (ANALYSIS) Run the zero-cost sanity on the decision stream (half_spread/fee/slip = 0) to confirm Phase-07 flips positive when costs are removed; if it does not, debug wiring.
 - [ ] (DECISION) Choose an actuation/measurement alignment: slower controller clock, batched/impulse exposure changes, or cost charged only on sign flips/regime exits (document the choice before implementing).
 - [ ] (EXEC) Phase-7.1: add live decision decimation/impulse modes (e.g., `--hold-seconds {30,60,120}` and `--impulse/--deadband`) so supported events are sparse and boundary-aware.
-- [ ] (EXEC) Phase-7.2: emit a live execution ledger (paper is fine) matching the Phase-07 schema (`timestamp, symbol, x_prev, x, mid, delta_mid, cost_est, realized_pnl, pred_edge`) so `phase7_status_emitter` runs unchanged.
+- [ ] (EXEC) Phase-7.2: emit a live decision ledger (NDJSON is fine) matching the Phase-07 schema (`timestamp, symbol, direction, target_exposure, phase6_gate`) so `phase7_status_emitter` runs unchanged.
 - [x] (EXEC) Implement `scripts/phase07_eigen_boundary_check.py` (inputs: (d_t, m_t) stream, returns, friction model; outputs: rho_A vs horizon, +/-eps cost robustness, classification {false, boundary-unstable, boundary-stable}).
-- [ ] (ANALYSIS) Phase-7.3: build a horizon sweep harness to run a live log through Phase-07 at multiple horizons (10s/30s/60s/120s/300s) and identify any positive net density or prove absence.
-- [ ] (ANALYSIS) Run Phase-07 perturbation tests on recent live logs (small cost/execution tweaks) to tag false vs boundary-stable eigen-events and record persistence.
+- [x] (EXEC) Phase-7.3: add `scripts/phase73_horizon_sweep.py` to sweep Phase-07 across horizons and emit NDJSON.
+- [ ] (ANALYSIS) Run the Phase-7.3 sweep on recent tower logs and record any net-positive horizons.
+- [x] (EXEC) Add `trading_io/near_miss_rank.py` to rank M8/M9 near-miss windows from tower logs.
+- [ ] (ANALYSIS) Run near-miss ranking on recent tower logs and review the top windows.
+- [x] (EXEC) Add `trading_io/m8_m9_invariants.py` to validate M8 -> M9 handoff rules.
+- [ ] (ANALYSIS) Run Phase-07 perturbation tests on recent live logs (small cost perturbations) to tag false vs boundary-stable eigen-events and record persistence.
 - [x] (DECISION) Phase-8 entry gate: document formal criteria (Phase-07 readiness persists, actuator mode fixed/logged, boundary clamp, audit outputs) in `COMPACTIFIED_CONTEXT.md`.
 - [ ] (EXEC) Phase-8 entry gate enforcement: wire readiness gating + boundary clamp + audit output on live logs per the formal criteria.
 - [ ] (EXEC) Phase-9 capital ledger kernel: track capital \(C_t\) with legitimacy tax \(\Lambda_t\); enforce \(\Delta x_t \le f(C_t, \text{drawdown}, \text{Phase-07})\); log capital justification per action.
@@ -58,8 +64,8 @@ Legend: (EXEC) implementation, (DECISION) policy decision, (ANALYSIS) analysis/v
 - [ ] (EXEC) Wire capital kernel + Meta-Witness into `engine/loop.py` (execution path) so backtests and live loop share the same governance.
 - [ ] (EXEC) Emit an M9 state snapshot per decision (quotient residual summaries, posture, boundary cert, capital, witness state, action intent) into sinks; assert witness/refusal is idempotent and acts only on the action channel.
 - [x] (EXEC) Gate Phase-4 density monitor on Phase-07 readiness using a status log + persistence window.
-- [ ] (ANALYSIS) Run Phase-07 asymmetry diagnostics (per-horizon medians, cost vs move, pred-edge scale) and capture a timestamped report.
-- [ ] (ANALYSIS) Run Phase-07 wake-up tests (zero-cost and injected-drift logs) and verify Phase-07/Phase-04 readiness toggles as expected.
+- [ ] (ANALYSIS) Run Phase-07 asymmetry diagnostics (edge/cost density, activity rate, cost vs delta-x) and capture a timestamped report.
+- [ ] (ANALYSIS) Run Phase-07 wake-up tests (zero-cost params, cost-perturbation check) and verify Phase-07/Phase-04 readiness toggles as expected.
 - [x] (DECISION) Lock quotient feature set + window (log-returns, MAD norm, W1=64/W2=256, E/C/S + deltas).
 - [x] (EXEC) Implement quotient extractor in `features/quotient.py` and log `q_*` fields.
 - [ ] (EXEC) Add quotient-gated ACCEPT/HOLD/BAN path to `strategy/triadic_strategy.py` (no direction control).

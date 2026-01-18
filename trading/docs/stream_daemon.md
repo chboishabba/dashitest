@@ -94,7 +94,7 @@ Interpretation notes:
 
 - If `gate_open=false`, posture is forced to `OBSERVE`, and the triadic strategy emits `direction=0`, `target_exposure=0`, `hold=true`, and `reason="posture_observe (M4/M6)"`.
 - When the Phase-6 log is missing or contains no `allowed=true` entries, the gate stays closed. The daemon still emits decisions, but they remain observational.
-- Phase-07 asymmetry is computed from execution logs, not `stream_actions`. If posture is pinned to observe, the supported event set is empty and Phase-07 will report no density.
+- Phase-07 asymmetry is computed from the decision/action stream (`stream_actions` / decisions NDJSON), not execution fills. If posture is pinned to observe, the supported event set is empty and Phase-07 will report no density.
 - Decision payloads now include a `phase6_gate` snapshot: `{"open": bool, "source": "capital_controls_<stamp>.jsonl", "allowed_slip_bps": float | null, "reason": str | null}` for faster refusal diagnostics.
 
 ### Decision cost gate (optional)

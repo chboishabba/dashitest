@@ -34,10 +34,15 @@ Key paths: intent derivation lives in `strategy/triadic_strategy.py` (UNKNOWN/FL
     thesis.py`, Phase-4 gate in `scripts/phase4_density_monit
 or.py` with summary in `scripts/phase4_gate_status.py`, and Phase-07 signal source in `signals/asymmetry_sensor.py`.
 Phase-4 density monitor now requires Phase-07 readiness via a JSONL status log (`--phase7-log`) with a persistence window; gate summaries surface Phase-07 readiness and reasons.
-Added Phase-07 diagnostics and wake-up tooling: `scripts/phase7_asymmetry_diagnostics.py` reports per-horizon medians and cost-vs-move checks, and emits zero-cost / injected-drift logs for wiring validation; `docs/phase7_status_emitter.md` documents the workflow and TODOs track the required runs.
+Added Phase-07 diagnostics tooling: `scripts/phase7_asymmetry_diagnostics.py` reports edge/cost density, activity rate, and robustness from decision logs; `docs/phase7_status_emitter.md` documents the workflow and TODOs track the required runs.
 Documented live decision interpretation for `posture_observe` and Phase-6 gating in `docs/stream_daemon.md` and `docs/phase6_capital_control.md`, and added a TODO to capture gate status when observe persists.
 Added a narrative capture of the posture_observe doc/TODO update process in `docs/posture_observe_notes.md`.
 Added `scripts/phase07_eigen_boundary_check.py` stub to compute rho_A across horizons with cost perturbation robustness checks.
 Formalized Phase-8 entry criteria and boundary clamp semantics in `COMPACTIFIED_CONTEXT.md`.
 Added kernel-Vulkan implementation contract appendix in `docs/appendix_kernel_vulkan.md`.
+Added M8 precheck projection to the tower log (non-binding readiness audit) and plotted it in the PyQtGraph internals view (`trading_io/tower_projection.py`, `training_dashboard_pg.py`).
+Added Phase-7.3 horizon sweep emitter for tower logs (`scripts/phase73_horizon_sweep.py`) plus near-miss ranking and M8->M9 invariant checking tools (`trading_io/near_miss_rank.py`, `trading_io/m8_m9_invariants.py`).
 Dashboard internals now skip tower-only plots when the tower log is missing, keeping the view empty with a one-time warning instead of crashing (`training_dashboard_pg.py`).
+Aligned Phase-07 docs with the action-channel boundary certificate (edge/cost density, no return-based medians), including updated Phase-07 emitter and Phase-4 gating documentation.
+Phase-07 status emitter and diagnostics now consume decision/action NDJSON logs and report edge/cost density with robustness gates (`scripts/phase7_status_emitter.py`, `scripts/phase7_asymmetry_diagnostics.py`).
+Phase-7.3 horizon sweep output now includes `rho_A_null`, `delta_rho_A`, `noise_ratio`, and `class_label` fields for noise-floor annotation (`scripts/phase73_horizon_sweep.py`).

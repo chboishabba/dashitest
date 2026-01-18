@@ -369,11 +369,11 @@ class Dashboard(QtWidgets.QMainWindow):
             pen=pg.mkPen((200, 200, 200), width=1, style=dash_style)
         )
 
-        self.p_ready = self.internals_win.addPlot(row=4, col=0, title="P8 readiness")
+        self.p_ready = self.internals_win.addPlot(row=4, col=0, title="P8 readiness + M8 precheck")
         self.p_ready.setXLink(self.p_q)
         self.ready_count_curve = self.p_ready.plot(pen=pg.mkPen("y", width=1))
         self.required_curve = self.p_ready.plot(pen=pg.mkPen((180, 180, 180), width=1))
-        self.a8_curve = self.p_ready.plot(pen=pg.mkPen("c", width=1, style=dash_style))
+        self.a8_curve = self.p_ready.plot(pen=pg.mkPen((160, 160, 160), width=1, style=dash_style))
         self.phase8_ready_curve = self.p_ready.plot(pen=pg.mkPen("g", width=1))
         self.phase8_ready_count_curve = self.p_ready.plot(
             pen=pg.mkPen((255, 120, 0), width=1, style=dash_style)
@@ -381,6 +381,7 @@ class Dashboard(QtWidgets.QMainWindow):
         self.phase8_required_curve = self.p_ready.plot(
             pen=pg.mkPen((120, 120, 120), width=1, style=dash_style)
         )
+        self.m8_precheck_curve = self.p_ready.plot(pen=pg.mkPen("c", width=1, style=dash_style))
 
         self.p_witness = self.internals_win.addPlot(row=5, col=0, title="P9 refusal + capital pressure")
         self.p_witness.setXLink(self.p_q)
@@ -850,6 +851,9 @@ class Dashboard(QtWidgets.QMainWindow):
                 self.required_curve.setData(x_plot, required)
             if a8 is not None:
                 self.a8_curve.setData(x_plot, a8)
+            m8_precheck = col("M8.precheck")
+            if m8_precheck is not None:
+                self.m8_precheck_curve.setData(x_plot, m8_precheck)
 
             a9 = col("P9.A9")
             capital_pressure = col("P9.capital_pressure")

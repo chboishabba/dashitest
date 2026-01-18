@@ -3,109 +3,108 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
-from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from statistics import median, StatisticsError
-from typing import Any, Iterable, Sequence
+import sys
+from typing import Any, Optional
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.append(str(SCRIPT_DIR))
+
+import phase07_eigen_boundary_check as phase07
 
 
-def _safe_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    return number if math.isfinite(number) else None
-
-
-def _tail_entries(path: Path, window: int) -> list[dict[str, Any]]:
-    if not path.exists():
-        raise SystemExit(f"Missing execution log: {path}")
-    tail: deque[dict[str, Any]] = deque(maxlen=window)
-    with path.open("r", encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            tail.append(entry)
-    return list(tail)
-
-
-def _extract_sample(entry: dict[str, Any]) -> tuple[float, float, float] | None:
-    size = _safe_float(entry.get("size"))
-    direction = _safe_float(entry.get("direction"))
-    if size is None or size <= 0.0 or not direction:
-        return None
-    fill_price = _safe_float(entry.get("fill_price"))
-    price_h = _safe_float(entry.get("price_t_h"))
-    if fill_price is None or price_h is None:
-        return None
-    gross = direction * (price_h - fill_price)
-    if not math.isfinite(gross):
-        return None
-    slip = _safe_float(entry.get("slippage_cost")) or 0.0
-    execution = _safe_float(entry.get("execution_cost")) or 0.0
-    cost_per_unit = (slip + execution) / size
-    if not math.isfinite(cost_per_unit):
-        return None
-    net = gross - cost_per_unit
-    if not math.isfinite(net):
-        return None
-    return gross, net, cost_per_unit
-
-
-def _compute_metrics(samples: Sequence[tuple[float, float, float]]) -> dict[str, float]:
-    gross_vals = [gross for gross, _, _ in samples]
-    net_vals = [net for _, net, _ in samples]
-    cost_vals = [cost for _, _, cost in samples]
-    return {
-        "rho_A_gross": median(gross_vals),
-        "rho_A_net": median(net_vals),
-        "cost_est": median(cost_vals),
-    }
+def _load_decisions(path: Path, symbol: Optional[str], window: int) -> list[phase07.DecisionRec]:
+    decisions = phase07.load_decisions_ndjson(path, symbol)
+    if window > 0:
+        decisions = decisions[-window:]
+    return decisions
 
 
 def _build_payload(
     target: str,
-    entries: Sequence[dict[str, Any]],
-    samples: Sequence[tuple[float, float, float]],
+    symbol: Optional[str],
+    decisions: list[phase07.DecisionRec],
+    cost: phase07.CostModel,
+    rho_thresh: float,
+    persist_min: int,
+    eps_cost_frac: float,
 ) -> dict[str, Any]:
-    window = len(entries)
-    count = len(samples)
-    metrics: dict[str, float | None] = {"rho_A_net": None, "rho_A_gross": None, "cost_est": None}
-    if samples:
-        try:
-            metrics.update(_compute_metrics(samples))
-        except StatisticsError:
-            metrics = {"rho_A_net": None, "rho_A_gross": None, "cost_est": None}
-    ready = False
-    reason = "no_density_rows"
-    rho_net = metrics["rho_A_net"]
-    if rho_net is None:
-        ready = False
+    window = len(decisions)
+    if window < 2:
+        return {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "target": target,
+            "phase7_ready": False,
+            "phase7_reason": "no_decisions",
+            "phase7_metrics": {
+                "rho_A": None,
+                "sum_edge": None,
+                "sum_cost": None,
+                "n_support": 0,
+                "activity_rate": 0.0,
+                "robust_pass": False,
+                "robust_reason": "no_decisions",
+                "class_label": "false",
+                "window": window,
+                "count": 0,
+            },
+        }
+
+    rho, sum_edge, sum_cost, n_support, activity_rate = phase07.rho_A_for_stream(
+        decisions, [], cost
+    )
+    robust_pass, robust_reason = phase07.robust_check(
+        decisions,
+        [],
+        cost,
+        rho_thresh=rho_thresh,
+        persist_min=persist_min,
+        eps_cost_frac=eps_cost_frac,
+    )
+    class_label = phase07.classify(rho, robust_pass)
+
+    if robust_pass:
+        reason = "asymmetry_density_ok"
+    elif robust_reason == "sparse_support":
+        reason = "sparse_support"
+    elif robust_reason == "below_thresh":
+        reason = "rho_below_thresh"
+    elif robust_reason == "cost_sensitivity":
+        reason = "cost_sensitivity"
     else:
-        ready = rho_net > 0.0
-        reason = "asymmetry_density_ok" if ready else "net_asymmetry_nonpositive"
+        reason = "asymmetry_density_blocked"
+
+    metrics = {
+        "rho_A": rho,
+        "sum_edge": sum_edge,
+        "sum_cost": sum_cost,
+        "n_support": n_support,
+        "activity_rate": activity_rate,
+        "robust_pass": robust_pass,
+        "robust_reason": robust_reason,
+        "class_label": class_label,
+        "rho_thresh": rho_thresh,
+        "persist_min": persist_min,
+        "eps_cost_frac": eps_cost_frac,
+        "cost_model": {
+            "half_spread": cost.half_spread,
+            "fee": cost.fee,
+            "slip": cost.slip,
+        },
+        "window": window,
+        "count": n_support,
+    }
+
     payload = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "target": target,
-        "phase7_ready": ready,
+        "phase7_ready": bool(robust_pass),
         "phase7_reason": reason,
-        "phase7_metrics": {
-            "rho_A_net": metrics["rho_A_net"],
-            "rho_A_gross": metrics["rho_A_gross"],
-            "cost_est": metrics["cost_est"],
-            "window": window,
-            "count": count,
-        },
+        "phase7_metrics": metrics,
     }
+    if symbol:
+        payload["symbol"] = symbol
     return payload
 
 
@@ -119,11 +118,12 @@ def _append_line(path: Path, payload: dict[str, Any]) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description="Phase-07 asymmetry status emitter.")
     ap.add_argument(
-        "--execution-log",
+        "--decisions-ndjson",
         type=Path,
         required=True,
-        help="Phase-5 execution JSONL log to derive asymmetry density from.",
+        help="Decision/action NDJSON log (timestamp, symbol, direction, target_exposure).",
     )
+    ap.add_argument("--symbol", type=str, default="", help="Filter symbol (optional).")
     ap.add_argument(
         "--phase7-log",
         type=Path,
@@ -140,23 +140,41 @@ def main() -> None:
         "--window",
         type=int,
         default=256,
-        help="Number of recent rows to read from the execution log.",
+        help="Number of recent rows to read from the decisions log.",
     )
+
+    ap.add_argument("--half-spread", type=float, default=0.0003)
+    ap.add_argument("--fee", type=float, default=0.0005)
+    ap.add_argument("--slip", type=float, default=0.0)
+    ap.add_argument("--rho-thresh", type=float, default=1.0)
+    ap.add_argument("--persist-min", type=int, default=25)
+    ap.add_argument("--eps-cost-frac", type=float, default=0.05)
+
     args = ap.parse_args()
-    window = max(1, args.window)
-    entries = _tail_entries(args.execution_log, window)
-    samples: list[tuple[float, float, float]] = []
-    for entry in entries:
-        sample = _extract_sample(entry)
-        if sample is not None:
-            samples.append(sample)
-    payload = _build_payload(args.target, entries, samples)
+
+    symbol = args.symbol.strip() or None
+    window = max(0, int(args.window))
+    decisions = _load_decisions(args.decisions_ndjson, symbol, window)
+
+    cost = phase07.CostModel(args.half_spread, args.fee, args.slip)
+    payload = _build_payload(
+        args.target,
+        symbol,
+        decisions,
+        cost,
+        rho_thresh=args.rho_thresh,
+        persist_min=args.persist_min,
+        eps_cost_frac=args.eps_cost_frac,
+    )
     _append_line(args.phase7_log, payload)
+
     status = "ready" if payload["phase7_ready"] else "blocked"
+    metrics = payload.get("phase7_metrics") or {}
+    window_size = metrics.get("window")
+    count = metrics.get("count")
     print(
         f"Wrote Phase-07 {status} line for {args.target} "
-        f"(window={payload['phase7_metrics']['window']}, count={payload['phase7_metrics']['count']}) "
-        f"to {args.phase7_log}"
+        f"(window={window_size}, count={count}) to {args.phase7_log}"
     )
 
 
