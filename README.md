@@ -21,6 +21,18 @@
   - `JAX/README.md`: JAX codec/motion/pipeline reference implementations.
   - `docs/vulkan_jax_parity.md`: Vulkan↔JAX parity map and recommended first Vulkan kernel (see `CONTEXT.md#L18786` and `CONTEXT.md#L18950`).
 
+## Documentation index (start here)
+- `docs/BENCHMARK.md`: Global benchmark overview and cross-linking between Task A/B/C work.
+- `docs/tree_diffusion_benchmark.md`: Tree diffusion benchmark spec, acceptance criteria, and Task B framing.
+- `docs/phase3_quotient_learning.md`: Phase-3 quotient/MDL training spec and logging requirements.
+- `docs/b2_acceptance.md`: Stage B2 acceptance protocol (p thresholds, guardrails, logging checklist).
+- `docs/grayscott_quotient.md`: Gray-Scott quotient-space rollout metrics and targets.
+- `docs/valuation_primes_plan.md`: Valuation/primes benchmark plan and hierarchy-aligned targets.
+- `docs/compression_bench.md`: Compression benchmark spec and reporting expectations.
+- `docs/energy_landscape_vis.md`: Energy landscape visualization guidance for dashifine outputs.
+- `docs/bad_day.md`: Bad-day detection semantics and trading posture policy.
+- `docs/vulkan_jax_parity.md`: Vulkan/JAX parity map and first-kernel target.
+
 ## Full file index (every file/test)
 - `CHANGELOG.md`: Change history and release notes.
 - `CONTEXT.md`: Context notes for the repo and experiments.

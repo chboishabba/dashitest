@@ -27,6 +27,12 @@ Legend: (EXEC) implementation, (DECISION) policy decision, (ANALYSIS) analysis/v
 - [x] (DOC) Clarify in Phase-4 strategy notes that synthetic/amplitude-injected runs prove the monitor mechanically but do not count as legitimate OPENs, and note how to flag those runs in the gate log.
 - [x] (DOC) Align M9/all-red spine write-up with PDFs (gate-first hazard, non-extractive M9, special-code severity ordering).
 - [x] (DOC) Lock M5/UNKNOWN control-law and eigen-event clarifications in TRADER_CONTEXT.
+- [ ] (DECISION) Define UTES-5 special-code severity order + thresholds (e.g., qMETA < qVOID < qPARA) for trader gating.
+- [ ] (EXEC) Implement severity mapping + max-severity join for specials (UFTC lattice semantics) in ternary/triadic ops.
+- [ ] (EXEC) Add Guard/Snap/Broken gates derived from severity and wire into `engine/loop.py` before action selection.
+- [ ] (EXEC) Add a special-code emission path (data integrity, non-finite inputs, explicit M9 contradiction) so severity gates can trigger.
+- [ ] (EXEC) Wire UNKNOWN/PARADOX signals into the main trading loop (not just strategy demos), with PARADOX hard exit.
+- [ ] (DECISION) Specify how boundary gate maps to Snap vs Broken (edge/cost failure → Snap vs full prohibition).
 - [x] (ANALYSIS) Add a lightweight guard that marks amplitude-injected Phase-4 monitor executions so they can never be confused with data-driven readiness (`--test-vector` now tags monitor logs).
 - [x] (EXEC) Create the Phase-5 execution simulator (deterministic + size-dependent friction, logging realized cost) that consumes proposal logs.
 - [x] (EXEC) Add decision consumers/sinks for `stream_actions` (NDJSON file, TCP fan-out, latest-action view) with at-least-once semantics.

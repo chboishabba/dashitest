@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+- Added a documentation index to `README.md` so the main specs and notes are easy to find.
+- Synced CONTEXT files to the canonical chat archive and recorded the archive path in `references/context-sources.md`.
 - Added `docs/phase3_quotient_learning.md` describing the Phase-3 plan-equivalence + MDL loss, label-entropy corrections, and the rationale for stopping the observer ladder once the quotient is enforced (`CONTEXT.md#L39825-L40230`).
 - Normalized the Phase-3 tile-energy invariant (`log1p(tile_energy_map)`) and wired a minimal quotient VJP into `dashilearn/bsmoe_train.py` so the gradient follows the normalized `delta_V`, keeping `α` interpretable (`CONTEXT.md#L39825-L40797`).
 - Added a Phase-3 logger/grapher that auto-saves timestamped `logs/bsmoe_train/bsmoe_phase3_<timestamp>.json` histories and `outputs/bsmoe_phase3_<timestamp>.png` metric plots for each run so experiments stay reproducible per `docs/phase3_quotient_learning.md`.

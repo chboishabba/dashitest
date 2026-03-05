@@ -2772,3 +2772,11 @@ But the key answer to your long exposition is:
 
 That’s the line you cannot cross.
 
+## Chat Sync (2026-02-06)
+- Source: `/home/c/Documents/code/ITIR-suite/chat-export-structurer/my_archive.sqlite`
+- Thread: `Branch · DASHI learner context5 -- trading` (last assistant: 2026-01-15T02:26:12Z)
+- Summary: BTC is correctly hard-blocked as a negative control (bin sufficiency never satisfied); do not touch.
+- Summary: ES/NQ have persistence but zero amplitude (medians ~0); monitor logic and thresholds are correct, failure is upstream of the monitor.
+- Summary: The blocker is flat ES/NQ proposals; next sprint is explain flatness, not fix ES/NQ directly.
+- Summary: Deliverable 1 = proposal amplitude diagnostics (size head quantiles + near-zero fraction, direction confidence quantiles, score margin distribution, correlations to qfeat/|ret|/hazard) with compact per-ontology output.
+- Summary: Exclude GPU runner, monitor rewrites, threshold relaxation, Phase-4.1, Phase-6 until diagnostics are in.

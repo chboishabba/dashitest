@@ -43496,3 +43496,12 @@ epoch 35: loss=6.38e+05  time= 45.83 ms  jaccard= 1.00  plan_hit=1  gate_time= 0
           phase3: task=6.38e+05  q=0.00e+00  mdl=1.000  alpha=1.000
 Phase-3 artifacts saved: logs/bsmoe_train/bsmoe_phase3_20260112T144650Z.json, outputs/bsmoe_phase3_20260112T144650Z.png
 plan_hit_rate     : 35/35
+
+## Chat Sync (2026-02-06)
+- Source: `/home/c/Documents/code/ITIR-suite/chat-export-structurer/my_archive.sqlite`
+- Thread: `Branch · Formalizing DASHI Kernel` (last assistant: 2026-01-17T11:03:56Z)
+- Summary: capital kernel state/update (`C_t`, `x_t`, `m_t`, `r_t`, `Δx_t`) with m2m minus friction, risk tax, and clamp to `C_min`.
+- Summary: capital-aware exposure clamp `|x_t| <= min(x_max, B_t / (C_t * (kappa_t + eps)))` with `B_t = beta * C_t`.
+- Summary: Phase-07 is net-surplus median(m2m edge - friction) > 0 with persistence.
+- Summary: Meta-Witness refusal rules R0-R5 cover missing Phase-06 authority, nonpositive net surplus, sparse support, drawdown breach, churn without surplus, and policy inconsistency.
+- Summary: Phase-9 wiring adds `phase9/capital_kernel.py` + `phase9/meta_witness.py`, intercepts right before actions, then clamps/overrides exposure and logs capital + refusal fields.
