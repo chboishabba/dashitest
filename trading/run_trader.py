@@ -94,6 +94,12 @@ def main(
     shadow_score_mode: str = "ratio",
     shadow_score_scale: float = 1.0,
     shadow_gating_mode: str = "lex",
+    shadow_kernel_label_mode: str = "fixed",
+    shadow_kernel_label_threshold: float = 0.01,
+    shadow_kernel_label_vol_mult: float = 0.5,
+    shadow_kernel_log_dir: str = "logs",
+    shadow_curvature_threshold: float = 0.0,
+    shadow_score_curvature_weight: bool = False,
 ):
     run_ts = pd.Timestamp.utcnow().strftime("%Y%m%dT%H%M%SZ")
 
@@ -213,6 +219,12 @@ def main(
                     shadow_score_mode=shadow_score_mode,
                     shadow_score_scale=shadow_score_scale,
                     shadow_gating_mode=shadow_gating_mode,
+                    shadow_kernel_label_mode=shadow_kernel_label_mode,
+                    shadow_kernel_label_threshold=shadow_kernel_label_threshold,
+                    shadow_kernel_label_vol_mult=shadow_kernel_label_vol_mult,
+                    shadow_kernel_log_dir=shadow_kernel_log_dir,
+                    shadow_curvature_threshold=shadow_curvature_threshold,
+                    shadow_score_curvature_weight=shadow_score_curvature_weight,
                 )
                 if not log_combined:
                     emit_geometry(log_path, source)
@@ -285,6 +297,12 @@ def main(
         shadow_score_mode=shadow_score_mode,
         shadow_score_scale=shadow_score_scale,
         shadow_gating_mode=shadow_gating_mode,
+        shadow_kernel_label_mode=shadow_kernel_label_mode,
+        shadow_kernel_label_threshold=shadow_kernel_label_threshold,
+        shadow_kernel_label_vol_mult=shadow_kernel_label_vol_mult,
+        shadow_kernel_log_dir=shadow_kernel_log_dir,
+        shadow_curvature_threshold=shadow_curvature_threshold,
+        shadow_score_curvature_weight=shadow_score_curvature_weight,
     )
     emit_geometry(LOG, source)
 
@@ -372,6 +390,42 @@ if __name__ == "__main__":
     )
     ap.add_argument("--shadow-kernel-residual-weight", type=float, default=1.0, help="Residual blend weight for shadow kernel mode 'residual'.")
     ap.add_argument(
+        "--shadow-kernel-label-mode",
+        type=str,
+        default="fixed",
+        choices=["fixed", "vol"],
+        help="Labeling mode for learned-kernel bucket labels.",
+    )
+    ap.add_argument(
+        "--shadow-kernel-label-threshold",
+        type=float,
+        default=0.01,
+        help="Return threshold for labeling (fixed) or minimum threshold (vol).",
+    )
+    ap.add_argument(
+        "--shadow-kernel-label-vol-mult",
+        type=float,
+        default=0.5,
+        help="Volatility multiplier for label thresholds when label-mode=vol.",
+    )
+    ap.add_argument(
+        "--shadow-kernel-log-dir",
+        type=str,
+        default="logs",
+        help="Directory containing trading_log*.csv used to fit the learned kernel.",
+    )
+    ap.add_argument(
+        "--shadow-curvature-threshold",
+        type=float,
+        default=0.0,
+        help="Hold when basin curvature falls below this threshold (0 disables).",
+    )
+    ap.add_argument(
+        "--shadow-score-curvature-weight",
+        action="store_true",
+        help="Multiply shadow score by basin curvature to suppress noisy regimes.",
+    )
+    ap.add_argument(
         "--shadow-score-mode",
         type=str,
         default="ratio",
@@ -435,4 +489,10 @@ if __name__ == "__main__":
         shadow_score_mode=args.shadow_score_mode,
         shadow_score_scale=args.shadow_score_scale,
         shadow_gating_mode=args.shadow_gating_mode,
+        shadow_kernel_label_mode=args.shadow_kernel_label_mode,
+        shadow_kernel_label_threshold=args.shadow_kernel_label_threshold,
+        shadow_kernel_label_vol_mult=args.shadow_kernel_label_vol_mult,
+        shadow_kernel_log_dir=args.shadow_kernel_log_dir,
+        shadow_curvature_threshold=args.shadow_curvature_threshold,
+        shadow_score_curvature_weight=args.shadow_score_curvature_weight,
     )

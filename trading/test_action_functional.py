@@ -205,6 +205,8 @@ def test_shadow_runner_and_log_fields_surface_beam_summary():
     assert "shadow_score_mode" in fields
     assert "shadow_gating_mode" in fields
     assert "beam_entropy" in beam_fields
+    assert "beam_curvature" in beam_fields
+    assert "beam_flat_distance" in beam_fields
     assert beam_fields["beam_long_mass"] is not None
 
 
@@ -246,6 +248,7 @@ def test_learned_transition_model_emits_flat_candidate_from_observations():
                 step_return=0.0,
                 branch_risk=0.2,
                 diffusion_risk=0.2,
+                realized_vol=0.01,
             )
             for _ in range(12)
         ],
@@ -310,6 +313,8 @@ def test_beam_policy_reports_entropy_and_flat_basin_separately():
         long_mass=0.52,
         short_mass=0.48,
         flat_mass=0.0,
+        curvature=1.0,
+        flat_distance=0.0,
         best_terminal_return=0.0,
         best_terminal_risk=0.0,
         contraction=0.5,
@@ -359,6 +364,7 @@ def test_run_trading_loop_emits_shadow_fields_when_enabled():
     assert "live_next_pos_intended" in last
     assert "shadow_hold_reason_primary" in last
     assert "shadow_kernel_mode" in last
+    assert "shadow_hold_curvature" in last
 
 
 def test_shadow_snapshot_is_built_before_apply_execution():

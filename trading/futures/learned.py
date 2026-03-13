@@ -75,6 +75,7 @@ class TransitionObservation:
     step_return: float
     branch_risk: float
     diffusion_risk: float
+    realized_vol: float
 
 
 @dataclass(frozen=True)
@@ -110,6 +111,9 @@ class LearnedTransitionModel:
         observations: Iterable[TransitionObservation],
         *,
         min_bucket_samples: int = 12,
+        label_mode: str = "fixed",
+        label_threshold: float = 0.01,
+        label_vol_mult: float = 0.5,
     ) -> LearnedTransitionModel:
         grouped: dict[tuple, list[TransitionObservation]] = {}
         action_grouped: dict[int, list[TransitionObservation]] = {}
@@ -119,12 +123,22 @@ class LearnedTransitionModel:
             grouped.setdefault(key, []).append(obs)
             action_grouped.setdefault(obs.action, []).append(obs)
         buckets = {
-            key: cls._summarize_group(items)
+            key: cls._summarize_group(
+                items,
+                label_mode=label_mode,
+                label_threshold=label_threshold,
+                label_vol_mult=label_vol_mult,
+            )
             for key, items in grouped.items()
             if len(items) >= min_bucket_samples
         }
         by_action = {
-            action: cls._summarize_group(items)
+            action: cls._summarize_group(
+                items,
+                label_mode=label_mode,
+                label_threshold=label_threshold,
+                label_vol_mult=label_vol_mult,
+            )
             for action, items in action_grouped.items()
             if items
         }
@@ -135,6 +149,9 @@ class LearnedTransitionModel:
                 "observation_count": len(observation_list),
                 "bucket_count": len(buckets),
                 "min_bucket_samples": min_bucket_samples,
+                "label_mode": label_mode,
+                "label_threshold": label_threshold,
+                "label_vol_mult": label_vol_mult,
             },
         )
 
@@ -146,6 +163,9 @@ class LearnedTransitionModel:
         estimator: CoarseStateEstimator | None = None,
         min_bucket_samples: int = 12,
         max_rows_per_file: int = 12000,
+        label_mode: str = "fixed",
+        label_threshold: float = 0.01,
+        label_vol_mult: float = 0.5,
     ) -> LearnedTransitionModel | None:
         estimator = estimator or CoarseStateEstimator()
         observations: list[TransitionObservation] = []
@@ -166,7 +186,13 @@ class LearnedTransitionModel:
             observations.extend(file_observations)
         if not observations:
             return None
-        model = cls.from_observations(observations, min_bucket_samples=min_bucket_samples)
+        model = cls.from_observations(
+            observations,
+            min_bucket_samples=min_bucket_samples,
+            label_mode=label_mode,
+            label_threshold=label_threshold,
+            label_vol_mult=label_vol_mult,
+        )
         model.metadata.update(
             {
                 "source_count": len(used_paths),
@@ -187,20 +213,48 @@ class LearnedTransitionModel:
         )
 
     @classmethod
-    def _label_for_observation(cls, obs: TransitionObservation) -> str:
+    def _label_for_observation(
+        cls,
+        obs: TransitionObservation,
+        *,
+        label_mode: str,
+        label_threshold: float,
+        label_vol_mult: float,
+    ) -> str:
+        if label_mode == "fixed":
+            threshold = label_threshold
+        elif label_mode == "vol":
+            threshold = max(label_threshold, label_vol_mult * max(obs.realized_vol, 0.0))
+        else:
+            raise ValueError(f"unknown label_mode: {label_mode}")
         if obs.next_state.stress >= 0.75 or obs.branch_risk >= 0.75:
             return "stress"
-        if obs.step_return > 0.05:
+        if obs.step_return > threshold:
             return "up"
-        if obs.step_return < -0.05:
+        if obs.step_return < -threshold:
             return "down"
         return "flat"
 
     @classmethod
-    def _summarize_group(cls, observations: Sequence[TransitionObservation]) -> list[_BucketStats]:
+    def _summarize_group(
+        cls,
+        observations: Sequence[TransitionObservation],
+        *,
+        label_mode: str,
+        label_threshold: float,
+        label_vol_mult: float,
+    ) -> list[_BucketStats]:
         label_groups: dict[str, list[TransitionObservation]] = {}
         for obs in observations:
-            label_groups.setdefault(cls._label_for_observation(obs), []).append(obs)
+            label_groups.setdefault(
+                cls._label_for_observation(
+                    obs,
+                    label_mode=label_mode,
+                    label_threshold=label_threshold,
+                    label_vol_mult=label_vol_mult,
+                ),
+                [],
+            ).append(obs)
         total = float(len(observations))
         stats: list[_BucketStats] = []
         for label, items in sorted(label_groups.items(), key=lambda item: len(item[1]), reverse=True):
@@ -453,12 +507,18 @@ def _fit_learned_model(
     max_rows_per_file: int,
     kernel_mode: str,
     fallback_used: bool,
+    label_mode: str,
+    label_threshold: float,
+    label_vol_mult: float,
 ) -> LearnedTransitionModel | HeuristicTransitionModel:
     model = LearnedTransitionModel.from_csv_paths(
         paths,
         estimator=estimator,
         min_bucket_samples=min_bucket_samples,
         max_rows_per_file=max_rows_per_file,
+        label_mode=label_mode,
+        label_threshold=label_threshold,
+        label_vol_mult=label_vol_mult,
     )
     if model is None or not model.metadata.get("observation_count", 0):
         return _heuristic_with_metadata(kernel_mode=kernel_mode, fallback_used=True)
@@ -466,6 +526,9 @@ def _fit_learned_model(
         {
             "kernel_mode": kernel_mode,
             "fallback_used": int(bool(fallback_used)),
+            "label_mode": label_mode,
+            "label_threshold": label_threshold,
+            "label_vol_mult": label_vol_mult,
         }
     )
     return model
@@ -480,6 +543,9 @@ def build_transition_model_from_logs(
     max_rows_per_file: int = 12000,
     mode: str = "per_asset",
     residual_weight: float = 1.0,
+    label_mode: str = "fixed",
+    label_threshold: float = 0.01,
+    label_vol_mult: float = 0.5,
 ) -> LearnedTransitionModel | HeuristicTransitionModel | ResidualTransitionModel | ShrinkageTransitionModel:
     log_dir = pathlib.Path(log_dir)
     estimator = estimator or CoarseStateEstimator()
@@ -491,6 +557,9 @@ def build_transition_model_from_logs(
             max_rows_per_file=max_rows_per_file,
             kernel_mode="global",
             fallback_used=False,
+            label_mode=label_mode,
+            label_threshold=label_threshold,
+            label_vol_mult=label_vol_mult,
         )
     asset_paths = candidate_log_paths(log_dir, symbol_name)
     if mode == "per_asset":
@@ -499,6 +568,9 @@ def build_transition_model_from_logs(
             estimator=estimator,
             min_bucket_samples=min_bucket_samples,
             max_rows_per_file=max_rows_per_file,
+            label_mode=label_mode,
+            label_threshold=label_threshold,
+            label_vol_mult=label_vol_mult,
         )
         if asset_model is not None and asset_model.metadata.get("observation_count", 0):
             asset_model.metadata.update({"kernel_mode": "per_asset", "fallback_used": 0})
@@ -510,6 +582,9 @@ def build_transition_model_from_logs(
             max_rows_per_file=max_rows_per_file,
             kernel_mode="per_asset",
             fallback_used=True,
+            label_mode=label_mode,
+            label_threshold=label_threshold,
+            label_vol_mult=label_vol_mult,
         )
         meta = getattr(global_model, "metadata", {}) or {}
         meta["kernel_mode"] = "per_asset"
@@ -524,6 +599,9 @@ def build_transition_model_from_logs(
             max_rows_per_file=max_rows_per_file,
             kernel_mode="global",
             fallback_used=False,
+            label_mode=label_mode,
+            label_threshold=label_threshold,
+            label_vol_mult=label_vol_mult,
         )
         asset_model = _fit_learned_model(
             paths=asset_paths,
@@ -532,6 +610,9 @@ def build_transition_model_from_logs(
             max_rows_per_file=max_rows_per_file,
             kernel_mode="per_asset",
             fallback_used=False,
+            label_mode=label_mode,
+            label_threshold=label_threshold,
+            label_vol_mult=label_vol_mult,
         )
         residual_model = ResidualTransitionModel(global_model=global_model, asset_model=asset_model, residual_weight=residual_weight)
         residual_model.metadata["fallback_used"] = int(
@@ -549,6 +630,9 @@ def build_transition_model_from_logs(
             max_rows_per_file=max_rows_per_file,
             kernel_mode="global",
             fallback_used=False,
+            label_mode=label_mode,
+            label_threshold=label_threshold,
+            label_vol_mult=label_vol_mult,
         )
         asset_model = _fit_learned_model(
             paths=asset_paths,
@@ -557,6 +641,9 @@ def build_transition_model_from_logs(
             max_rows_per_file=max_rows_per_file,
             kernel_mode="per_asset",
             fallback_used=False,
+            label_mode=label_mode,
+            label_threshold=label_threshold,
+            label_vol_mult=label_vol_mult,
         )
         return ShrinkageTransitionModel(global_model=global_model, asset_model=asset_model)
     raise ValueError(f"unknown shadow kernel mode: {mode}")
@@ -616,4 +703,5 @@ def _iter_observations_from_csv(
             step_return=step_return,
             branch_risk=branch_risk,
             diffusion_risk=diffusion_risk,
+            realized_vol=current_snapshot.realized_vol,
         )

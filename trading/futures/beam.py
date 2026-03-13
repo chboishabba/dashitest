@@ -44,6 +44,8 @@ class BeamSummary:
     long_mass: float
     short_mass: float
     flat_mass: float
+    curvature: float
+    flat_distance: float
     best_terminal_return: float
     best_terminal_risk: float
     contraction: float
@@ -56,6 +58,8 @@ class BeamSummary:
             "beam_long_mass": self.long_mass,
             "beam_short_mass": self.short_mass,
             "beam_flat_mass": self.flat_mass,
+            "beam_curvature": self.curvature,
+            "beam_flat_distance": self.flat_distance,
             "beam_best_return": self.best_terminal_return,
             "beam_best_risk": self.best_terminal_risk,
             "beam_contraction": self.contraction,
@@ -70,8 +74,11 @@ class BeamDecisionDiagnostics:
     hold_score: int
     hold_basin: int
     hold_flat_basin: int
+    hold_curvature: int
     entropy_value: float
     entropy_threshold: float
+    curvature_value: float
+    curvature_threshold: float
     score_value: float
     score_threshold: float
     score_reward: float
@@ -98,8 +105,11 @@ class BeamDecisionDiagnostics:
             "shadow_hold_score": self.hold_score,
             "shadow_hold_basin": self.hold_basin,
             "shadow_hold_flat_basin": self.hold_flat_basin,
+            "shadow_hold_curvature": self.hold_curvature,
             "shadow_entropy_value": self.entropy_value,
             "shadow_entropy_threshold": self.entropy_threshold,
+            "shadow_curvature_value": self.curvature_value,
+            "shadow_curvature_threshold": self.curvature_threshold,
             "shadow_score_value": self.score_value,
             "shadow_score_threshold": self.score_threshold,
             "shadow_score_reward": self.score_reward,
@@ -302,7 +312,7 @@ class FutureBeamSearch:
 
     def summarize(self, beam: list[BeamNode]) -> BeamSummary:
         if not beam:
-            return BeamSummary(0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+            return BeamSummary(0.0, 0.0, 0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, 1.0)
         basin: BasinMass = self.basin_classifier.classify(beam)
         best = beam[0]
         total_weight = sum(node.weight for node in beam)
@@ -312,12 +322,18 @@ class FutureBeamSearch:
         else:
             contraction = sum(node.weight * node.state.contraction for node in beam) / total_weight
             diffusion = sum(node.weight * node.state.diffusion for node in beam) / total_weight
+        curvature = basin.long_mass + basin.short_mass - basin.flat_mass
+        flat_distance = math.sqrt(
+            basin.long_mass ** 2 + basin.short_mass ** 2 + (basin.flat_mass - 1.0) ** 2
+        )
         return BeamSummary(
             entropy=normalized_entropy(node.weight for node in beam),
             best_score=best.cumulative_score,
             long_mass=basin.long_mass,
             short_mass=basin.short_mass,
             flat_mass=basin.flat_mass,
+            curvature=curvature,
+            flat_distance=flat_distance,
             best_terminal_return=best.predicted_return,
             best_terminal_risk=best.predicted_risk,
             contraction=contraction,
@@ -343,6 +359,8 @@ class BeamIntentPolicy:
         score_threshold: float = -0.05,
         directional_mass_threshold: float = 0.55,
         directional_margin_threshold: float = 0.15,
+        curvature_threshold: float = 0.0,
+        score_curvature_weight: bool = False,
         gating_mode: str = "lex",
     ):
         self.symbol = symbol
@@ -356,6 +374,8 @@ class BeamIntentPolicy:
         self.score_threshold = float(score_threshold)
         self.directional_mass_threshold = float(directional_mass_threshold)
         self.directional_margin_threshold = float(directional_margin_threshold)
+        self.curvature_threshold = float(curvature_threshold)
+        self.score_curvature_weight = bool(score_curvature_weight)
         self.gating_mode = gating_mode
 
     def _kernel_metadata(self) -> dict[str, int | float | str]:
@@ -389,8 +409,11 @@ class BeamIntentPolicy:
             hold_score=int(hold_reason_primary == "score"),
             hold_basin=int(hold_reason_primary == "basin"),
             hold_flat_basin=int(hold_reason_primary == "flat_basin"),
+            hold_curvature=int(hold_reason_primary == "curvature"),
             entropy_value=summary.entropy,
             entropy_threshold=self.entropy_threshold,
+            curvature_value=summary.curvature,
+            curvature_threshold=self.curvature_threshold,
             score_value=summary.best_score,
             score_threshold=self.score_threshold,
             score_reward=score_reward,
@@ -471,6 +494,8 @@ class BeamIntentPolicy:
         directional_mass = max(summary.long_mass, summary.short_mass)
         directional_margin = abs(summary.long_mass - summary.short_mass)
         score_adjusted = best.cumulative_score * (1.0 - summary.flat_mass)
+        if self.score_curvature_weight:
+            score_adjusted *= summary.curvature
         if self.gating_mode == "score_only":
             if score_adjusted <= self.score_threshold:
                 return self._hold_step(
@@ -484,6 +509,17 @@ class BeamIntentPolicy:
                     score_adjusted=score_adjusted,
                 )
         elif self.gating_mode == "lex":
+            if self.curvature_threshold > 0.0 and summary.curvature < self.curvature_threshold:
+                return self._hold_step(
+                    ts=ts,
+                    initial_state=initial_state,
+                    summary=summary,
+                    hold_reason_primary="curvature",
+                    reason=f"beam_curvature_hold curvature={summary.curvature:.3f}",
+                    score_reward=score_reward,
+                    score_penalty=score_penalty,
+                    score_adjusted=score_adjusted,
+                )
             if summary.entropy > self.entropy_threshold:
                 return self._hold_step(
                     ts=ts,

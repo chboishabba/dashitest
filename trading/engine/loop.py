@@ -322,6 +322,12 @@ def run_trading_loop(
     shadow_score_mode: str = "ratio",
     shadow_score_scale: float = 1.0,
     shadow_gating_mode: str = "lex",
+    shadow_kernel_label_mode: str = "fixed",
+    shadow_kernel_label_threshold: float = 0.01,
+    shadow_kernel_label_vol_mult: float = 0.5,
+    shadow_kernel_log_dir: str | pathlib.Path = "logs",
+    shadow_curvature_threshold: float = 0.0,
+    shadow_score_curvature_weight: bool = False,
 ):
     def shadow_mdl_for_window(ret_window):
         n = len(ret_window)
@@ -370,6 +376,9 @@ def run_trading_loop(
     live_policy_adapter = None
     symbol_name = tape_id if tape_id else source
     if shadow_futures:
+        kernel_log_dir = pathlib.Path(shadow_kernel_log_dir)
+        if not kernel_log_dir.exists() or not any(kernel_log_dir.glob("trading_log*.csv")):
+            kernel_log_dir = pathlib.Path("logs")
         shadow_estimator = CoarseStateEstimator()
         live_policy_adapter = _LoopLivePolicyAdapter()
         shadow_runner = ShadowPolicyRunner(
@@ -383,10 +392,13 @@ def run_trading_loop(
                     ),
                     transition_model=build_transition_model_from_logs(
                         symbol_name=symbol_name,
-                        log_dir=pathlib.Path("logs"),
+                        log_dir=kernel_log_dir,
                         estimator=shadow_estimator,
                         mode=shadow_kernel_mode,
                         residual_weight=shadow_kernel_residual_weight,
+                        label_mode=shadow_kernel_label_mode,
+                        label_threshold=shadow_kernel_label_threshold,
+                        label_vol_mult=shadow_kernel_label_vol_mult,
                     ),
                     beam_config=BeamConfig(
                         horizon=shadow_beam_horizon,
@@ -394,6 +406,8 @@ def run_trading_loop(
                         exposure_step=shadow_beam_exposure_step,
                     ),
                 ),
+                curvature_threshold=shadow_curvature_threshold,
+                score_curvature_weight=shadow_score_curvature_weight,
                 gating_mode=shadow_gating_mode,
             ),
         )

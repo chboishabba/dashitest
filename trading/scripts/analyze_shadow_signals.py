@@ -45,11 +45,25 @@ def load_rows(path: pathlib.Path) -> list[dict[str, str]]:
         return list(csv.DictReader(fh))
 
 
+def _safe_hist(ax, data, bins: int = 30) -> None:
+    values = [x for x in data if math.isfinite(x)]
+    if not values:
+        ax.text(0.5, 0.5, "no data", ha="center", va="center")
+        return
+    lo = min(values)
+    hi = max(values)
+    if abs(hi - lo) <= 1e-12:
+        ax.hist(values, bins=1)
+        return
+    ax.hist(values, bins=bins)
+
+
 def analyze(rows: list[dict[str, str]], horizon: int = 20) -> dict[str, object]:
     entropy = [_float(row, "beam_entropy") for row in rows if math.isfinite(_float(row, "beam_entropy"))]
     flat = [_float(row, "beam_flat_mass") for row in rows if math.isfinite(_float(row, "beam_flat_mass"))]
     score_series = []
     basin_margin_series = []
+    curvature_series = []
     divergence = []
     flat_nonzero = 0
     hold_count = 0
@@ -87,6 +101,9 @@ def analyze(rows: list[dict[str, str]], horizon: int = 20) -> dict[str, object]:
         margin = abs(_float(row, "beam_long_mass") - _float(row, "beam_short_mass"))
         if math.isfinite(margin):
             basin_margin_series.append(margin)
+        curvature = _float(row, "beam_curvature")
+        if math.isfinite(curvature):
+            curvature_series.append(curvature)
         if idx + horizon < len(rows):
             px = _float(row, "price")
             px2 = _float(rows[idx + horizon], "price")
@@ -134,6 +151,7 @@ def analyze(rows: list[dict[str, str]], horizon: int = 20) -> dict[str, object]:
         "flat_series": flat,
         "score_series": score_series,
         "basin_margin_series": basin_margin_series,
+        "curvature_series": curvature_series,
         "entropy_future": ent_future,
         "future_abs": future_abs,
         "action_rate": 1.0 - (hold_count / len(rows)) if rows else float("nan"),
@@ -187,6 +205,8 @@ def main() -> None:
             fh.write(f"- entropy vs future abs return corr ({args.horizon}): `{stats['entropy_absret_corr']:.6f}`\n")
             fh.write(f"- contraction vs trend strength corr ({args.horizon}): `{stats['contraction_trend_corr']:.6f}`\n")
             fh.write(f"- basin edge vs next move corr ({args.horizon}): `{stats['basin_edge_move_corr']:.6f}`\n")
+            if stats["curvature_series"]:
+                fh.write(f"- curvature mean: `{mean(stats['curvature_series']):.6f}`\n")
             fh.write(f"- shadow action sign accuracy ({args.horizon}): `{stats['action_sign_accuracy']:.6f}`\n")
             fh.write(f"- live action sign accuracy ({args.horizon}): `{stats['live_sign_accuracy']:.6f}`\n")
             fh.write(f"- shadow action return mean ({args.horizon}): `{stats['action_return_mean']:.6f}`\n")
@@ -197,7 +217,7 @@ def main() -> None:
             fh.write(f"- live action Sharpe proxy ({args.horizon}): `{stats['live_sharpe']:.6f}`\n")
             fh.write(f"- hold reasons: `{stats['hold_reasons'].most_common()}`\n\n")
 
-    rows_per_label = 2
+    rows_per_label = 3
     fig, axes = plt.subplots(len(results) * rows_per_label, 3, figsize=(16, 4 * max(len(results), 1) * rows_per_label))
     if len(results) == 1:
         axes = [axes] if rows_per_label == 1 else axes
@@ -209,15 +229,18 @@ def main() -> None:
         ax_basin = axes[row_base + 1][0]
         ax_action = axes[row_base + 1][1]
         ax_ent_profit = axes[row_base + 1][2]
+        ax_curve = axes[row_base + 2][0]
+        ax_curve_profit = axes[row_base + 2][1]
+        ax_curve_hold = axes[row_base + 2][2]
 
-        ax_entropy.hist([x for x in stats["entropy_series"] if math.isfinite(x)], bins=30)
+        _safe_hist(ax_entropy, stats["entropy_series"], bins=30)
         ax_entropy.set_title(f"{label} entropy")
-        ax_flat.hist([x for x in stats["flat_series"] if math.isfinite(x)], bins=30)
+        _safe_hist(ax_flat, stats["flat_series"], bins=30)
         ax_flat.set_title(f"{label} flat mass")
-        ax_score.hist([x for x in stats["score_series"] if math.isfinite(x)], bins=30)
+        _safe_hist(ax_score, stats["score_series"], bins=30)
         ax_score.set_title(f"{label} score")
 
-        ax_basin.hist([x for x in stats["basin_margin_series"] if math.isfinite(x)], bins=30)
+        _safe_hist(ax_basin, stats["basin_margin_series"], bins=30)
         ax_basin.set_title(f"{label} basin margin")
 
         action_mean = stats["action_return_mean"]
@@ -231,6 +254,19 @@ def main() -> None:
         if ent_future and future_abs and len(ent_future) == len(future_abs):
             ax_ent_profit.scatter(ent_future, future_abs, s=6, alpha=0.5)
         ax_ent_profit.set_title(f"{label} entropy vs abs return")
+
+        _safe_hist(ax_curve, stats["curvature_series"], bins=30)
+        ax_curve.set_title(f"{label} curvature")
+
+        curvature = stats["curvature_series"]
+        if curvature and future_abs and len(curvature) >= len(future_abs):
+            curvature = curvature[: len(future_abs)]
+        if curvature and future_abs and len(curvature) == len(future_abs):
+            ax_curve_profit.scatter(curvature, future_abs, s=6, alpha=0.5)
+        ax_curve_profit.set_title(f"{label} curvature vs abs return")
+
+        ax_curve_hold.bar(["act", "hold"], [stats["action_abs_return_mean"], stats["hold_abs_return_mean"]])
+        ax_curve_hold.set_title(f"{label} abs return (act/hold)")
     plt.tight_layout()
     plot_path = pathlib.Path(args.plot)
     plot_path.parent.mkdir(parents=True, exist_ok=True)
