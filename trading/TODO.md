@@ -29,10 +29,23 @@ Legend: (EXEC) implementation, (DECISION) policy decision, (ANALYSIS) analysis/v
 - [x] (ANALYSIS) Rerun BTC/SPY multi-mode shadow comparisons after the `ActionWeights` retune and compare against `20260313T061237Z` (`logs/shadow/*_20260313T062106Z.*`, `logs/shadow/shadow_signal_report_20260313T062106Z.md`).
 - [x] (DECISION) The first `ActionWeights` retune broke the all-hold regime but overshot into near-all-act behavior, so the next futures-policy step is moderation/calibration rather than more raw reward lifting.
 - [ ] (EXEC) Calibrate `ActionWeights` and/or score thresholds so shadow action rates are no longer 100%-hold but also not effectively 100%-act across BTC/SPY mode sweeps.
-- [ ] (EXEC) Add score normalization modes (`ratio`, `scaled_diff`, `logistic`) and gating modes (`lex`, `joint`, `score_only`) to the shadow pipeline for A/B calibration.
-- [ ] (EXEC) Add `shrinkage` kernel mode and kernel lambda logging; keep residual only for comparison.
-- [ ] (EXEC) Extend the shadow analysis script with score histogram, basin margin histogram, action vs hold return conditional, and entropy vs profitability plots + soft-gate metrics.
-- [ ] (ANALYSIS) Run BTC/SPY A/B shadow sweeps across score/gating/kernel modes with timestamped artifacts and review against the soft acceptance targets.
+- [x] (EXEC) Add score normalization modes (`ratio`, `scaled_diff`, `logistic`) and gating modes (`lex`, `joint`, `score_only`) to the shadow pipeline for A/B calibration.
+- [x] (EXEC) Add `shrinkage` kernel mode and kernel lambda logging; keep residual only for comparison.
+- [x] (EXEC) Extend the shadow analysis script with score histogram, basin margin histogram, action vs hold return conditional, and entropy vs profitability plots + soft-gate metrics.
+- [x] (ANALYSIS) Run BTC/SPY A/B shadow sweeps across score/gating/kernel modes with timestamped artifacts and review against the soft acceptance targets.
+- [x] (ANALYSIS) Run fixed-threshold sweeps for learned-kernel labels (0.010–0.030 and 0.05–0.25) and confirm flat labels exist in training but predicted flat mass stays ~0 (all-act remains).
+- [x] (EXEC) Log kernel label counts (long/short/flat/stress) and predicted class means in shadow reports.
+- [x] (EXEC) Implement label-stratified beam retention (quota + overflow) so flat candidates survive pruning.
+- [x] (ANALYSIS) Re-run 0.05/0.10 threshold checks with label-stratified retention and inspect `pred_flat` lift-off.
+- [x] (EXEC) Switch basin classification to a label-aware rule with fee floor (`flat if last_label==flat` or `|predicted_return| < max(flat_return_band, flat_cost_floor)`).
+- [x] (EXEC) Add beam label survival logging (per-depth long/short/flat counts) to diagnose where flat dies.
+- [x] (ANALYSIS) Re-run cost-band threshold checks (0.05) after label-aware flat persistence and review `pred_flat`, `flat_mean`, and beam survival counts (`logs/shadow/shadow_signal_report_20260313T135734Z_costband005_rerun.md`); `pred_flat` lifted on both BTC/SPY.
+- [x] (ANALYSIS) Run the 0.10 cost-band companion check after the parser field-limit fix to map the hold/act transition with the corrected aggregation path (`logs/shadow/shadow_signal_report_20260313T143040Z_costband010_rerun.md`): flat mass rises, action rate collapses via entropy gate.
+- [x] (EXEC) Recalibrate entropy/gating boundary so 0.05 -> 0.10 transition is not an act/hold cliff (lex entropy threshold default raised to `0.96`; `logs/shadow/shadow_signal_report_20260313T145412Z_costband010_ent096.md` now yields action rates BTC `0.0546`, SPY `0.1038`).
+- [x] (ANALYSIS) Run a matched 0.05 rerun under `ent096` defaults and compare slope/robustness of the action-rate curve against 0.10 (`logs/shadow/shadow_signal_report_20260313T151102Z_costband005_ent096.md`): 0.05 remains near-all-act while 0.10 is calibrated, so threshold slope is still steep.
+- [x] (EXEC) Add a smooth entropy gate via logistic entropy attenuation on score (`shadow_entropy_gate_mode={hard,logistic}`, `shadow_entropy_gate_center`, `shadow_entropy_gate_tau`) and wire CLI/runtime controls through `run_trader`/`engine.loop`.
+- [x] (ANALYSIS) Run the three-point smooth-gate sweep (0.05/0.075/0.10) with `H0=0.955`, `tau=0.01` (`logs/shadow/*_smooth_gate_{005,075,100}_*.csv` + reports): basin geometry shifts smoothly, but action rate remains near-all-act (insufficient suppression at low/mid thresholds).
+- [ ] (EXEC) Add score-threshold calibration (or adaptive target-action-rate control) on top of smooth entropy attenuation; current smooth gate alone does not produce the desired 0.05 -> 0.10 action-rate curve.
 - [x] (DOC) Add a quant-facing inquiry note that points reviewers at the formal docs, current shadow artifacts, and the concrete tuning questions (`docs/QUANT_PROFESSIONAL_JUDGEMENT_INQUIRY.md`).
 - [ ] (EXEC) Replace confidence thresholds with explicit ternary actions (intent/exec alignment).
 - [x] (EXEC) Add losing-trade alignment script (closest profitable entry by input distance).

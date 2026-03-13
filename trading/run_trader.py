@@ -98,8 +98,15 @@ def main(
     shadow_kernel_label_threshold: float = 0.01,
     shadow_kernel_label_vol_mult: float = 0.5,
     shadow_kernel_log_dir: str = "logs",
+    shadow_entropy_gate_mode: str = "logistic",
+    shadow_entropy_gate_center: float = 0.955,
+    shadow_entropy_gate_tau: float = 0.01,
     shadow_curvature_threshold: float = 0.0,
     shadow_score_curvature_weight: bool = False,
+    shadow_beam_label_min_quota: int = 1,
+    shadow_beam_label_quota_frac: float = 0.25,
+    shadow_beam_flat_return_band: float = 0.02,
+    shadow_beam_flat_cost_floor: float = 0.0,
 ):
     run_ts = pd.Timestamp.utcnow().strftime("%Y%m%dT%H%M%SZ")
 
@@ -223,8 +230,15 @@ def main(
                     shadow_kernel_label_threshold=shadow_kernel_label_threshold,
                     shadow_kernel_label_vol_mult=shadow_kernel_label_vol_mult,
                     shadow_kernel_log_dir=shadow_kernel_log_dir,
+                    shadow_entropy_gate_mode=shadow_entropy_gate_mode,
+                    shadow_entropy_gate_center=shadow_entropy_gate_center,
+                    shadow_entropy_gate_tau=shadow_entropy_gate_tau,
                     shadow_curvature_threshold=shadow_curvature_threshold,
                     shadow_score_curvature_weight=shadow_score_curvature_weight,
+                    shadow_beam_label_min_quota=shadow_beam_label_min_quota,
+                    shadow_beam_label_quota_frac=shadow_beam_label_quota_frac,
+                    shadow_beam_flat_return_band=shadow_beam_flat_return_band,
+                    shadow_beam_flat_cost_floor=shadow_beam_flat_cost_floor,
                 )
                 if not log_combined:
                     emit_geometry(log_path, source)
@@ -301,8 +315,15 @@ def main(
         shadow_kernel_label_threshold=shadow_kernel_label_threshold,
         shadow_kernel_label_vol_mult=shadow_kernel_label_vol_mult,
         shadow_kernel_log_dir=shadow_kernel_log_dir,
+        shadow_entropy_gate_mode=shadow_entropy_gate_mode,
+        shadow_entropy_gate_center=shadow_entropy_gate_center,
+        shadow_entropy_gate_tau=shadow_entropy_gate_tau,
         shadow_curvature_threshold=shadow_curvature_threshold,
         shadow_score_curvature_weight=shadow_score_curvature_weight,
+        shadow_beam_label_min_quota=shadow_beam_label_min_quota,
+        shadow_beam_label_quota_frac=shadow_beam_label_quota_frac,
+        shadow_beam_flat_return_band=shadow_beam_flat_return_band,
+        shadow_beam_flat_cost_floor=shadow_beam_flat_cost_floor,
     )
     emit_geometry(LOG, source)
 
@@ -415,6 +436,25 @@ if __name__ == "__main__":
         help="Directory containing trading_log*.csv used to fit the learned kernel.",
     )
     ap.add_argument(
+        "--shadow-entropy-gate-mode",
+        type=str,
+        default="logistic",
+        choices=["hard", "logistic"],
+        help="Entropy gating mode: hard cutoff or smooth logistic attenuation.",
+    )
+    ap.add_argument(
+        "--shadow-entropy-gate-center",
+        type=float,
+        default=0.955,
+        help="Center entropy for logistic attenuation.",
+    )
+    ap.add_argument(
+        "--shadow-entropy-gate-tau",
+        type=float,
+        default=0.01,
+        help="Softness (tau) for logistic entropy attenuation.",
+    )
+    ap.add_argument(
         "--shadow-curvature-threshold",
         type=float,
         default=0.0,
@@ -424,6 +464,30 @@ if __name__ == "__main__":
         "--shadow-score-curvature-weight",
         action="store_true",
         help="Multiply shadow score by basin curvature to suppress noisy regimes.",
+    )
+    ap.add_argument(
+        "--shadow-beam-label-min-quota",
+        type=int,
+        default=1,
+        help="Minimum per-label quota to preserve in each beam step.",
+    )
+    ap.add_argument(
+        "--shadow-beam-label-quota-frac",
+        type=float,
+        default=0.25,
+        help="Fraction of beam width reserved per label before global fill.",
+    )
+    ap.add_argument(
+        "--shadow-beam-flat-return-band",
+        type=float,
+        default=0.02,
+        help="Return band for flat basin classification (abs return below band = flat).",
+    )
+    ap.add_argument(
+        "--shadow-beam-flat-cost-floor",
+        type=float,
+        default=0.0,
+        help="Fee/slippage floor for flat band (abs return below floor = flat).",
     )
     ap.add_argument(
         "--shadow-score-mode",
@@ -493,6 +557,13 @@ if __name__ == "__main__":
         shadow_kernel_label_threshold=args.shadow_kernel_label_threshold,
         shadow_kernel_label_vol_mult=args.shadow_kernel_label_vol_mult,
         shadow_kernel_log_dir=args.shadow_kernel_log_dir,
+        shadow_entropy_gate_mode=args.shadow_entropy_gate_mode,
+        shadow_entropy_gate_center=args.shadow_entropy_gate_center,
+        shadow_entropy_gate_tau=args.shadow_entropy_gate_tau,
         shadow_curvature_threshold=args.shadow_curvature_threshold,
         shadow_score_curvature_weight=args.shadow_score_curvature_weight,
+        shadow_beam_label_min_quota=args.shadow_beam_label_min_quota,
+        shadow_beam_label_quota_frac=args.shadow_beam_label_quota_frac,
+        shadow_beam_flat_return_band=args.shadow_beam_flat_return_band,
+        shadow_beam_flat_cost_floor=args.shadow_beam_flat_cost_floor,
     )

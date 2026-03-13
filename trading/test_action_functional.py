@@ -249,6 +249,7 @@ def test_learned_transition_model_emits_flat_candidate_from_observations():
                 branch_risk=0.2,
                 diffusion_risk=0.2,
                 realized_vol=0.01,
+                label="flat",
             )
             for _ in range(12)
         ],

@@ -22,6 +22,10 @@ def _clip(value: float, lo: float, hi: float) -> float:
 class BeamConfig:
     horizon: int = 4
     beam_width: int = 12
+    label_min_quota: int = 1
+    label_quota_frac: float = 0.25
+    flat_return_band: float = 0.02
+    flat_cost_floor: float = 0.0
     exposure_step: float = 0.25
     probability_floor: float = 1e-3
     action_grid: tuple[int, ...] = (-1, 0, 1)
@@ -94,9 +98,14 @@ class BeamDecisionDiagnostics:
     kernel_fallback_used: int
     kernel_source_count: int
     kernel_bucket_count: int
+    kernel_label_count_long: int
+    kernel_label_count_short: int
+    kernel_label_count_flat: int
+    kernel_label_count_stress: int
     kernel_lambda: float
     kernel_asset_count: int
     kernel_global_count: int
+    beam_step_counts: str
 
     def to_log_fields(self) -> dict[str, float | int | str]:
         return {
@@ -122,10 +131,15 @@ class BeamDecisionDiagnostics:
             "shadow_kernel_fallback_used": self.kernel_fallback_used,
             "shadow_kernel_source_count": self.kernel_source_count,
             "shadow_kernel_bucket_count": self.kernel_bucket_count,
+            "shadow_kernel_label_count_long": self.kernel_label_count_long,
+            "shadow_kernel_label_count_short": self.kernel_label_count_short,
+            "shadow_kernel_label_count_flat": self.kernel_label_count_flat,
+            "shadow_kernel_label_count_stress": self.kernel_label_count_stress,
             "shadow_kernel_lambda": self.kernel_lambda,
             "shadow_kernel_asset_count": self.kernel_asset_count,
             "shadow_kernel_global_count": self.kernel_global_count,
             "shadow_gating_mode": self.gating_mode,
+            "shadow_beam_step_counts": self.beam_step_counts,
         }
 
 
@@ -149,6 +163,8 @@ class BeamNode:
     return_history: list[float] = field(default_factory=list)
     branch_risk_history: list[float] = field(default_factory=list)
     diffusion_risk_history: list[float] = field(default_factory=list)
+    label_history: list[str] = field(default_factory=list)
+    last_label: str = "flat"
 
     @property
     def terminal_exposure(self) -> float:
@@ -261,7 +277,11 @@ class FutureBeamSearch:
         self.action_functional = action_functional
         self.transition_model = transition_model
         self.beam_config = beam_config or BeamConfig()
-        self.basin_classifier = BasinClassifier()
+        self.basin_classifier = BasinClassifier(
+            flat_return_band=self.beam_config.flat_return_band,
+            flat_cost_floor=self.beam_config.flat_cost_floor,
+        )
+        self.last_step_counts: list[dict[str, int]] = []
 
     def search(self, initial_state: CoarseState) -> list[BeamNode]:
         beam = [
@@ -302,13 +322,59 @@ class FutureBeamSearch:
                                 return_history=node.return_history + [candidate.step_return],
                                 branch_risk_history=node.branch_risk_history + [candidate.step_branch_risk],
                                 diffusion_risk_history=node.diffusion_risk_history + [candidate.step_diffusion_risk],
+                                label_history=node.label_history + [candidate.label],
+                                last_label=candidate.label,
                             )
                         )
-            next_beam.sort(key=lambda item: (item.cumulative_score, item.cumulative_log_prob), reverse=True)
-            beam = next_beam[: cfg.beam_width]
+            next_beam = self._select_diverse_beam(next_beam, cfg)
+            beam = next_beam
+            self.last_step_counts.append(self._count_labels(beam, depth=depth + 1))
             if not beam:
                 break
         return beam
+
+    @staticmethod
+    def _label_bucket(label: str) -> str:
+        lower = label.lower()
+        if "flat" in lower:
+            return "flat"
+        if "down" in lower or "short" in lower:
+            return "short"
+        if "stress" in lower:
+            return "flat"
+        return "long"
+
+    def _count_labels(self, beam: list[BeamNode], *, depth: int) -> dict[str, int]:
+        counts = {"depth": depth, "long": 0, "short": 0, "flat": 0}
+        for node in beam:
+            bucket = self._label_bucket(node.last_label)
+            counts[bucket] += 1
+        return counts
+
+    def _select_diverse_beam(self, nodes: list[BeamNode], cfg: BeamConfig) -> list[BeamNode]:
+        if not nodes:
+            return []
+        nodes_sorted = sorted(nodes, key=lambda item: (item.cumulative_score, item.cumulative_log_prob), reverse=True)
+        label_buckets: dict[str, list[BeamNode]] = {"long": [], "short": [], "flat": []}
+        for node in nodes_sorted:
+            label = self._label_bucket(node.last_label)
+            label_buckets[label].append(node)
+        beam_width = int(cfg.beam_width)
+        quota = max(int(cfg.label_min_quota), int(math.floor(cfg.label_quota_frac * beam_width)))
+        selected: list[BeamNode] = []
+        for label in ("long", "short", "flat"):
+            bucket = label_buckets[label]
+            if bucket:
+                selected.extend(bucket[: min(quota, len(bucket))])
+        if len(selected) < beam_width:
+            selected_set = {id(node) for node in selected}
+            for node in nodes_sorted:
+                if id(node) in selected_set:
+                    continue
+                selected.append(node)
+                if len(selected) >= beam_width:
+                    break
+        return selected[:beam_width]
 
     def summarize(self, beam: list[BeamNode]) -> BeamSummary:
         if not beam:
@@ -351,7 +417,10 @@ class BeamIntentPolicy:
         symbol: str,
         search: FutureBeamSearch,
         exposure_cap: float = 1.0,
-        entropy_threshold: float = 0.92,
+        entropy_threshold: float = 0.96,
+        entropy_gate_mode: str = "logistic",
+        entropy_gate_center: float = 0.955,
+        entropy_gate_tau: float = 0.01,
         entropy_score_floor: float = 0.05,
         entropy_margin_floor: float = 0.20,
         flat_mass_threshold: float = 0.50,
@@ -367,6 +436,9 @@ class BeamIntentPolicy:
         self.search = search
         self.exposure_cap = float(exposure_cap)
         self.entropy_threshold = float(entropy_threshold)
+        self.entropy_gate_mode = str(entropy_gate_mode)
+        self.entropy_gate_center = float(entropy_gate_center)
+        self.entropy_gate_tau = max(abs(float(entropy_gate_tau)), 1e-6)
         self.entropy_score_floor = float(entropy_score_floor)
         self.entropy_margin_floor = float(entropy_margin_floor)
         self.flat_mass_threshold = float(flat_mass_threshold)
@@ -378,6 +450,18 @@ class BeamIntentPolicy:
         self.score_curvature_weight = bool(score_curvature_weight)
         self.gating_mode = gating_mode
 
+    def _entropy_weight(self, entropy: float) -> float:
+        if self.entropy_gate_mode == "hard":
+            return 0.0 if entropy > self.entropy_threshold else 1.0
+        center = self.entropy_gate_center
+        tau = self.entropy_gate_tau
+        z = (float(entropy) - center) / tau
+        if z >= 50.0:
+            return 0.0
+        if z <= -50.0:
+            return 1.0
+        return 1.0 / (1.0 + math.exp(z))
+
     def _kernel_metadata(self) -> dict[str, int | float | str]:
         metadata = getattr(self.search.transition_model, "metadata", {}) or {}
         return {
@@ -385,6 +469,10 @@ class BeamIntentPolicy:
             "kernel_fallback_used": int(bool(metadata.get("fallback_used", False))),
             "kernel_source_count": int(metadata.get("source_count", 0)),
             "kernel_bucket_count": int(metadata.get("bucket_count", 0)),
+            "kernel_label_count_long": int(metadata.get("label_count_long", 0)),
+            "kernel_label_count_short": int(metadata.get("label_count_short", 0)),
+            "kernel_label_count_flat": int(metadata.get("label_count_flat", 0)),
+            "kernel_label_count_stress": int(metadata.get("label_count_stress", 0)),
             "kernel_lambda": float(metadata.get("kernel_lambda", 0.0)),
             "kernel_asset_count": int(metadata.get("kernel_asset_count", 0)),
             "kernel_global_count": int(metadata.get("kernel_global_count", 0)),
@@ -429,10 +517,26 @@ class BeamIntentPolicy:
             kernel_fallback_used=int(kernel["kernel_fallback_used"]),
             kernel_source_count=int(kernel["kernel_source_count"]),
             kernel_bucket_count=int(kernel["kernel_bucket_count"]),
+            kernel_label_count_long=int(kernel["kernel_label_count_long"]),
+            kernel_label_count_short=int(kernel["kernel_label_count_short"]),
+            kernel_label_count_flat=int(kernel["kernel_label_count_flat"]),
+            kernel_label_count_stress=int(kernel["kernel_label_count_stress"]),
             kernel_lambda=float(kernel.get("kernel_lambda", 0.0)),
             kernel_asset_count=int(kernel.get("kernel_asset_count", 0)),
             kernel_global_count=int(kernel.get("kernel_global_count", 0)),
+            beam_step_counts=self._format_step_counts(),
         )
+
+    def _format_step_counts(self) -> str:
+        steps = getattr(self.search, "last_step_counts", []) or []
+        if not steps:
+            return ""
+        parts = []
+        for step in steps:
+            parts.append(
+                f"d{step.get('depth', 0)}:{step.get('long', 0)},{step.get('short', 0)},{step.get('flat', 0)}"
+            )
+        return "|".join(parts)
 
     def _hold_step(
         self,
@@ -496,6 +600,7 @@ class BeamIntentPolicy:
         score_adjusted = best.cumulative_score * (1.0 - summary.flat_mass)
         if self.score_curvature_weight:
             score_adjusted *= summary.curvature
+        score_adjusted *= self._entropy_weight(summary.entropy)
         if self.gating_mode == "score_only":
             if score_adjusted <= self.score_threshold:
                 return self._hold_step(
@@ -520,7 +625,7 @@ class BeamIntentPolicy:
                     score_penalty=score_penalty,
                     score_adjusted=score_adjusted,
                 )
-            if summary.entropy > self.entropy_threshold:
+            if self.entropy_gate_mode == "hard" and summary.entropy > self.entropy_threshold:
                 return self._hold_step(
                     ts=ts,
                     initial_state=initial_state,
@@ -558,6 +663,8 @@ class BeamIntentPolicy:
                 )
         else:
             if (
+                self.entropy_gate_mode == "hard"
+                and
                 summary.entropy > self.entropy_threshold
                 and directional_margin < self.entropy_margin_floor
                 and score_adjusted < self.entropy_score_floor

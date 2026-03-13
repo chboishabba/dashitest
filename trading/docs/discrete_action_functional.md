@@ -110,6 +110,8 @@ The output is a set of terminal nodes plus aggregate masses:
 - short mass
 - flat mass
 - path entropy
+- flat mass now uses a return band with a fee floor:
+  `|predicted_return| < max(flat_return_band, flat_cost_floor)`
 
 ## Intent selection
 
@@ -135,17 +137,24 @@ What is implemented now:
 - optional beam-backed intent selector
 - basin mass classifier
 - `BeamSummary` diagnostics for entropy, masses, score, return, risk, contraction, and diffusion
+- basin-geometry diagnostics (`beam_curvature`, `beam_flat_distance`)
 - shadow runner contract for observe-only validation against the baseline policy
 - opt-in `--shadow-futures` engine logging path that records live/shadow decisions in the per-step trader log without changing execution
 - corrected pre-execution shadow splice so the shadow policy sees the same state the live policy used before fills mutate cash/position
 - decision-grade BTC/SPY shadow report and plots captured at `logs/shadow/*_20260312T052900Z.*`
 - learned transition-kernel scaffold fitted from historical per-step trader logs, with heuristic fallback when no usable log history exists
+- score-mode and gating-mode A/B (`ratio`, `scaled_diff`, `logistic`; `lex`, `joint`, `score_only`)
+- `shrinkage` kernel mode with kernel lambda metadata
+- kernel log-dir override (`--shadow-kernel-log-dir`) so the learned model can train from `logs/shadow`
+- label-stratified beam retention (quota + overflow) so flat candidates survive pruning
+- label-aware basin classification (flat label persists; return band uses fee floor)
+- beam label survival logging (per-depth long/short/flat counts)
 
 What is intentionally not implemented yet:
 
 - control takeover in the main loop
 - dashboard panes for beam entropy / basin masses
-- post-kernel BTC/SPY comparison rerun and threshold recalibration if the learned geometry is still too hold-dominant
+- post-cost-band BTC/SPY recalibration once `pred_flat` lift-off is confirmed
 
 ## Decision-grade diagnosis
 
@@ -211,6 +220,21 @@ That changes the diagnosis:
   - entropy hold threshold is still too blunt
   - beam scores still skew negative often enough to keep intent selection flat
   - intent-selection logic needs recalibration now that flat basin mass exists
+
+## Calibration sweeps (label thresholds)
+
+Fixed-threshold sweeps across `0.010–0.030` and `0.05–0.25` show:
+
+- low thresholds: all-act, flat mass ~0, basin margin ~1
+- higher thresholds: flat labels appear in training (up to ~5%), but predicted
+  flat mass stays ~0, so action rate remains near 100%
+
+Conclusion: the kernel sees flat labels, but beam selection/score still
+eliminates flat paths. Label-stratified retention and label-aware return-band
+classification (with fee floor) are now implemented, but the 0.05/0.10
+retention rechecks still show `pred_flat ≈ 0`, indicating basin aggregation is
+still collapsing flat trajectories. The next step is a cost-band sweep with
+beam survival counts to confirm `pred_flat` lift-off before gate retuning.
 
 ## Hold-bias remediation milestone
 

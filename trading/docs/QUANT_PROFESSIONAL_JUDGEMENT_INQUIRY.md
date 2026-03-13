@@ -65,6 +65,22 @@ Shadow mode supports three learned-kernel modes:
 
 The modes are now directly comparable via the standard shadow analysis script.
 
+## Basin geometry extensions (current)
+
+Shadow diagnostics now include basin geometry signals:
+
+- `beam_curvature = p_long + p_short - p_flat`
+- `beam_flat_distance = ||(p_long, p_short, p_flat) - (0,0,1)||`
+
+Shadow gating can optionally:
+
+- hold when curvature is below a threshold
+- weight scores by curvature to suppress noisy regimes
+- classify flat basin mass using a return band (small returns → flat)
+- enforce a fee/slippage cost floor for flat classification
+
+These are logged but not yet used for control takeover.
+
 ## Empirical state (latest artifacts)
 
 ### Hold-remediation comparison (pre-weight retune)
@@ -97,6 +113,28 @@ Result:
 - all SPY modes act ratio = 1.0
 
 Current blocker: moderation/calibration.
+
+### Threshold sweeps (label calibration)
+
+Artifacts:
+
+- `logs/shadow/shadow_signal_report_20260313T115844Z.md` (fixed vs vol label modes at 0.01)
+- `logs/shadow/shadow_signal_report_20260313T121008Z_th0010.md` to `..._th0030.md` (fixed 0.010–0.030)
+- `logs/shadow/shadow_signal_report_20260313T123649Z_th005.md` to `..._th025.md` (fixed 0.05–0.25)
+- `logs/shadow/shadow_signal_report_20260313T125828Z_lsr_th005.md` (label-stratified retention at 0.05)
+- `logs/shadow/shadow_signal_report_20260313T130029Z_lsr_th010.md` (label-stratified retention at 0.10)
+- `logs/shadow/shadow_signal_report_20260313T135734Z_costband005_rerun.md` (label-aware + fee-floor rerun at 0.05 after parser-limit fix)
+
+Results:
+
+- Low thresholds (0.010–0.030): all-act, flat mass ~0, basin margin ~1.
+- Higher thresholds (0.05–0.25): training flat labels appear (up to ~5%) but predicted flat mass stays ~0.
+- Label-stratified retention (0.05/0.10) initially yielded `pred_flat ≈ 0`; beam survival counts confirmed flat survives all beam depths and was collapsing at aggregation.
+- After label-aware flat persistence + fee-floor band rerun at 0.05, `pred_flat` lifted on both tapes (BTC `0.0865`, SPY `0.0737`), confirming tri-modal basin recovery.
+
+Current next step: run the 0.10 companion check under the same parser-fixed path
+to map the hold/act transition, then retune gate/score thresholds from a now
+valid tri-modal basin.
 
 ## What we need from quant reviewers
 
@@ -137,7 +175,11 @@ What is the minimal decision-grade evidence that would justify:
 ## One-line status summary
 
 We now have an interpretable, shadow-only competing-futures controller with
-learned transition kernels and explicit hold diagnostics, but its calibration
-still swings between two degenerate regimes: all-hold and near-all-act.
-Quant judgement is needed on score construction, gating, and kernel hierarchy
-before further tuning.
+learned transition kernels, explicit hold diagnostics, and basin-geometry
+signals; calibration has escaped all-hold but now overshoots into all-act.
+Label-threshold sweeps show flat labels exist in training, yet flat basin mass
+initially remained ~0 even after label-stratified retention, indicating basin
+aggregation collapse. With label-aware basin classification (cost-floor band)
+plus beam survival instrumentation, the 0.05 rerun now shows nonzero
+`pred_flat` on both BTC/SPY; immediate work is threshold calibration (starting
+with 0.10 companion run) rather than structural flat-survival fixes.

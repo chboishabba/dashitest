@@ -49,10 +49,15 @@ def beam_decision_to_log_fields(decision) -> dict:
             "shadow_kernel_fallback_used": None,
             "shadow_kernel_source_count": None,
             "shadow_kernel_bucket_count": None,
+            "shadow_kernel_label_count_long": None,
+            "shadow_kernel_label_count_short": None,
+            "shadow_kernel_label_count_flat": None,
+            "shadow_kernel_label_count_stress": None,
             "shadow_kernel_lambda": None,
             "shadow_kernel_asset_count": None,
             "shadow_kernel_global_count": None,
             "shadow_gating_mode": None,
+            "shadow_beam_step_counts": None,
         }
     if hasattr(decision, "to_log_fields"):
         return decision.to_log_fields()

@@ -17,14 +17,30 @@ class BasinClassifier:
     Classify terminal beam nodes by basin mass, normalized to one.
     """
 
+    def __init__(
+        self,
+        flat_return_band: float = 0.02,
+        flat_cost_floor: float = 0.0,
+        label_flat_first: bool = True,
+    ):
+        self.flat_return_band = float(flat_return_band)
+        self.flat_cost_floor = float(flat_cost_floor)
+        self.label_flat_first = bool(label_flat_first)
+
     def classify(self, beam_nodes: Iterable) -> BasinMass:
         long_mass = 0.0
         short_mass = 0.0
         flat_mass = 0.0
+        band = max(abs(self.flat_return_band), abs(self.flat_cost_floor))
         for node in beam_nodes:
             weight = float(getattr(node, "weight", 0.0))
             predicted_return = float(getattr(node, "predicted_return", 0.0))
-            if predicted_return > 0:
+            last_label = str(getattr(node, "last_label", "")).lower()
+            if self.label_flat_first and "flat" in last_label:
+                flat_mass += weight
+            elif band > 0.0 and abs(predicted_return) < band:
+                flat_mass += weight
+            elif predicted_return > 0:
                 long_mass += weight
             elif predicted_return < 0:
                 short_mass += weight

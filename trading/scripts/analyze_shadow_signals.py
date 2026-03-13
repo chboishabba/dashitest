@@ -4,6 +4,7 @@ import argparse
 import csv
 import math
 import pathlib
+import sys
 from collections import Counter
 from statistics import mean
 
@@ -12,6 +13,16 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+
+
+def _set_csv_field_limit_to_max() -> None:
+    limit = sys.maxsize
+    while True:
+        try:
+            csv.field_size_limit(limit)
+            return
+        except OverflowError:
+            limit //= 10
 
 
 def _float(row: dict[str, str], key: str) -> float:
@@ -41,6 +52,7 @@ def _corr(xs, ys) -> float:
 
 
 def load_rows(path: pathlib.Path) -> list[dict[str, str]]:
+    _set_csv_field_limit_to_max()
     with path.open(newline="", encoding="utf-8") as fh:
         return list(csv.DictReader(fh))
 
@@ -64,6 +76,8 @@ def analyze(rows: list[dict[str, str]], horizon: int = 20) -> dict[str, object]:
     score_series = []
     basin_margin_series = []
     curvature_series = []
+    long_series = []
+    short_series = []
     divergence = []
     flat_nonzero = 0
     hold_count = 0
@@ -104,6 +118,12 @@ def analyze(rows: list[dict[str, str]], horizon: int = 20) -> dict[str, object]:
         curvature = _float(row, "beam_curvature")
         if math.isfinite(curvature):
             curvature_series.append(curvature)
+        long_mass = _float(row, "beam_long_mass")
+        short_mass = _float(row, "beam_short_mass")
+        if math.isfinite(long_mass):
+            long_series.append(long_mass)
+        if math.isfinite(short_mass):
+            short_series.append(short_mass)
         if idx + horizon < len(rows):
             px = _float(row, "price")
             px2 = _float(rows[idx + horizon], "price")
@@ -152,6 +172,8 @@ def analyze(rows: list[dict[str, str]], horizon: int = 20) -> dict[str, object]:
         "score_series": score_series,
         "basin_margin_series": basin_margin_series,
         "curvature_series": curvature_series,
+        "long_series": long_series,
+        "short_series": short_series,
         "entropy_future": ent_future,
         "future_abs": future_abs,
         "action_rate": 1.0 - (hold_count / len(rows)) if rows else float("nan"),
@@ -207,6 +229,11 @@ def main() -> None:
             fh.write(f"- basin edge vs next move corr ({args.horizon}): `{stats['basin_edge_move_corr']:.6f}`\n")
             if stats["curvature_series"]:
                 fh.write(f"- curvature mean: `{mean(stats['curvature_series']):.6f}`\n")
+            if stats["long_series"] and stats["short_series"] and stats["flat_series"]:
+                fh.write(
+                    "- predicted class mean (long/short/flat): "
+                    f"`{mean(stats['long_series']):.4f}` / `{mean(stats['short_series']):.4f}` / `{mean(stats['flat_series']):.4f}`\n"
+                )
             fh.write(f"- shadow action sign accuracy ({args.horizon}): `{stats['action_sign_accuracy']:.6f}`\n")
             fh.write(f"- live action sign accuracy ({args.horizon}): `{stats['live_sign_accuracy']:.6f}`\n")
             fh.write(f"- shadow action return mean ({args.horizon}): `{stats['action_return_mean']:.6f}`\n")

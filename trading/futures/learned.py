@@ -3,11 +3,26 @@ from __future__ import annotations
 import csv
 import math
 import pathlib
+import sys
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
 from .beam import HeuristicTransitionModel, TransitionCandidate, _clip
 from .state import CoarseState, CoarseStateEstimator, ObservationSnapshot
+
+
+def _set_csv_field_limit_to_max() -> None:
+    """
+    Lift CSV parser field limits so large diagnostic columns do not break
+    learned-kernel fitting.
+    """
+    limit = sys.maxsize
+    while True:
+        try:
+            csv.field_size_limit(limit)
+            return
+        except OverflowError:
+            limit //= 10
 
 
 def _sign_bucket(value: float, threshold: float = 0.1) -> int:
@@ -76,6 +91,7 @@ class TransitionObservation:
     branch_risk: float
     diffusion_risk: float
     realized_vol: float
+    label: str
 
 
 @dataclass(frozen=True)
@@ -117,11 +133,14 @@ class LearnedTransitionModel:
     ) -> LearnedTransitionModel:
         grouped: dict[tuple, list[TransitionObservation]] = {}
         action_grouped: dict[int, list[TransitionObservation]] = {}
+        label_counts = {"long": 0, "short": 0, "flat": 0, "stress": 0}
         observation_list = list(observations)
         for obs in observation_list:
             key = cls._bucket_key(obs.current_state, obs.action)
             grouped.setdefault(key, []).append(obs)
             action_grouped.setdefault(obs.action, []).append(obs)
+            if obs.label in label_counts:
+                label_counts[obs.label] += 1
         buckets = {
             key: cls._summarize_group(
                 items,
@@ -152,6 +171,10 @@ class LearnedTransitionModel:
                 "label_mode": label_mode,
                 "label_threshold": label_threshold,
                 "label_vol_mult": label_vol_mult,
+                "label_count_long": label_counts["long"],
+                "label_count_short": label_counts["short"],
+                "label_count_flat": label_counts["flat"],
+                "label_count_stress": label_counts["stress"],
             },
         )
 
@@ -178,6 +201,9 @@ class LearnedTransitionModel:
                     path=path,
                     estimator=estimator,
                     max_rows=max_rows_per_file,
+                    label_mode=label_mode,
+                    label_threshold=label_threshold,
+                    label_vol_mult=label_vol_mult,
                 )
             )
             if not file_observations:
@@ -230,9 +256,9 @@ class LearnedTransitionModel:
         if obs.next_state.stress >= 0.75 or obs.branch_risk >= 0.75:
             return "stress"
         if obs.step_return > threshold:
-            return "up"
+            return "long"
         if obs.step_return < -threshold:
-            return "down"
+            return "short"
         return "flat"
 
     @classmethod
@@ -246,15 +272,7 @@ class LearnedTransitionModel:
     ) -> list[_BucketStats]:
         label_groups: dict[str, list[TransitionObservation]] = {}
         for obs in observations:
-            label_groups.setdefault(
-                cls._label_for_observation(
-                    obs,
-                    label_mode=label_mode,
-                    label_threshold=label_threshold,
-                    label_vol_mult=label_vol_mult,
-                ),
-                [],
-            ).append(obs)
+            label_groups.setdefault(obs.label, []).append(obs)
         total = float(len(observations))
         stats: list[_BucketStats] = []
         for label, items in sorted(label_groups.items(), key=lambda item: len(item[1]), reverse=True):
@@ -331,11 +349,19 @@ class ResidualTransitionModel:
         self.residual_weight = float(residual_weight)
         global_meta = getattr(global_model, "metadata", {}) or {}
         asset_meta = getattr(asset_model, "metadata", {}) or {}
+        label_meta = asset_meta if asset_meta.get("observation_count", 0) else global_meta
         self.metadata = {
             "kernel_mode": "residual",
             "fallback_used": int(bool(global_meta.get("fallback_used", False) and asset_meta.get("fallback_used", False))),
             "source_count": int(global_meta.get("source_count", 0)) + int(asset_meta.get("source_count", 0)),
             "bucket_count": max(int(global_meta.get("bucket_count", 0)), int(asset_meta.get("bucket_count", 0))),
+            "label_count_long": int(label_meta.get("label_count_long", 0)),
+            "label_count_short": int(label_meta.get("label_count_short", 0)),
+            "label_count_flat": int(label_meta.get("label_count_flat", 0)),
+            "label_count_stress": int(label_meta.get("label_count_stress", 0)),
+            "label_mode": label_meta.get("label_mode", "fixed"),
+            "label_threshold": float(label_meta.get("label_threshold", 0.0)),
+            "label_vol_mult": float(label_meta.get("label_vol_mult", 0.0)),
         }
 
     def expand(self, state: CoarseState, action: int, next_exposure: float):
@@ -401,6 +427,7 @@ class ShrinkageTransitionModel:
         self.asset_model = asset_model
         global_meta = getattr(global_model, "metadata", {}) or {}
         asset_meta = getattr(asset_model, "metadata", {}) or {}
+        label_meta = asset_meta if asset_meta.get("observation_count", 0) else global_meta
         global_count = int(global_meta.get("observation_count", 0))
         asset_count = int(asset_meta.get("observation_count", 0))
         total = global_count + asset_count
@@ -413,6 +440,13 @@ class ShrinkageTransitionModel:
             "fallback_used": int(bool(global_meta.get("fallback_used", False) and asset_meta.get("fallback_used", False))),
             "source_count": int(global_meta.get("source_count", 0)) + int(asset_meta.get("source_count", 0)),
             "bucket_count": max(int(global_meta.get("bucket_count", 0)), int(asset_meta.get("bucket_count", 0))),
+            "label_count_long": int(label_meta.get("label_count_long", 0)),
+            "label_count_short": int(label_meta.get("label_count_short", 0)),
+            "label_count_flat": int(label_meta.get("label_count_flat", 0)),
+            "label_count_stress": int(label_meta.get("label_count_stress", 0)),
+            "label_mode": label_meta.get("label_mode", "fixed"),
+            "label_threshold": float(label_meta.get("label_threshold", 0.0)),
+            "label_vol_mult": float(label_meta.get("label_vol_mult", 0.0)),
         }
 
     def expand(self, state: CoarseState, action: int, next_exposure: float):
@@ -654,7 +688,11 @@ def _iter_observations_from_csv(
     path: pathlib.Path,
     estimator: CoarseStateEstimator,
     max_rows: int,
+    label_mode: str,
+    label_threshold: float,
+    label_vol_mult: float,
 ) -> Iterable[TransitionObservation]:
+    _set_csv_field_limit_to_max()
     with path.open(newline="", encoding="utf-8") as fh:
         rows = list(csv.DictReader(fh))
     if len(rows) < 2:
@@ -695,6 +733,22 @@ def _iter_observations_from_csv(
         step_return = next_state.drift
         branch_risk = max(0.0, next_state.stress + max(0.0, next_state.drawdown - current_state.drawdown))
         diffusion_risk = max(next_state.diffusion, abs(next_state.drift - current_state.drift))
+        label = LearnedTransitionModel._label_for_observation(
+            TransitionObservation(
+                current_state=current_state,
+                action=action,
+                next_exposure=next_exposure,
+                next_state=next_state,
+                step_return=step_return,
+                branch_risk=branch_risk,
+                diffusion_risk=diffusion_risk,
+                realized_vol=current_snapshot.realized_vol,
+                label="flat",
+            ),
+            label_mode=label_mode,
+            label_threshold=label_threshold,
+            label_vol_mult=label_vol_mult,
+        )
         yield TransitionObservation(
             current_state=current_state,
             action=action,
@@ -704,4 +758,5 @@ def _iter_observations_from_csv(
             branch_risk=branch_risk,
             diffusion_risk=diffusion_risk,
             realized_vol=current_snapshot.realized_vol,
+            label=label,
         )
