@@ -1,6 +1,7 @@
 import pathlib
 import time
 from collections import deque
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
@@ -22,6 +23,8 @@ from signals.stress import compute_structural_stress
 from signals.triadic import compute_triadic_state
 from ternary import clip_ternary_sum, ternary_controller, ternary_permission, ternary_sign
 from trading_io.logs import (
+    beam_decision_to_log_fields,
+    beam_summary_to_log_fields,
     emit_progress_print,
     emit_run_summary,
     emit_step_row,
@@ -30,6 +33,16 @@ from trading_io.logs import (
     emit_trade_row,
     emit_tower_row,
 )
+from futures import (
+    ActionFunctional,
+    BeamConfig,
+    BeamIntentPolicy,
+    FutureBeamSearch,
+    build_transition_model_from_logs,
+)
+from intent import Intent
+from policy.shadow_runner import ShadowPolicyRunner
+from signals.coarse_state import CoarseStateEstimator, ObservationSnapshot
 from trading_io.tower_projection import build_tower_projection
 from utils.stats import norm_cdf, norm_pdf, norm_ppf
 
@@ -129,6 +142,134 @@ def fmt_ts() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _permission_to_actionability(permission: int, p_bad_t: float) -> float:
+    if permission == 1:
+        return 1.0
+    if permission == 0:
+        return 0.5
+    return float(max(0.0, min(1.0, 1.0 - p_bad_t)))
+
+
+@dataclass
+class _LoopLivePolicyAdapter:
+    current_intent: Intent | None = None
+
+    def set_intent(self, intent: Intent) -> None:
+        self.current_intent = intent
+
+    def step(self, ts: int, initial_state):
+        if self.current_intent is None:
+            return Intent(
+                ts=int(ts),
+                symbol="shadow_unset",
+                direction=0,
+                target_exposure=0.0,
+                urgency=0.0,
+                ttl_ms=500,
+                hold=True,
+                actionability=getattr(initial_state, "actionability", 0.0),
+                reason="live_intent_unset",
+            )
+        return self.current_intent
+
+
+def _build_shadow_snapshot(
+    ret: float,
+    recent_rets: list[float],
+    sigma: float,
+    direction: int,
+    permission: int,
+    stress: float,
+    edge_proxy: float,
+    drawdown: float,
+    current_exposure: float,
+) -> ObservationSnapshot:
+    if recent_rets:
+        lookback = recent_rets[-min(len(recent_rets), 8) :]
+        trend_return = float(np.mean(lookback))
+    else:
+        trend_return = 0.0
+    if permission == 1:
+        actionability = 1.0
+    elif permission == 0:
+        actionability = 0.5
+    else:
+        actionability = 0.0
+    return ObservationSnapshot(
+        price_return=float(ret),
+        trend_return=trend_return,
+        realized_vol=float(sigma),
+        triadic_state=int(direction),
+        actionability=float(actionability),
+        stress=float(np.clip(stress, 0.0, 1.0)),
+        edge=float(edge_proxy),
+        drawdown=float(max(0.0, drawdown)),
+        current_exposure=float(np.clip(current_exposure, -1.0, 1.0)),
+    )
+
+
+def _compute_shadow_log_fields(
+    *,
+    shadow_runner,
+    shadow_estimator,
+    live_policy_adapter,
+    t: int,
+    symbol_name: str,
+    action_t: int,
+    fill: float,
+    p_bad_t: float,
+    ret: float,
+    recent_rets: list[float],
+    sigma: float,
+    direction: int,
+    permission: int,
+    stress: float,
+    edge_proxy: float,
+    start_cash: float,
+    pre_cash: float,
+    pre_pos: float,
+    price_t: float,
+) -> dict[str, float | int | str]:
+    actionability = _permission_to_actionability(permission, p_bad_t)
+    projected_pos = pre_pos + fill
+    live_target_exposure = float(min(abs(projected_pos), 1.0))
+    live_intent = Intent(
+        ts=int(t),
+        symbol=symbol_name,
+        direction=int(np.sign(action_t)),
+        target_exposure=live_target_exposure,
+        urgency=0.0 if action_t == 0 else 0.5,
+        ttl_ms=500,
+        hold=bool(action_t == 0),
+        actionability=actionability,
+        reason="live_loop_controller_pre_exec",
+    )
+    live_policy_adapter.set_intent(live_intent)
+    equity_now = pre_cash + pre_pos * price_t
+    drawdown_ratio = max(0.0, (start_cash - equity_now) / max(start_cash, 1e-9))
+    shadow_snapshot = _build_shadow_snapshot(
+        ret=ret,
+        recent_rets=recent_rets,
+        sigma=sigma,
+        direction=direction,
+        permission=permission,
+        stress=stress,
+        edge_proxy=edge_proxy,
+        drawdown=drawdown_ratio,
+        current_exposure=float(pre_pos),
+    )
+    shadow_state = shadow_estimator.estimate(shadow_snapshot)
+    shadow_step = shadow_runner.step(ts=t, initial_state=shadow_state)
+    shadow_log_fields = shadow_step.to_log_fields()
+    shadow_log_fields.update(
+        {
+            "live_fill_intended": float(fill),
+            "live_next_pos_intended": float(projected_pos),
+        }
+    )
+    return shadow_log_fields
+
+
 def run_trading_loop(
     price: np.ndarray,
     volume: np.ndarray,
@@ -172,6 +313,15 @@ def run_trading_loop(
     tower_log_path: pathlib.Path | None = None,
     run_id: str | None = None,
     posture_stable_min: int = 3,
+    shadow_futures: bool = False,
+    shadow_beam_horizon: int = 4,
+    shadow_beam_width: int = 12,
+    shadow_beam_exposure_step: float = 0.25,
+    shadow_kernel_mode: str = "per_asset",
+    shadow_kernel_residual_weight: float = 1.0,
+    shadow_score_mode: str = "ratio",
+    shadow_score_scale: float = 1.0,
+    shadow_gating_mode: str = "lex",
 ):
     def shadow_mdl_for_window(ret_window):
         n = len(ret_window)
@@ -215,6 +365,38 @@ def run_trading_loop(
             run_id = tower_log_path.stem
         else:
             run_id = source
+    shadow_runner = None
+    shadow_estimator = None
+    live_policy_adapter = None
+    symbol_name = tape_id if tape_id else source
+    if shadow_futures:
+        shadow_estimator = CoarseStateEstimator()
+        live_policy_adapter = _LoopLivePolicyAdapter()
+        shadow_runner = ShadowPolicyRunner(
+            live_policy_adapter,
+            BeamIntentPolicy(
+                symbol=symbol_name,
+                search=FutureBeamSearch(
+                    action_functional=ActionFunctional(
+                        score_mode=shadow_score_mode,
+                        score_scale=shadow_score_scale,
+                    ),
+                    transition_model=build_transition_model_from_logs(
+                        symbol_name=symbol_name,
+                        log_dir=pathlib.Path("logs"),
+                        estimator=shadow_estimator,
+                        mode=shadow_kernel_mode,
+                        residual_weight=shadow_kernel_residual_weight,
+                    ),
+                    beam_config=BeamConfig(
+                        horizon=shadow_beam_horizon,
+                        beam_width=shadow_beam_width,
+                        exposure_step=shadow_beam_exposure_step,
+                    ),
+                ),
+                gating_mode=shadow_gating_mode,
+            ),
+        )
     # Precompute triadic states and structural stress (for bad_day signal)
     pre_states = compute_triadic_state(price)
     p_bad, bad_flag = compute_structural_stress(price, pre_states)
@@ -553,6 +735,31 @@ def run_trading_loop(
             align_age=align_age,
         )
 
+        shadow_log_fields = beam_summary_to_log_fields(None)
+        shadow_log_fields.update(beam_decision_to_log_fields(None))
+        if shadow_runner is not None and shadow_estimator is not None and live_policy_adapter is not None:
+            shadow_log_fields = _compute_shadow_log_fields(
+                shadow_runner=shadow_runner,
+                shadow_estimator=shadow_estimator,
+                live_policy_adapter=live_policy_adapter,
+                t=t,
+                symbol_name=symbol_name,
+                action_t=action_t,
+                fill=fill,
+                p_bad_t=p_bad_t,
+                ret=ret,
+                recent_rets=recent_rets,
+                sigma=sigma,
+                direction=direction,
+                permission=permission,
+                stress=stress,
+                edge_proxy=pred_edge_proxy,
+                start_cash=START_CASH,
+                pre_cash=cash,
+                pre_pos=pos,
+                price_t=price[t],
+            )
+
         price_exec, cash, pos, fee, slippage_cost, capital_at_risk = apply_execution(
             price_t=price[t],
             fill=fill,
@@ -861,6 +1068,7 @@ def run_trading_loop(
             "align_age": align_age,
             "symbol": tape_id if tape_id else source,
         }
+        row.update(shadow_log_fields)
         rows.append(row)
         emit_step_row(row, log_path)
         if tower_log_path:

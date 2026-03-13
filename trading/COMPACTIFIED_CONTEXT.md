@@ -1,5 +1,27 @@
 # Compactified Context
 
+## Archived thread alignment
+- Resolved archived thread on 2026-03-12 via `robust-context-fetch`.
+- Title: `Reconsidering Trading Bot`
+- Online UUID: `69b200ec-a590-83a1-8ee2-032a3712f038`
+- Canonical thread ID: `18b31603c8832988de325375f56637a44310ebab`
+- Source used: `db` after live pull into `~/chat_archive.sqlite`
+- Main decision pulled from the thread: add an optional discrete action-functional policy for the current trader, built around 6-10 coarse state variables plus a beam-search future tree, without replacing the existing triadic loop.
+- Current repo translation of that decision:
+  - `trading/futures/` holds the bounded implementation scaffold.
+  - The coarse state remains quotient/legitimacy-oriented and direction-aware, but execution still terminates in the existing `Intent` contract.
+  - This is a sidecar policy layer first; main-loop integration stays gated behind validation of logging, path metrics, and behavior.
+  - Weighting of the archived thread’s last three assistant replies: the final Python-module-spec reply is the implementation authority; the two earlier algebra/path-integral replies are motivation and interpretation only.
+  - First-pass BTC/SPY shadow analysis was captured in `logs/shadow/*_20260312T042358Z.*`, but those artifacts are exploratory because the shadow splice was later corrected to use pre-execution state.
+  - The corrected decision-grade baseline is `logs/shadow/*_20260312T052900Z.*`; current signal read is still weak: entropy remains high, live/shadow divergence remains low, and basin-edge correlation to next move remains close to zero.
+  - Follow-up diagnosis at `logs/shadow/shadow_signal_diagnosis_20260313T020345Z.md` locks the next milestone as learned transition-kernel replacement, not threshold tuning: the heuristic beam is structurally too diffuse, `shadow_hold` is effectively always true, and `beam_flat_mass` is zero throughout the decision-grade baseline.
+  - The learned transition-kernel scaffold has now landed in the shadow path: it fits transition buckets from historical per-step trader CSVs and falls back to the heuristic generator when no usable history exists.
+  - Post-kernel BTC/SPY rerun artifacts now live at `logs/shadow/*_20260313T045625Z.*`. Result: the learned kernel improved beam geometry (BTC entropy mean `0.901038` vs `0.970205`, SPY `0.900277` vs `0.956483`, nonzero flat mass restored on both tapes), but policy behavior is still all-hold because the fixed entropy gate and negative beam-score regime still dominate. The next futures-policy milestone is no longer branch generation; it is hold-bias remediation in intent selection / action scoring.
+  - The hold-bias remediation milestone is now locked: add structured hold attribution, replace the fixed entropy veto with a calibrated joint rule, and compare `global`, `per_asset`, and `residual` learned-kernel modes in shadow-only runs before any live-controller takeover.
+  - Hold-remediation comparison artifacts now live at `logs/shadow/*_20260313T061237Z.*` and `logs/shadow/shadow_signal_report_20260313T061237Z.md`. Result: attribution is now explicit and the three kernel modes are comparable, but all six reruns stayed at `shadow_hold = 1.0`. The dominant cause is now `score`, with `flat_basin` secondary and `entropy` no longer primary. That locks the next blocker: retune `ActionWeights`, not the entropy gate.
+  - Current action-weight retune target: preserve diagnostics and kernel-mode comparison, but reduce score-dominated hold pressure enough that at least one kernel mode stops being 100%-hold on the BTC/SPY rerun.
+  - First `ActionWeights` retune artifacts now live at `logs/shadow/*_20260313T062106Z.*` and `logs/shadow/shadow_signal_report_20260313T062106Z.md`. Result: the retune succeeded at breaking the all-hold regime, but it overshot into near-all-act behavior (`btc_global` act ratio `0.995740`, `btc_per_asset` `0.995769`, all SPY modes `1.0`). The next blocker is now moderation/calibration, not raw score rescue.
+
 ## Kernel & formal semantics (locked)
 - Kernel is a ternary projection (not a feature extractor), involution- and Gamma-symmetry-equivariant, defined on the quotient (not representatives); learning selects among closed quotients.
 - Kernel energy E(s) is a consistency diagnostic for closure/MDL within the kernel system; trading monotones are enforced on the action/capital channel by Meta-Witness and the capital kernel.

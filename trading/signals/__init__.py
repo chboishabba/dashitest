@@ -1,2 +1,8 @@
 """Signal extraction helpers."""
-from .asymmetry_sensor import InfluenceTensorMonitor
+
+try:
+    from .asymmetry_sensor import InfluenceTensorMonitor
+except ModuleNotFoundError:  # Optional dependency path (duckdb) for lightweight imports.
+    InfluenceTensorMonitor = None
+
+__all__ = ["InfluenceTensorMonitor"]

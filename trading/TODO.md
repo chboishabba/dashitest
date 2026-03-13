@@ -3,6 +3,37 @@
 Legend: (EXEC) implementation, (DECISION) policy decision, (ANALYSIS) analysis/verification, (DASHBOARD) UI/visualization.
 
 - [x] (EXEC) Add plane counters to trading logs (plane index + per-plane activation/rates).
+- [x] (DOC) Record archived thread `Reconsidering Trading Bot` in `trading/COMPACTIFIED_CONTEXT.md` and translate it into a repo-local action-functional design note.
+- [x] (EXEC) Add optional `trading/futures/` scaffold for coarse-state estimation, discrete action scoring, beam search, and intent selection.
+- [x] (EXEC) Add `policy/shadow_runner.py` so the futures controller can run as an observe-only sidecar before any engine takeover.
+- [x] (EXEC) Expose `BeamSummary` + basin classification for entropy, mass, contraction, diffusion, and terminal return/risk diagnostics.
+- [x] (EXEC) Move the coarse-state dataclasses/estimator to `signals/coarse_state.py` so baseline and futures policies share one state contract.
+- [x] (EXEC) Add log-field helpers for beam diagnostics (`beam_entropy`, masses, score, return, risk, contraction, diffusion) without changing the live controller.
+- [x] (EXEC) Add `--shadow-futures` engine logging path so per-step rows include live/shadow intents and beam diagnostics while execution still follows the baseline controller.
+- [x] (EXEC) Log beam diagnostics (`beam_best_score`, basin masses, path entropy, terminal risk/return) on each action-functional shadow decision.
+- [x] (ANALYSIS) Run first-pass BTC/SPY shadow replays with timestamped report/plots (`logs/shadow/*_20260312T042358Z.*`) to establish a baseline.
+- [x] (ANALYSIS) Rerun BTC/SPY shadow comparison after the pre-execution shadow splice fix and capture the decision-grade baseline (`logs/shadow/*_20260312T052900Z.*`).
+- [ ] (DASHBOARD) Add a PyQtGraph pane for beam entropy and long/short/flat terminal mass.
+- [x] (ANALYSIS) Explain the still-high entropy / weak basin-edge signal in the decision-grade baseline and lock the next milestone as transition-kernel learning (`logs/shadow/shadow_signal_diagnosis_20260313T020345Z.md`).
+- [x] (EXEC) Replace `HeuristicTransitionModel` in the shadow path with a learned transition kernel estimated from historical run logs while preserving the current beam/coarse-state interfaces (heuristic fallback retained when logs are missing).
+- [x] (ANALYSIS) Rerun the BTC/SPY decision-grade shadow comparison after the learned transition kernel lands and compare against `20260312T052900Z` (`logs/shadow/*_20260313T045625Z.*`).
+- [x] (ANALYSIS) Explain the post-kernel residual hold bias after the learned branch geometry fix: entropy improved and flat mass returned, but `shadow_hold` remained 100% because the fixed entropy hold gate and negative beam-score regime still dominate (`logs/shadow/shadow_signal_report_20260313T045625Z.md`).
+- [x] (DECISION) Lock the next futures-policy milestone: structured hold attribution, calibrated intent selection, and explicit `global` / `per_asset` / `residual` kernel modes in shadow-only mode.
+- [x] (EXEC) Add structured futures decision diagnostics (`shadow_hold_reason_primary`, hold-subreason booleans, gate values, kernel metadata) to the shadow log path.
+- [x] (EXEC) Replace the fixed entropy hold gate with the calibrated joint rule in the beam intent selector.
+- [x] (EXEC) Add explicit shadow kernel modes (`global`, `per_asset`, `residual`) plus residual blending over aligned learned buckets.
+- [x] (EXEC) Add a reusable shadow-analysis script that compares multiple kernel modes and emits timestamped markdown + PNG artifacts.
+- [x] (ANALYSIS) Rerun BTC/SPY shadow comparisons for `global`, `per_asset`, and `residual` modes and compare against `20260313T045625Z` (`logs/shadow/*_20260313T061237Z.*`, `logs/shadow/shadow_signal_report_20260313T061237Z.md`).
+- [x] (DECISION) Holds remain score-dominated after calibrated gating, so the next futures-policy step is `ActionWeights` retuning rather than more entropy-gate work.
+- [x] (EXEC) Retune `ActionWeights` so the improved learned-kernel geometry can produce non-hold shadow actions without removing structured hold attribution.
+- [x] (ANALYSIS) Rerun BTC/SPY multi-mode shadow comparisons after the `ActionWeights` retune and compare against `20260313T061237Z` (`logs/shadow/*_20260313T062106Z.*`, `logs/shadow/shadow_signal_report_20260313T062106Z.md`).
+- [x] (DECISION) The first `ActionWeights` retune broke the all-hold regime but overshot into near-all-act behavior, so the next futures-policy step is moderation/calibration rather than more raw reward lifting.
+- [ ] (EXEC) Calibrate `ActionWeights` and/or score thresholds so shadow action rates are no longer 100%-hold but also not effectively 100%-act across BTC/SPY mode sweeps.
+- [ ] (EXEC) Add score normalization modes (`ratio`, `scaled_diff`, `logistic`) and gating modes (`lex`, `joint`, `score_only`) to the shadow pipeline for A/B calibration.
+- [ ] (EXEC) Add `shrinkage` kernel mode and kernel lambda logging; keep residual only for comparison.
+- [ ] (EXEC) Extend the shadow analysis script with score histogram, basin margin histogram, action vs hold return conditional, and entropy vs profitability plots + soft-gate metrics.
+- [ ] (ANALYSIS) Run BTC/SPY A/B shadow sweeps across score/gating/kernel modes with timestamped artifacts and review against the soft acceptance targets.
+- [x] (DOC) Add a quant-facing inquiry note that points reviewers at the formal docs, current shadow artifacts, and the concrete tuning questions (`docs/QUANT_PROFESSIONAL_JUDGEMENT_INQUIRY.md`).
 - [ ] (EXEC) Replace confidence thresholds with explicit ternary actions (intent/exec alignment).
 - [x] (EXEC) Add losing-trade alignment script (closest profitable entry by input distance).
 - [x] (EXEC) Define and log a "can trade" mask (trade eligibility separate from direction).

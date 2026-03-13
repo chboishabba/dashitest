@@ -88,6 +88,12 @@ def main(
     geometry_simplex: bool = True,
     geometry_dir: str = "logs/geometry",
     tower_log: bool = True,
+    shadow_futures: bool = False,
+    shadow_kernel_mode: str = "per_asset",
+    shadow_kernel_residual_weight: float = 1.0,
+    shadow_score_mode: str = "ratio",
+    shadow_score_scale: float = 1.0,
+    shadow_gating_mode: str = "lex",
 ):
     run_ts = pd.Timestamp.utcnow().strftime("%Y%m%dT%H%M%SZ")
 
@@ -201,6 +207,12 @@ def main(
                     boundary_gate=boundary_gate,
                     boundary_cost_margin=boundary_cost_margin,
                     tower_log_path=tower_log_path,
+                    shadow_futures=shadow_futures,
+                    shadow_kernel_mode=shadow_kernel_mode,
+                    shadow_kernel_residual_weight=shadow_kernel_residual_weight,
+                    shadow_score_mode=shadow_score_mode,
+                    shadow_score_scale=shadow_score_scale,
+                    shadow_gating_mode=shadow_gating_mode,
                 )
                 if not log_combined:
                     emit_geometry(log_path, source)
@@ -267,6 +279,12 @@ def main(
         boundary_gate=boundary_gate,
         boundary_cost_margin=boundary_cost_margin,
         tower_log_path=resolve_tower_log_path(LOG),
+        shadow_futures=shadow_futures,
+        shadow_kernel_mode=shadow_kernel_mode,
+        shadow_kernel_residual_weight=shadow_kernel_residual_weight,
+        shadow_score_mode=shadow_score_mode,
+        shadow_score_scale=shadow_score_scale,
+        shadow_gating_mode=shadow_gating_mode,
     )
     emit_geometry(LOG, source)
 
@@ -344,6 +362,30 @@ if __name__ == "__main__":
     ap.add_argument("--no-geometry-plots", dest="geometry_plots", action="store_false", help="Skip geometry plots.")
     ap.add_argument("--tower-log", dest="tower_log", action="store_true", help="Emit tower projection NDJSON log.")
     ap.add_argument("--no-tower-log", dest="tower_log", action="store_false", help="Disable tower projection log.")
+    ap.add_argument("--shadow-futures", action="store_true", help="Log observe-only futures-policy shadow decisions and beam diagnostics.")
+    ap.add_argument(
+        "--shadow-kernel-mode",
+        type=str,
+        default="per_asset",
+        choices=["global", "per_asset", "residual", "shrinkage"],
+        help="Learned transition-kernel mode for shadow futures.",
+    )
+    ap.add_argument("--shadow-kernel-residual-weight", type=float, default=1.0, help="Residual blend weight for shadow kernel mode 'residual'.")
+    ap.add_argument(
+        "--shadow-score-mode",
+        type=str,
+        default="ratio",
+        choices=["ratio", "scaled_diff", "logistic"],
+        help="Score aggregation mode for the futures action functional.",
+    )
+    ap.add_argument("--shadow-score-scale", type=float, default=1.0, help="Scale for score_mode 'scaled_diff' or 'logistic'.")
+    ap.add_argument(
+        "--shadow-gating-mode",
+        type=str,
+        default="lex",
+        choices=["lex", "joint", "score_only"],
+        help="Gating logic mode for shadow intent selection.",
+    )
     ap.set_defaults(geometry_plots=True, geometry_overlay=True, geometry_simplex=True, tower_log=True)
     args = ap.parse_args()
     main(
@@ -387,4 +429,10 @@ if __name__ == "__main__":
         geometry_simplex=args.geometry_simplex,
         geometry_dir=args.geometry_dir,
         tower_log=args.tower_log,
+        shadow_futures=args.shadow_futures,
+        shadow_kernel_mode=args.shadow_kernel_mode,
+        shadow_kernel_residual_weight=args.shadow_kernel_residual_weight,
+        shadow_score_mode=args.shadow_score_mode,
+        shadow_score_scale=args.shadow_score_scale,
+        shadow_gating_mode=args.shadow_gating_mode,
     )

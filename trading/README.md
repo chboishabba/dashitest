@@ -39,9 +39,13 @@ PYTHONPATH=. python run_all_two_pointO.py \
 - `run_all.py`: Multi-market runner (with optional live dashboard).
 - `run_all_two_pointO.py`: Orchestrator for market summaries, tau sweeps, CA tape preview, and news windows.
 - `docs/decision_alignment_check.md`: Spec for closest-profitable alignment checks on losing trades.
+- `docs/discrete_action_functional.md`: Optional beam-search futures policy for the current trader (coarse state, action score, beam search, intent selection).
+- `docs/QUANT_PROFESSIONAL_JUDGEMENT_INQUIRY.md`: Quant-facing review packet for the futures shadow policy, current math framing, and tuning questions.
 - `docs/quotient_integration.md`: Quotient-invariant integration plan for learner-gated trader behavior.
 - `docs/tower_projection_dashboard.md`: Spec for tower-aligned M1-M9 projection dashboard (PyQtGraph internals view; diagnostic only).
 - `data_downloader.py`: Data ingestion for Stooq/Yahoo/CoinGecko/Binance; writes `data/raw`.
+- `futures/`: Optional beam-search policy scaffold (state estimator, action score, transition model, intent selector).
+- `policy/shadow_runner.py`: Observe-only wrapper that runs the baseline and futures policies together and returns live intent, shadow intent, and beam diagnostics.
 - `ternary_trading_demo.py`: Self-contained demo; encodes ternary signals and compares baseline.
 - `training_dashboard.py`: Matplotlib dashboard for `logs/trading_log.csv`.
 - `training_dashboard_pg.py`: PyQtGraph dashboard for `logs/trading_log.csv` with progressive-day view.
@@ -167,6 +171,18 @@ by default; overwriting is not allowed.
 - `training_dashboard_pg.py` can render rolling histograms with `--hist --hist-window N --hist-bins M`.
 - `training_dashboard_pg.py` expects per-step logs (e.g., `logs/trading_log_*.csv` with a `price` column); trade logs (`logs/trading_log_trades_*.csv`) are not supported.
 - `training_dashboard_pg.py --graph-internals` reads the corresponding `*_tower.ndjson` log for tower projections.
+- `futures/` is optional infrastructure only; it does not alter the default controller until it is wired into the loop behind an explicit flag.
+- `trading_io.logs.beam_summary_to_log_fields(...)` is attached to `engine/loop.py` and normalizes beam diagnostics for per-step CSV logging.
+- `python run_trader.py --shadow-futures` logs observe-only beam diagnostics and live/shadow intent fields into the normal per-step CSV while leaving live execution unchanged.
+- Decision-grade BTC/SPY shadow analysis artifacts now live under `logs/shadow/` at timestamp `20260312T052900Z`; keep the earlier `20260312T042358Z` report only as a pre-fix exploratory baseline.
+- Follow-up diagnosis at `logs/shadow/shadow_signal_diagnosis_20260313T020345Z.md` concludes that the current heuristic beam is still structurally too diffuse (`shadow_hold` always true, `beam_flat_mass` always zero in the decision-grade baseline), so the next milestone is learned transition-kernel replacement rather than threshold tuning.
+- The shadow path now uses a learned transition kernel fitted from historical per-step trader logs when available, with automatic fallback to the heuristic model if no suitable logs exist.
+- The post-kernel BTC/SPY rerun is recorded at `logs/shadow/*_20260313T045625Z.*`: beam geometry improved materially, but control behavior is still all-hold, so the next step is policy-level hold-bias remediation rather than more branch-generation work.
+- The next shadow milestone adds explicit hold diagnostics, calibrated hold gating, and kernel-mode comparison across `global`, `per_asset`, and `residual` learned kernels before any control handoff.
+- The hold-remediation rerun now lives at `logs/shadow/*_20260313T061237Z.*`: hold attribution is explicit and multi-kernel comparison works, but all modes remain hold-only and the dominant blocker is now score pressure, so the next step is `ActionWeights` retuning.
+- The `ActionWeights` retune should change scoring pressure only; hold diagnostics and kernel-mode comparison remain the evaluation contract.
+- The first retune rerun now lives at `logs/shadow/*_20260313T062106Z.*`: it successfully broke the all-hold regime, but overshot into near-all-act behavior, so the next step is score/weight moderation rather than more reward amplification.
+- Shadow calibration now supports explicit A/B modes for score normalization and gating, plus `shrinkage` kernel mode; use `--shadow-score-mode`, `--shadow-gating-mode`, and `--shadow-kernel-mode` for comparisons.
 
 ## Sanity test outcomes
 
