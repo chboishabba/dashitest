@@ -84,11 +84,18 @@ class BeamDecisionDiagnostics:
     curvature_value: float
     curvature_threshold: float
     score_value: float
+    score_raw: float
+    score_standardized: float
     score_threshold: float
     score_reward: float
     score_penalty: float
     score_adjusted: float
     score_mode: str
+    score_calibration_mode: str
+    score_threshold_source: str
+    score_calibration_mean: float
+    score_calibration_std: float
+    score_calibration_weight: float
     directional_mass: float
     directional_margin: float
     flat_mass: float
@@ -120,11 +127,18 @@ class BeamDecisionDiagnostics:
             "shadow_curvature_value": self.curvature_value,
             "shadow_curvature_threshold": self.curvature_threshold,
             "shadow_score_value": self.score_value,
+            "shadow_score_raw": self.score_raw,
+            "shadow_score_standardized": self.score_standardized,
             "shadow_score_threshold": self.score_threshold,
             "shadow_score_reward": self.score_reward,
             "shadow_score_penalty": self.score_penalty,
             "shadow_score_adjusted": self.score_adjusted,
             "shadow_score_mode": self.score_mode,
+            "shadow_score_calibration_mode": self.score_calibration_mode,
+            "shadow_score_threshold_source": self.score_threshold_source,
+            "shadow_score_calibration_mean": self.score_calibration_mean,
+            "shadow_score_calibration_std": self.score_calibration_std,
+            "shadow_score_calibration_weight": self.score_calibration_weight,
             "shadow_directional_mass": self.directional_mass,
             "shadow_directional_margin": self.directional_margin,
             "shadow_kernel_mode": self.kernel_mode,
@@ -426,6 +440,18 @@ class BeamIntentPolicy:
         flat_mass_threshold: float = 0.50,
         flat_score_threshold: float = 0.10,
         score_threshold: float = -0.05,
+        score_threshold_mode: str = "fixed",
+        target_action_rate: float = 0.0,
+        score_threshold_min_history: int = 100,
+        score_threshold_history_size: int = 2000,
+        initial_score_history: list[float] | tuple[float, ...] | None = None,
+        score_calibration_mode: str = "off",
+        score_threshold_source: str = "adjusted",
+        score_calibration_min_history: int = 50,
+        score_calibration_shrinkage_samples: int = 400,
+        score_calibration_std_floor: float = 0.05,
+        initial_raw_score_history: list[float] | tuple[float, ...] | None = None,
+        pooled_raw_score_history: list[float] | tuple[float, ...] | None = None,
         directional_mass_threshold: float = 0.55,
         directional_margin_threshold: float = 0.15,
         curvature_threshold: float = 0.0,
@@ -444,11 +470,44 @@ class BeamIntentPolicy:
         self.flat_mass_threshold = float(flat_mass_threshold)
         self.flat_score_threshold = float(flat_score_threshold)
         self.score_threshold = float(score_threshold)
+        self.score_threshold_mode = str(score_threshold_mode)
+        self.target_action_rate = _clip(float(target_action_rate), 0.0, 1.0)
+        self.score_threshold_min_history = max(1, int(score_threshold_min_history))
+        self.score_threshold_history_size = max(32, int(score_threshold_history_size))
+        self.score_calibration_mode = str(score_calibration_mode)
+        self.score_threshold_source = str(score_threshold_source)
+        self.score_calibration_min_history = max(1, int(score_calibration_min_history))
+        self.score_calibration_shrinkage_samples = max(1, int(score_calibration_shrinkage_samples))
+        self.score_calibration_std_floor = max(abs(float(score_calibration_std_floor)), 1e-6)
         self.directional_mass_threshold = float(directional_mass_threshold)
         self.directional_margin_threshold = float(directional_margin_threshold)
         self.curvature_threshold = float(curvature_threshold)
         self.score_curvature_weight = bool(score_curvature_weight)
         self.gating_mode = gating_mode
+        self._score_history: list[float] = []
+        self._raw_score_history: list[float] = []
+        self._pooled_raw_score_history: list[float] = []
+        for value in pooled_raw_score_history or []:
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(numeric):
+                self._pooled_raw_score_history.append(numeric)
+        if initial_raw_score_history:
+            for value in initial_raw_score_history:
+                try:
+                    numeric = float(value)
+                except (TypeError, ValueError):
+                    continue
+                self._push_raw_score_history(numeric)
+        if initial_score_history:
+            for value in initial_score_history:
+                try:
+                    numeric = float(value)
+                except (TypeError, ValueError):
+                    continue
+                self._push_score_history(numeric)
 
     def _entropy_weight(self, entropy: float) -> float:
         if self.entropy_gate_mode == "hard":
@@ -478,6 +537,65 @@ class BeamIntentPolicy:
             "kernel_global_count": int(metadata.get("kernel_global_count", 0)),
         }
 
+    def _adaptive_score_threshold(self) -> float:
+        if self.score_threshold_mode != "adaptive_quantile":
+            return self.score_threshold
+        if self.target_action_rate <= 0.0:
+            return self.score_threshold
+        if len(self._score_history) < self.score_threshold_min_history:
+            return self.score_threshold
+        q = 1.0 - self.target_action_rate
+        values = sorted(self._score_history)
+        idx = int(round(q * (len(values) - 1)))
+        idx = max(0, min(len(values) - 1, idx))
+        return float(values[idx])
+
+    def _push_score_history(self, score_value: float) -> None:
+        if not math.isfinite(score_value):
+            return
+        self._score_history.append(float(score_value))
+        overflow = len(self._score_history) - self.score_threshold_history_size
+        if overflow > 0:
+            del self._score_history[:overflow]
+
+    def _push_raw_score_history(self, score_value: float) -> None:
+        if not math.isfinite(score_value):
+            return
+        self._raw_score_history.append(float(score_value))
+        overflow = len(self._raw_score_history) - self.score_threshold_history_size
+        if overflow > 0:
+            del self._raw_score_history[:overflow]
+
+    def _score_stats(self, values: list[float]) -> tuple[float, float]:
+        clean = [float(value) for value in values if math.isfinite(value)]
+        if not clean:
+            return 0.0, 1.0
+        mean_value = sum(clean) / len(clean)
+        if len(clean) < 2:
+            return mean_value, max(self.score_calibration_std_floor, 1.0)
+        variance = sum((value - mean_value) ** 2 for value in clean) / len(clean)
+        std_value = math.sqrt(max(variance, 0.0))
+        return mean_value, max(std_value, self.score_calibration_std_floor)
+
+    def _standardize_raw_score(self, raw_score: float) -> tuple[float, float, float, float]:
+        if self.score_calibration_mode != "per_asset_zscore_shrunk" or not math.isfinite(raw_score):
+            return raw_score, 0.0, 1.0, 1.0
+        asset_history = list(self._raw_score_history)
+        pooled_history = self._pooled_raw_score_history if self._pooled_raw_score_history else asset_history
+        if len(asset_history) < self.score_calibration_min_history and not pooled_history:
+            return raw_score, 0.0, 1.0, 0.0
+        asset_mean, asset_std = self._score_stats(asset_history) if asset_history else (0.0, 1.0)
+        pooled_mean, pooled_std = self._score_stats(pooled_history) if pooled_history else (asset_mean, asset_std)
+        if not asset_history:
+            asset_mean, asset_std = pooled_mean, pooled_std
+        weight = 1.0
+        if pooled_history:
+            weight = _clip(len(asset_history) / float(self.score_calibration_shrinkage_samples), 0.0, 1.0)
+        mean_value = weight * asset_mean + (1.0 - weight) * pooled_mean
+        std_value = weight * asset_std + (1.0 - weight) * pooled_std
+        std_value = max(std_value, self.score_calibration_std_floor)
+        return (raw_score - mean_value) / std_value, mean_value, std_value, weight
+
     def _diagnostics(
         self,
         *,
@@ -486,7 +604,13 @@ class BeamIntentPolicy:
         selected_direction: int,
         score_reward: float,
         score_penalty: float,
-        score_adjusted: float,
+        score_raw: float = 0.0,
+        score_standardized: float = 0.0,
+        score_adjusted: float = 0.0,
+        score_threshold_used: float | None = None,
+        score_calibration_mean: float = 0.0,
+        score_calibration_std: float = 1.0,
+        score_calibration_weight: float = 1.0,
     ) -> BeamDecisionDiagnostics:
         kernel = self._kernel_metadata()
         directional_mass = max(summary.long_mass, summary.short_mass)
@@ -503,11 +627,18 @@ class BeamIntentPolicy:
             curvature_value=summary.curvature,
             curvature_threshold=self.curvature_threshold,
             score_value=summary.best_score,
-            score_threshold=self.score_threshold,
+            score_raw=score_raw,
+            score_standardized=score_standardized,
+            score_threshold=self.score_threshold if score_threshold_used is None else float(score_threshold_used),
             score_reward=score_reward,
             score_penalty=score_penalty,
             score_adjusted=score_adjusted,
             score_mode=str(getattr(self.search.action_functional, "score_mode", "unknown")),
+            score_calibration_mode=self.score_calibration_mode,
+            score_threshold_source=self.score_threshold_source,
+            score_calibration_mean=score_calibration_mean,
+            score_calibration_std=score_calibration_std,
+            score_calibration_weight=score_calibration_weight,
             directional_mass=directional_mass,
             directional_margin=directional_margin,
             flat_mass=summary.flat_mass,
@@ -550,7 +681,13 @@ class BeamIntentPolicy:
         actionability: float | None = None,
         score_reward: float = 0.0,
         score_penalty: float = 0.0,
+        score_raw: float = 0.0,
+        score_standardized: float = 0.0,
         score_adjusted: float = 0.0,
+        score_threshold_used: float | None = None,
+        score_calibration_mean: float = 0.0,
+        score_calibration_std: float = 1.0,
+        score_calibration_weight: float = 1.0,
     ) -> BeamPolicyStep:
         intent = Intent(
             ts=int(ts),
@@ -572,7 +709,13 @@ class BeamIntentPolicy:
                 selected_direction=selected_direction,
                 score_reward=score_reward,
                 score_penalty=score_penalty,
+                score_raw=score_raw,
+                score_standardized=score_standardized,
                 score_adjusted=score_adjusted,
+                score_threshold_used=self.score_threshold if score_threshold_used is None else float(score_threshold_used),
+                score_calibration_mean=score_calibration_mean,
+                score_calibration_std=score_calibration_std,
+                score_calibration_weight=score_calibration_weight,
             ),
         )
 
@@ -597,12 +740,20 @@ class BeamIntentPolicy:
             score_penalty = float(getattr(last_breakdown, "penalty_block", 0.0))
         directional_mass = max(summary.long_mass, summary.short_mass)
         directional_margin = abs(summary.long_mass - summary.short_mass)
-        score_adjusted = best.cumulative_score * (1.0 - summary.flat_mass)
+        score_raw = float(best.cumulative_score)
+        score_standardized, score_calibration_mean, score_calibration_std, score_calibration_weight = self._standardize_raw_score(
+            score_raw
+        )
+        score_base = score_standardized if self.score_threshold_source == "standardized_adjusted" else score_raw
+        score_adjusted = score_base * (1.0 - summary.flat_mass)
         if self.score_curvature_weight:
             score_adjusted *= summary.curvature
         score_adjusted *= self._entropy_weight(summary.entropy)
+        score_threshold_used = self._adaptive_score_threshold()
+        self._push_raw_score_history(score_raw)
+        self._push_score_history(score_adjusted)
         if self.gating_mode == "score_only":
-            if score_adjusted <= self.score_threshold:
+            if score_adjusted <= score_threshold_used:
                 return self._hold_step(
                     ts=ts,
                     initial_state=initial_state,
@@ -611,7 +762,13 @@ class BeamIntentPolicy:
                     reason=f"beam_score_hold score={best.cumulative_score:.3f}",
                     score_reward=score_reward,
                     score_penalty=score_penalty,
+                    score_raw=score_raw,
+                    score_standardized=score_standardized,
                     score_adjusted=score_adjusted,
+                    score_threshold_used=score_threshold_used,
+                    score_calibration_mean=score_calibration_mean,
+                    score_calibration_std=score_calibration_std,
+                    score_calibration_weight=score_calibration_weight,
                 )
         elif self.gating_mode == "lex":
             if self.curvature_threshold > 0.0 and summary.curvature < self.curvature_threshold:
@@ -623,7 +780,13 @@ class BeamIntentPolicy:
                     reason=f"beam_curvature_hold curvature={summary.curvature:.3f}",
                     score_reward=score_reward,
                     score_penalty=score_penalty,
+                    score_raw=score_raw,
+                    score_standardized=score_standardized,
                     score_adjusted=score_adjusted,
+                    score_threshold_used=score_threshold_used,
+                    score_calibration_mean=score_calibration_mean,
+                    score_calibration_std=score_calibration_std,
+                    score_calibration_weight=score_calibration_weight,
                 )
             if self.entropy_gate_mode == "hard" and summary.entropy > self.entropy_threshold:
                 return self._hold_step(
@@ -634,7 +797,12 @@ class BeamIntentPolicy:
                     reason=f"beam_entropy_hold entropy={summary.entropy:.3f} margin={directional_margin:.3f}",
                     score_reward=score_reward,
                     score_penalty=score_penalty,
+                    score_raw=score_raw,
+                    score_standardized=score_standardized,
                     score_adjusted=score_adjusted,
+                    score_calibration_mean=score_calibration_mean,
+                    score_calibration_std=score_calibration_std,
+                    score_calibration_weight=score_calibration_weight,
                 )
             if directional_mass < self.directional_mass_threshold or directional_margin < self.directional_margin_threshold:
                 return self._hold_step(
@@ -648,9 +816,15 @@ class BeamIntentPolicy:
                     ),
                     score_reward=score_reward,
                     score_penalty=score_penalty,
+                    score_raw=score_raw,
+                    score_standardized=score_standardized,
                     score_adjusted=score_adjusted,
+                    score_threshold_used=score_threshold_used,
+                    score_calibration_mean=score_calibration_mean,
+                    score_calibration_std=score_calibration_std,
+                    score_calibration_weight=score_calibration_weight,
                 )
-            if score_adjusted <= self.score_threshold:
+            if score_adjusted <= score_threshold_used:
                 return self._hold_step(
                     ts=ts,
                     initial_state=initial_state,
@@ -659,7 +833,13 @@ class BeamIntentPolicy:
                     reason=f"beam_score_hold score={best.cumulative_score:.3f}",
                     score_reward=score_reward,
                     score_penalty=score_penalty,
+                    score_raw=score_raw,
+                    score_standardized=score_standardized,
                     score_adjusted=score_adjusted,
+                    score_threshold_used=score_threshold_used,
+                    score_calibration_mean=score_calibration_mean,
+                    score_calibration_std=score_calibration_std,
+                    score_calibration_weight=score_calibration_weight,
                 )
         else:
             if (
@@ -680,7 +860,13 @@ class BeamIntentPolicy:
                     ),
                     score_reward=score_reward,
                     score_penalty=score_penalty,
+                    score_raw=score_raw,
+                    score_standardized=score_standardized,
                     score_adjusted=score_adjusted,
+                    score_threshold_used=score_threshold_used,
+                    score_calibration_mean=score_calibration_mean,
+                    score_calibration_std=score_calibration_std,
+                    score_calibration_weight=score_calibration_weight,
                 )
             if summary.flat_mass >= self.flat_mass_threshold and score_adjusted < self.flat_score_threshold:
                 return self._hold_step(
@@ -691,9 +877,15 @@ class BeamIntentPolicy:
                     reason=f"beam_flat_hold score={best.cumulative_score:.3f} flat_mass={summary.flat_mass:.3f}",
                     score_reward=score_reward,
                     score_penalty=score_penalty,
+                    score_raw=score_raw,
+                    score_standardized=score_standardized,
                     score_adjusted=score_adjusted,
+                    score_threshold_used=score_threshold_used,
+                    score_calibration_mean=score_calibration_mean,
+                    score_calibration_std=score_calibration_std,
+                    score_calibration_weight=score_calibration_weight,
                 )
-            if score_adjusted <= self.score_threshold:
+            if score_adjusted <= score_threshold_used:
                 return self._hold_step(
                     ts=ts,
                     initial_state=initial_state,
@@ -702,7 +894,13 @@ class BeamIntentPolicy:
                     reason=f"beam_score_hold score={best.cumulative_score:.3f}",
                     score_reward=score_reward,
                     score_penalty=score_penalty,
+                    score_raw=score_raw,
+                    score_standardized=score_standardized,
                     score_adjusted=score_adjusted,
+                    score_threshold_used=score_threshold_used,
+                    score_calibration_mean=score_calibration_mean,
+                    score_calibration_std=score_calibration_std,
+                    score_calibration_weight=score_calibration_weight,
                 )
             if directional_mass < self.directional_mass_threshold or directional_margin < self.directional_margin_threshold:
                 return self._hold_step(
@@ -716,7 +914,13 @@ class BeamIntentPolicy:
                     ),
                     score_reward=score_reward,
                     score_penalty=score_penalty,
+                    score_raw=score_raw,
+                    score_standardized=score_standardized,
                     score_adjusted=score_adjusted,
+                    score_threshold_used=score_threshold_used,
+                    score_calibration_mean=score_calibration_mean,
+                    score_calibration_std=score_calibration_std,
+                    score_calibration_weight=score_calibration_weight,
                 )
         if summary.long_mass > summary.short_mass:
             direction = 1
@@ -747,7 +951,13 @@ class BeamIntentPolicy:
                 selected_direction=direction,
                 score_reward=score_reward,
                 score_penalty=score_penalty,
+                score_raw=score_raw,
+                score_standardized=score_standardized,
                 score_adjusted=score_adjusted,
+                score_threshold_used=score_threshold_used,
+                score_calibration_mean=score_calibration_mean,
+                score_calibration_std=score_calibration_std,
+                score_calibration_weight=score_calibration_weight,
             ),
         )
 

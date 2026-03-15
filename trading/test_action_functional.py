@@ -1,4 +1,5 @@
 import csv
+import math
 from futures import (
     ActionFunctional,
     BeamConfig,
@@ -338,6 +339,118 @@ def test_beam_policy_reports_entropy_and_flat_basin_separately():
     assert diagnostics.hold_flat_basin == 0
 
 
+def test_adaptive_score_threshold_prefit_history_sets_quantile_cutoff():
+    policy = BeamIntentPolicy(
+        symbol="BTCUSDT",
+        search=FutureBeamSearch(ActionFunctional(), HeuristicTransitionModel()),
+        score_threshold_mode="adaptive_quantile",
+        target_action_rate=0.25,
+        score_threshold_min_history=4,
+        score_threshold_history_size=16,
+        initial_score_history=[-1.0, 0.0, 1.0, 2.0],
+    )
+    # q = 1 - 0.25 = 0.75, index round(0.75 * 3) = 2 -> sorted value 1.0
+    assert abs(policy._adaptive_score_threshold() - 1.0) < 1e-9
+
+
+def test_prefit_loader_respects_family_filter():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        headers = ["source", "shadow_score_adjusted"]
+        rows_a = [{"source": "stooq:btc.us", "shadow_score_adjusted": "1.0"}]
+        rows_b = [{"source": "stooq:btc.us", "shadow_score_adjusted": "2.0"}]
+        a = root / "trading_log_prefitA_btc.us.csv"
+        b = root / "trading_log_prefitB_btc.us.csv"
+        for path, rows in ((a, rows_a), (b, rows_b)):
+            with path.open("w", newline="", encoding="utf-8") as fh:
+                writer = csv.DictWriter(fh, fieldnames=headers)
+                writer.writeheader()
+                writer.writerows(rows)
+        vals = loopmod._load_prefit_shadow_scores(
+            log_dir=root,
+            symbol_name="stooq:btc.us",
+            max_values=10,
+            family_filter="prefitA",
+        )
+    assert vals == [1.0]
+
+
+def test_score_standardization_uses_pooled_stats_when_asset_history_short():
+    policy = BeamIntentPolicy(
+        symbol="BTCUSDT",
+        search=FutureBeamSearch(ActionFunctional(), HeuristicTransitionModel()),
+        score_calibration_mode="per_asset_zscore_shrunk",
+        score_calibration_min_history=10,
+        score_calibration_shrinkage_samples=20,
+        score_calibration_std_floor=0.1,
+        pooled_raw_score_history=[-1.0, 0.0, 1.0],
+    )
+    standardized, mean_value, std_value, weight = policy._standardize_raw_score(1.0)
+    assert abs(mean_value - 0.0) < 1e-9
+    assert std_value >= 0.1
+    assert abs(weight - 0.0) < 1e-9
+    assert abs(standardized - 1.22474487139) < 1e-6
+
+
+def test_score_standardization_has_std_floor_and_finite_output():
+    policy = BeamIntentPolicy(
+        symbol="BTCUSDT",
+        search=FutureBeamSearch(ActionFunctional(), HeuristicTransitionModel()),
+        score_calibration_mode="per_asset_zscore_shrunk",
+        score_calibration_std_floor=0.25,
+        initial_raw_score_history=[1.0, 1.0, 1.0, 1.0],
+        pooled_raw_score_history=[1.0, 1.0, 1.0, 1.0],
+    )
+    standardized, mean_value, std_value, weight = policy._standardize_raw_score(1.0)
+    assert abs(mean_value - 1.0) < 1e-9
+    assert abs(std_value - 0.25) < 1e-9
+    assert math.isfinite(standardized)
+    assert abs(standardized) < 1e-9
+    assert 0.0 <= weight <= 1.0
+
+
+def test_standardized_threshold_source_preserves_score_off_mode():
+    policy = BeamIntentPolicy(
+        symbol="BTCUSDT",
+        search=FutureBeamSearch(ActionFunctional(), HeuristicTransitionModel()),
+        score_threshold_mode="adaptive_quantile",
+        target_action_rate=0.25,
+        score_threshold_min_history=4,
+        score_threshold_history_size=8,
+        score_threshold_source="standardized_adjusted",
+        initial_score_history=[0.1, 0.2, 0.9, 1.1],
+    )
+    assert abs(policy._adaptive_score_threshold() - 0.9) < 1e-9
+
+
+def test_run_trading_loop_logs_standardized_shadow_scores_when_enabled():
+    price = np.array([100.0, 101.0, 102.0, 101.5, 102.5], dtype=float)
+    volume = np.ones_like(price) * 1000.0
+    summary, rows = run_trading_loop(
+        price=price,
+        volume=volume,
+        source="test_shadow_cal",
+        time_index=None,
+        max_steps=4,
+        sleep_s=0.0,
+        log_path=None,
+        trade_log_path=None,
+        tower_log_path=None,
+        log_level="quiet",
+        shadow_futures=True,
+        shadow_score_calibration_mode="per_asset_zscore_shrunk",
+        shadow_score_threshold_source="standardized_adjusted",
+    )
+    assert summary["steps"] > 0
+    assert rows
+    last = rows[-1]
+    assert "shadow_score_raw" in last
+    assert "shadow_score_standardized" in last
+    assert "shadow_score_calibration_mode" in last
+    assert "shadow_score_threshold_source" in last
+    assert "shadow_score_calibration_std" in last
+
+
 def test_run_trading_loop_emits_shadow_fields_when_enabled():
     price = np.array([100.0, 101.0, 102.0, 101.5, 102.5], dtype=float)
     volume = np.ones_like(price) * 1000.0
@@ -437,6 +550,12 @@ if __name__ == "__main__":
     test_build_transition_model_from_logs_falls_back_when_no_data()
     test_build_transition_model_from_logs_supports_global_per_asset_residual_and_shrinkage_modes()
     test_beam_policy_reports_entropy_and_flat_basin_separately()
+    test_adaptive_score_threshold_prefit_history_sets_quantile_cutoff()
+    test_prefit_loader_respects_family_filter()
+    test_score_standardization_uses_pooled_stats_when_asset_history_short()
+    test_score_standardization_has_std_floor_and_finite_output()
+    test_standardized_threshold_source_preserves_score_off_mode()
+    test_run_trading_loop_logs_standardized_shadow_scores_when_enabled()
     test_run_trading_loop_emits_shadow_fields_when_enabled()
     test_shadow_snapshot_is_built_before_apply_execution()
     print("ok")

@@ -149,12 +149,14 @@ What is implemented now:
 - label-stratified beam retention (quota + overflow) so flat candidates survive pruning
 - label-aware basin classification (flat label persists; return band uses fee floor)
 - beam label survival logging (per-depth long/short/flat counts)
+- adaptive-threshold prefit seeding controls for cold-start calibration, including run-family scoping to avoid mixing incompatible historical regimes
+- optional raw-score standardization with pooled shrinkage before shadow attenuation/gating, keeping raw score as the canonical ranking object while allowing adaptive quantile gating to act on a standardized score path
 
 What is intentionally not implemented yet:
 
 - control takeover in the main loop
 - dashboard panes for beam entropy / basin masses
-- post-cost-band BTC/SPY recalibration once `pred_flat` lift-off is confirmed
+- uncertainty-block ablation after the standardized-score A/B is evaluated on SPY
 
 ## Decision-grade diagnosis
 
@@ -446,3 +448,31 @@ score_adjusted = score * (1 - flat_mass)
 
 These metrics are reported in the shadow comparison reports but do not gate
 execution yet.
+
+## Current blocker (updated)
+
+The main blocker is no longer best described as only gate calibration or prefit
+threshold initialization. Recent runs moved action rates materially without
+reliably improving the main economic selection test.
+
+The next branch should therefore isolate where failure occurs in the policy
+pipeline:
+
+```text
+features -> action score -> ranking -> activation/gating -> economic outcome
+```
+
+Primary diagnostic order:
+
+1. proposal amplitude / score-spread collapse
+2. ranking failure
+3. activation/gating failure
+
+Current defaults for the next branch:
+
+- use `shadow_score_value` as the canonical raw pre-gate score for ranking diagnostics
+- keep SPY as the main calibration anchor
+- treat BTC as secondary validation / operational negative-control until
+  short-tape handling improves
+- prioritize acceptable-vs-ACT and `E(|ret| | ACT) > E(|ret| | HOLD)` before
+  more reward/penalty retuning

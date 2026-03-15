@@ -1,4 +1,6 @@
+import csv
 import pathlib
+import sys
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -270,6 +272,82 @@ def _compute_shadow_log_fields(
     return shadow_log_fields
 
 
+def _shadow_symbol_tokens(symbol_name: str) -> set[str]:
+    raw = (symbol_name or "").strip().lower()
+    if not raw:
+        return set()
+    tokens = {raw}
+    if ":" in raw:
+        _, right = raw.split(":", 1)
+        tokens.add(right)
+    return {t for t in tokens if t}
+
+
+def _load_prefit_shadow_scores(
+    *,
+    log_dir: pathlib.Path,
+    symbol_name: str,
+    max_values: int,
+    family_filter: str = "",
+    column_name: str = "shadow_score_adjusted",
+) -> list[float]:
+    # Shadow logs include large structured fields (e.g. beam-step traces), so bump CSV field limits.
+    field_limit = sys.maxsize
+    while True:
+        try:
+            csv.field_size_limit(field_limit)
+            break
+        except OverflowError:
+            field_limit //= 10
+            if field_limit <= 0:
+                break
+    tokens = _shadow_symbol_tokens(symbol_name)
+    family = (family_filter or "").strip().lower()
+    if max_values <= 0:
+        return []
+    if not log_dir.exists():
+        return []
+    paths = sorted(log_dir.glob("trading_log*.csv"))
+    if not paths:
+        return []
+    values: list[float] = []
+    for path in paths:
+        path_name = path.name.lower()
+        if family and family not in path_name:
+            continue
+        file_matches = any(token in path_name for token in tokens) if tokens else True
+        try:
+            with path.open("r", encoding="utf-8", newline="") as fh:
+                reader = csv.DictReader(fh)
+                if reader.fieldnames is None or column_name not in reader.fieldnames:
+                    continue
+                source_col_present = "source" in reader.fieldnames
+                for row in reader:
+                    if source_col_present and tokens:
+                        source_value = (row.get("source") or "").strip().lower()
+                        if source_value and source_value not in tokens and not file_matches:
+                            continue
+                        if not source_value and not file_matches:
+                            continue
+                    elif not file_matches:
+                        continue
+                    raw = row.get(column_name)
+                    if raw is None or raw == "":
+                        continue
+                    try:
+                        value = float(raw)
+                    except (TypeError, ValueError):
+                        continue
+                    if not np.isfinite(value):
+                        continue
+                    values.append(value)
+                    if len(values) >= max_values:
+                        return values
+        except OSError:
+            continue
+    return values
+
+
 def run_trading_loop(
     price: np.ndarray,
     volume: np.ndarray,
@@ -325,6 +403,18 @@ def run_trading_loop(
     shadow_kernel_residual_weight: float = 1.0,
     shadow_score_mode: str = "ratio",
     shadow_score_scale: float = 1.0,
+    shadow_score_threshold_mode: str = "fixed",
+    shadow_target_action_rate: float = 0.0,
+    shadow_score_threshold_min_history: int = 100,
+    shadow_score_threshold_history_size: int = 2000,
+    shadow_score_threshold_prefit: bool = False,
+    shadow_score_threshold_prefit_max_values: int = 20000,
+    shadow_score_threshold_prefit_family: str = "",
+    shadow_score_calibration_mode: str = "off",
+    shadow_score_threshold_source: str = "adjusted",
+    shadow_score_calibration_min_history: int = 50,
+    shadow_score_calibration_shrinkage_samples: int = 400,
+    shadow_score_calibration_std_floor: float = 0.05,
     shadow_gating_mode: str = "lex",
     shadow_kernel_label_mode: str = "fixed",
     shadow_kernel_label_threshold: float = 0.01,
@@ -386,6 +476,41 @@ def run_trading_loop(
         kernel_log_dir = pathlib.Path(shadow_kernel_log_dir)
         if not kernel_log_dir.exists() or not any(kernel_log_dir.glob("trading_log*.csv")):
             kernel_log_dir = pathlib.Path("logs")
+        prefit_scores: list[float] = []
+        if (
+            shadow_score_threshold_prefit
+            and shadow_score_threshold_mode == "adaptive_quantile"
+            and shadow_score_threshold_source == "adjusted"
+        ):
+            prefit_scores = _load_prefit_shadow_scores(
+                log_dir=kernel_log_dir,
+                symbol_name=symbol_name,
+                max_values=int(shadow_score_threshold_prefit_max_values),
+                family_filter=str(shadow_score_threshold_prefit_family or ""),
+            )
+        initial_raw_scores: list[float] = []
+        pooled_raw_scores: list[float] = []
+        if shadow_score_calibration_mode != "off":
+            raw_limit = max(
+                int(shadow_score_threshold_history_size),
+                int(shadow_score_calibration_shrinkage_samples),
+                256,
+            )
+            pooled_limit = max(raw_limit * 4, 1024)
+            initial_raw_scores = _load_prefit_shadow_scores(
+                log_dir=kernel_log_dir,
+                symbol_name=symbol_name,
+                max_values=raw_limit,
+                family_filter=str(shadow_score_threshold_prefit_family or ""),
+                column_name="shadow_score_value",
+            )
+            pooled_raw_scores = _load_prefit_shadow_scores(
+                log_dir=kernel_log_dir,
+                symbol_name="",
+                max_values=pooled_limit,
+                family_filter=str(shadow_score_threshold_prefit_family or ""),
+                column_name="shadow_score_value",
+            )
         shadow_estimator = CoarseStateEstimator()
         live_policy_adapter = _LoopLivePolicyAdapter()
         shadow_runner = ShadowPolicyRunner(
@@ -417,6 +542,18 @@ def run_trading_loop(
                         flat_cost_floor=shadow_beam_flat_cost_floor,
                     ),
                 ),
+                score_threshold_mode=shadow_score_threshold_mode,
+                target_action_rate=shadow_target_action_rate,
+                score_threshold_min_history=shadow_score_threshold_min_history,
+                score_threshold_history_size=shadow_score_threshold_history_size,
+                initial_score_history=prefit_scores,
+                score_calibration_mode=shadow_score_calibration_mode,
+                score_threshold_source=shadow_score_threshold_source,
+                score_calibration_min_history=shadow_score_calibration_min_history,
+                score_calibration_shrinkage_samples=shadow_score_calibration_shrinkage_samples,
+                score_calibration_std_floor=shadow_score_calibration_std_floor,
+                initial_raw_score_history=initial_raw_scores,
+                pooled_raw_score_history=pooled_raw_scores,
                 entropy_gate_mode=shadow_entropy_gate_mode,
                 entropy_gate_center=shadow_entropy_gate_center,
                 entropy_gate_tau=shadow_entropy_gate_tau,

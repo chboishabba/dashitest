@@ -112,7 +112,8 @@ Result:
 - BTC `residual` act ratio = 1.0
 - all SPY modes act ratio = 1.0
 
-Current blocker: moderation/calibration.
+Current blocker: failure-locus diagnosis rather than another generic
+calibration pass.
 
 ### Threshold sweeps (label calibration)
 
@@ -132,54 +133,124 @@ Results:
 - Label-stratified retention (0.05/0.10) initially yielded `pred_flat ≈ 0`; beam survival counts confirmed flat survives all beam depths and was collapsing at aggregation.
 - After label-aware flat persistence + fee-floor band rerun at 0.05, `pred_flat` lifted on both tapes (BTC `0.0865`, SPY `0.0737`), confirming tri-modal basin recovery.
 
-Current next step: run the 0.10 companion check under the same parser-fixed path
-to map the hold/act transition, then retune gate/score thresholds from a now
-valid tri-modal basin.
+Current next step: distinguish whether the remaining failure is primarily:
 
-## What we need from quant reviewers
+- proposal amplitude / score-spread collapse
+- ranking failure
+- activation/gating failure
+- tape-specific mixtures of the above
 
-### A. Action-functional calibration
+SPY is now the primary calibration anchor. BTC remains secondary validation
+until short-tape instability is better controlled.
 
-1. Are the reward and penalty terms structurally well separated?
-2. Should branch risk and diffusion be combined or kept distinct?
-3. Are churn and inventory penalties too strong relative to expected edge?
-4. Should any penalties be nonlinear or regime-conditional?
+Latest branch decision:
 
-### B. Hold/act gating
+- The first failure-locus reports on SPY are not consistent with pure
+  amplitude collapse: raw-score spread remains non-trivial and ranking uplift
+  is positive.
+- The next implementation branch is therefore optional raw-score
+  standardization with pooled shrinkage, still shadow-only and still judged
+  against `E(|ret| | ACT) > E(|ret| | HOLD)` before any uncertainty-block
+  simplification.
 
-1. Is the current gating hierarchy appropriate?
-2. Should flat mass reduce exposure, force hold, or define a separate regime?
-3. Should score thresholds be absolute or scale with entropy/variance?
+## What we need from quant reviewers now
 
-### C. Kernel family structure
+### 1. Failure locus
 
-1. Is `global` / `per_asset` / `residual` the right decomposition?
-2. If residual stays, should the blend be changed to a shrinkage estimator?
-3. If residual is removed, what should replace it?
+Which is the dominant failure mode now?
 
-### D. Diagnostics and acceptance criteria
+- A. upstream proposal amplitude / score-spread collapse
+- B. bad score ranking
+- C. over-harsh activation/gating
+- D. different failure modes by tape
 
-What is the minimal decision-grade evidence that would justify:
+Recommended default:
 
-- advisory veto mode (shadow can cancel, not replace)
-- control takeover (shadow becomes primary)
+`D`, tested in order `A -> B -> C`.
 
-## Concrete questions to answer
+### 2. Calibration vs weight retune
 
-1. Which score terms are misweighted today?
-2. What score normalization would you try first?
-3. What action-rate range is acceptable for shadow policy in this context?
-4. Should the score distribution be centered, bounded, or skewed by design?
-5. What plots or statistics would make this tuning decision complete?
+What should change first?
+
+- A. per-asset raw-score calibration
+- B. reward/penalty retune
+- C. both, in strict order
+
+Recommended default:
+
+`C`, with calibration before retuning.
+
+### 3. Normalization target
+
+What should be normalized?
+
+- A. final gated score
+- B. raw pre-gate score
+- C. reward and penalty blocks separately
+- D. log both B and C, use B as canonical ranking object
+
+Recommended default:
+
+`D`. Use raw pre-gate score as the main ranking object and log block-level
+structure separately for diagnostics.
+
+### 4. Cross-asset policy
+
+How should normalization behave across tapes?
+
+- A. per-asset only
+- B. global only
+- C. per-asset with pooled shrinkage for short tapes
+
+Recommended default:
+
+`C`.
+
+### 5. Acceptance gate
+
+Which metric should block rollout first?
+
+- A. acceptable-vs-ACT precision/recall
+- B. `E(|ret| | ACT) > E(|ret| | HOLD)`
+- C. ACT Sharpe proxy
+- D. ACT sign accuracy
+
+Recommended default:
+
+`A -> B`.
+
+### 6. Penalty structure
+
+What ablation should we run?
+
+- A. keep explicit penalties, retune weights
+- B. merge correlated uncertainty terms
+- C. compare both
+
+Recommended default:
+
+`C`, with bias toward `B` if performance parity holds.
+
+### 7. BTC status
+
+How should BTC be treated in the next branch?
+
+- A. primary calibration tape
+- B. secondary validation tape
+- C. explicit negative control
+- D. separate controller family candidate
+
+Recommended default:
+
+`B`, with some operational use of `C`.
 
 ## One-line status summary
 
 We now have an interpretable, shadow-only competing-futures controller with
-learned transition kernels, explicit hold diagnostics, and basin-geometry
-signals; calibration has escaped all-hold but now overshoots into all-act.
-Label-threshold sweeps show flat labels exist in training, yet flat basin mass
-initially remained ~0 even after label-stratified retention, indicating basin
-aggregation collapse. With label-aware basin classification (cost-floor band)
-plus beam survival instrumentation, the 0.05 rerun now shows nonzero
-`pred_flat` on both BTC/SPY; immediate work is threshold calibration (starting
-with 0.10 companion run) rather than structural flat-survival fixes.
+learned transition kernels, explicit hold diagnostics, basin-geometry signals,
+and functioning adaptive-threshold controls. Those controls can move action
+rates materially, but recent prefit/family-scope reruns did not reliably
+improve the main economic test. Immediate work is therefore not more generic
+gate tuning; it is failure-locus diagnosis on score spread, ranking quality,
+and activation quality, with SPY as the main calibration anchor and BTC kept as
+secondary validation.

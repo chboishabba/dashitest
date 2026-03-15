@@ -70,10 +70,68 @@ def _safe_hist(ax, data, bins: int = 30) -> None:
     ax.hist(values, bins=bins)
 
 
+def _safe_percentile(values: list[float], q: float) -> float:
+    clean = [x for x in values if math.isfinite(x)]
+    if not clean:
+        return float("nan")
+    return float(np.percentile(clean, q))
+
+
+def _bucket_curve(
+    xs: list[float],
+    ys: list[float],
+    *,
+    buckets: int = 20,
+) -> tuple[list[float], list[float]]:
+    pts = [(x, y) for x, y in zip(xs, ys) if math.isfinite(x) and math.isfinite(y)]
+    if len(pts) < max(8, buckets):
+        return [], []
+    pts.sort(key=lambda item: item[0])
+    bucket_size = max(1, len(pts) // buckets)
+    centers: list[float] = []
+    means: list[float] = []
+    for start in range(0, len(pts), bucket_size):
+        chunk = pts[start : start + bucket_size]
+        if not chunk:
+            continue
+        centers.append(sum(x for x, _ in chunk) / len(chunk))
+        means.append(sum(y for _, y in chunk) / len(chunk))
+    return centers, means
+
+
+def _mean_or_nan(values: list[float]) -> float:
+    clean = [x for x in values if math.isfinite(x)]
+    if not clean:
+        return float("nan")
+    return float(sum(clean) / len(clean))
+
+
+def _failure_locus(stats: dict[str, object]) -> str:
+    raw_spread = float(stats.get("raw_score_p90_p10", float("nan")))
+    ranking_uplift = float(stats.get("ranking_uplift", float("nan")))
+    overall_action_rate = float(stats.get("action_rate", float("nan")))
+    top_bucket_action_rate = float(stats.get("top_bucket_action_rate", float("nan")))
+    if math.isfinite(raw_spread) and raw_spread <= 0.10:
+        return "proposal_amplitude"
+    if math.isfinite(ranking_uplift) and ranking_uplift <= 0.0:
+        return "ranking"
+    if (
+        math.isfinite(ranking_uplift)
+        and ranking_uplift > 0.0
+        and math.isfinite(top_bucket_action_rate)
+        and math.isfinite(overall_action_rate)
+        and top_bucket_action_rate <= max(0.05, overall_action_rate + 0.02)
+    ):
+        return "activation"
+    return "mixed"
+
+
 def analyze(rows: list[dict[str, str]], horizon: int = 20) -> dict[str, object]:
     entropy = [_float(row, "beam_entropy") for row in rows if math.isfinite(_float(row, "beam_entropy"))]
     flat = [_float(row, "beam_flat_mass") for row in rows if math.isfinite(_float(row, "beam_flat_mass"))]
-    score_series = []
+    raw_score_series = []
+    standardized_score_series = []
+    adjusted_score_series = []
     basin_margin_series = []
     curvature_series = []
     long_series = []
@@ -96,6 +154,10 @@ def analyze(rows: list[dict[str, str]], horizon: int = 20) -> dict[str, object]:
     action_eval = 0
     live_correct = 0
     live_eval = 0
+    raw_future = []
+    adjusted_future = []
+    future_signed = []
+    act_flags = []
     for idx, row in enumerate(rows):
         live = row.get("live_direction", "")
         shadow = row.get("shadow_direction", "")
@@ -107,11 +169,17 @@ def analyze(rows: list[dict[str, str]], horizon: int = 20) -> dict[str, object]:
         fm = _float(row, "beam_flat_mass")
         if math.isfinite(fm) and abs(fm) > 1e-12:
             flat_nonzero += 1
-        score_value = _float(row, "shadow_score_adjusted")
-        if not math.isfinite(score_value):
-            score_value = _float(row, "shadow_score_value")
-        if math.isfinite(score_value):
-            score_series.append(score_value)
+        raw_score = _float(row, "shadow_score_raw")
+        if not math.isfinite(raw_score):
+            raw_score = _float(row, "shadow_score_value")
+        standardized_score = _float(row, "shadow_score_standardized")
+        adjusted_score = _float(row, "shadow_score_adjusted")
+        if math.isfinite(raw_score):
+            raw_score_series.append(raw_score)
+        if math.isfinite(standardized_score):
+            standardized_score_series.append(standardized_score)
+        if math.isfinite(adjusted_score):
+            adjusted_score_series.append(adjusted_score)
         margin = abs(_float(row, "beam_long_mass") - _float(row, "beam_short_mass"))
         if math.isfinite(margin):
             basin_margin_series.append(margin)
@@ -135,7 +203,11 @@ def analyze(rows: list[dict[str, str]], horizon: int = 20) -> dict[str, object]:
                 trend_strength.append(abs(px2 / px - 1.0))
                 basin_edge.append(_float(row, "beam_long_mass") - _float(row, "beam_short_mass"))
                 next_move.append(future_ret)
+                future_signed.append(future_ret)
+                raw_future.append(raw_score)
+                adjusted_future.append(adjusted_score)
                 shadow_hold = row.get("shadow_hold", "") == "1"
+                act_flags.append(0.0 if shadow_hold else 1.0)
                 shadow_dir = _float(row, "shadow_direction")
                 if not shadow_hold and math.isfinite(shadow_dir):
                     action_future.append(future_ret)
@@ -154,7 +226,24 @@ def analyze(rows: list[dict[str, str]], horizon: int = 20) -> dict[str, object]:
                         live_eval += 1
                         if (live_dir > 0) == (future_ret > 0):
                             live_correct += 1
-    return {
+    raw_centers, ranking_curve = _bucket_curve(raw_future, future_abs)
+    _, activation_curve = _bucket_curve(raw_future, act_flags)
+    top_bucket_action_rate = activation_curve[-1] if activation_curve else float("nan")
+    ranking_uplift = (
+        ranking_curve[-1] - ranking_curve[0]
+        if len(ranking_curve) >= 2
+        else float("nan")
+    )
+    raw_score_std = float(np.std(raw_score_series)) if raw_score_series else float("nan")
+    standardized_score_std = float(np.std(standardized_score_series)) if standardized_score_series else float("nan")
+    adjusted_score_std = float(np.std(adjusted_score_series)) if adjusted_score_series else float("nan")
+    raw_score_p90 = _safe_percentile(raw_score_series, 90)
+    raw_score_p10 = _safe_percentile(raw_score_series, 10)
+    standardized_score_p90 = _safe_percentile(standardized_score_series, 90)
+    standardized_score_p10 = _safe_percentile(standardized_score_series, 10)
+    adjusted_score_p90 = _safe_percentile(adjusted_score_series, 90)
+    adjusted_score_p10 = _safe_percentile(adjusted_score_series, 10)
+    result = {
         "rows": len(rows),
         "entropy_mean": mean(entropy) if entropy else float("nan"),
         "entropy_min": min(entropy) if entropy else float("nan"),
@@ -169,13 +258,39 @@ def analyze(rows: list[dict[str, str]], horizon: int = 20) -> dict[str, object]:
         "hold_reasons": hold_reasons,
         "entropy_series": entropy,
         "flat_series": flat,
-        "score_series": score_series,
+        "raw_score_series": raw_score_series,
+        "standardized_score_series": standardized_score_series,
+        "adjusted_score_series": adjusted_score_series,
         "basin_margin_series": basin_margin_series,
         "curvature_series": curvature_series,
         "long_series": long_series,
         "short_series": short_series,
         "entropy_future": ent_future,
         "future_abs": future_abs,
+        "future_signed": future_signed,
+        "raw_score_future": raw_future,
+        "adjusted_score_future": adjusted_future,
+        "act_flags": act_flags,
+        "raw_score_std": raw_score_std,
+        "adjusted_score_std": adjusted_score_std,
+        "raw_score_p90": raw_score_p90,
+        "raw_score_p10": raw_score_p10,
+        "raw_score_p90_p10": raw_score_p90 - raw_score_p10 if math.isfinite(raw_score_p90) and math.isfinite(raw_score_p10) else float("nan"),
+        "standardized_score_std": standardized_score_std,
+        "standardized_score_p90": standardized_score_p90,
+        "standardized_score_p10": standardized_score_p10,
+        "standardized_score_p90_p10": standardized_score_p90 - standardized_score_p10
+        if math.isfinite(standardized_score_p90) and math.isfinite(standardized_score_p10)
+        else float("nan"),
+        "adjusted_score_p90": adjusted_score_p90,
+        "adjusted_score_p10": adjusted_score_p10,
+        "adjusted_score_p90_p10": adjusted_score_p90 - adjusted_score_p10 if math.isfinite(adjusted_score_p90) and math.isfinite(adjusted_score_p10) else float("nan"),
+        "ranking_curve_x": raw_centers,
+        "ranking_curve_y": ranking_curve,
+        "activation_curve_x": raw_centers if activation_curve and len(activation_curve) == len(raw_centers) else [],
+        "activation_curve_y": activation_curve,
+        "ranking_uplift": ranking_uplift,
+        "top_bucket_action_rate": top_bucket_action_rate,
         "action_rate": 1.0 - (hold_count / len(rows)) if rows else float("nan"),
         "action_return_mean": mean(action_future) if action_future else float("nan"),
         "hold_return_mean": mean(hold_future) if hold_future else float("nan"),
@@ -186,6 +301,8 @@ def analyze(rows: list[dict[str, str]], horizon: int = 20) -> dict[str, object]:
         "shadow_sharpe": (mean(action_signed) / (np.std(action_signed) + 1e-9)) if action_signed else float("nan"),
         "live_sharpe": (mean(live_signed) / (np.std(live_signed) + 1e-9)) if live_signed else float("nan"),
     }
+    result["failure_locus"] = _failure_locus(result)
+    return result
 
 
 def parse_inputs(items: list[str]) -> list[tuple[str, pathlib.Path]]:
@@ -223,10 +340,22 @@ def main() -> None:
             fh.write(f"- flat-mass nonzero ratio: `{stats['flat_nonzero_ratio']:.6f}`\n")
             fh.write(f"- shadow hold ratio: `{stats['hold_ratio']:.6f}`\n")
             fh.write(f"- shadow action rate: `{stats['action_rate']:.6f}`\n")
+            fh.write(f"- heuristic failure locus: `{stats['failure_locus']}`\n")
             fh.write(f"- live vs shadow direction divergence: `{stats['divergence']:.6f}`\n")
             fh.write(f"- entropy vs future abs return corr ({args.horizon}): `{stats['entropy_absret_corr']:.6f}`\n")
             fh.write(f"- contraction vs trend strength corr ({args.horizon}): `{stats['contraction_trend_corr']:.6f}`\n")
             fh.write(f"- basin edge vs next move corr ({args.horizon}): `{stats['basin_edge_move_corr']:.6f}`\n")
+            fh.write(
+                f"- raw-score std / p90-p10 spread: `{stats['raw_score_std']:.6f}` / `{stats['raw_score_p90_p10']:.6f}`\n"
+            )
+            fh.write(
+                f"- standardized-score std / p90-p10 spread: `{stats['standardized_score_std']:.6f}` / `{stats['standardized_score_p90_p10']:.6f}`\n"
+            )
+            fh.write(
+                f"- adjusted-score std / p90-p10 spread: `{stats['adjusted_score_std']:.6f}` / `{stats['adjusted_score_p90_p10']:.6f}`\n"
+            )
+            fh.write(f"- ranking uplift (top-bottom bucket, abs return): `{stats['ranking_uplift']:.6f}`\n")
+            fh.write(f"- top-bucket action rate: `{stats['top_bucket_action_rate']:.6f}`\n")
             if stats["curvature_series"]:
                 fh.write(f"- curvature mean: `{mean(stats['curvature_series']):.6f}`\n")
             if stats["long_series"] and stats["short_series"] and stats["flat_series"]:
@@ -244,7 +373,7 @@ def main() -> None:
             fh.write(f"- live action Sharpe proxy ({args.horizon}): `{stats['live_sharpe']:.6f}`\n")
             fh.write(f"- hold reasons: `{stats['hold_reasons'].most_common()}`\n\n")
 
-    rows_per_label = 3
+    rows_per_label = 4
     fig, axes = plt.subplots(len(results) * rows_per_label, 3, figsize=(16, 4 * max(len(results), 1) * rows_per_label))
     if len(results) == 1:
         axes = [axes] if rows_per_label == 1 else axes
@@ -252,20 +381,23 @@ def main() -> None:
         row_base = idx * rows_per_label
         ax_entropy = axes[row_base][0]
         ax_flat = axes[row_base][1]
-        ax_score = axes[row_base][2]
+        ax_raw_score = axes[row_base][2]
         ax_basin = axes[row_base + 1][0]
         ax_action = axes[row_base + 1][1]
-        ax_ent_profit = axes[row_base + 1][2]
+        ax_adjusted_score = axes[row_base + 1][2]
         ax_curve = axes[row_base + 2][0]
         ax_curve_profit = axes[row_base + 2][1]
         ax_curve_hold = axes[row_base + 2][2]
+        ax_rank = axes[row_base + 3][0]
+        ax_activation = axes[row_base + 3][1]
+        ax_heat = axes[row_base + 3][2]
 
         _safe_hist(ax_entropy, stats["entropy_series"], bins=30)
         ax_entropy.set_title(f"{label} entropy")
         _safe_hist(ax_flat, stats["flat_series"], bins=30)
         ax_flat.set_title(f"{label} flat mass")
-        _safe_hist(ax_score, stats["score_series"], bins=30)
-        ax_score.set_title(f"{label} score")
+        _safe_hist(ax_raw_score, stats["raw_score_series"], bins=30)
+        ax_raw_score.set_title(f"{label} raw score")
 
         _safe_hist(ax_basin, stats["basin_margin_series"], bins=30)
         ax_basin.set_title(f"{label} basin margin")
@@ -276,15 +408,13 @@ def main() -> None:
         ax_action.set_title(f"{label} future return ({args.horizon})")
         ax_action.axhline(0.0, color="black", linewidth=0.8)
 
-        ent_future = [x for x in stats["entropy_future"] if math.isfinite(x)]
+        _safe_hist(ax_adjusted_score, stats["adjusted_score_series"], bins=30)
+        ax_adjusted_score.set_title(f"{label} adjusted score")
+
+        _safe_hist(ax_curve, stats["standardized_score_series"], bins=30)
+        ax_curve.set_title(f"{label} standardized score")
+
         future_abs = [x for x in stats["future_abs"] if math.isfinite(x)]
-        if ent_future and future_abs and len(ent_future) == len(future_abs):
-            ax_ent_profit.scatter(ent_future, future_abs, s=6, alpha=0.5)
-        ax_ent_profit.set_title(f"{label} entropy vs abs return")
-
-        _safe_hist(ax_curve, stats["curvature_series"], bins=30)
-        ax_curve.set_title(f"{label} curvature")
-
         curvature = stats["curvature_series"]
         if curvature and future_abs and len(curvature) >= len(future_abs):
             curvature = curvature[: len(future_abs)]
@@ -294,6 +424,41 @@ def main() -> None:
 
         ax_curve_hold.bar(["act", "hold"], [stats["action_abs_return_mean"], stats["hold_abs_return_mean"]])
         ax_curve_hold.set_title(f"{label} abs return (act/hold)")
+
+        rank_x = stats["ranking_curve_x"]
+        rank_y = stats["ranking_curve_y"]
+        if rank_x and rank_y:
+            ax_rank.plot(rank_x, rank_y, marker="o", linewidth=1.2)
+        else:
+            ax_rank.text(0.5, 0.5, "no data", ha="center", va="center")
+        ax_rank.set_title(f"{label} ranking curve")
+        ax_rank.set_xlabel("raw score bucket")
+        ax_rank.set_ylabel(f"mean |ret| ({args.horizon})")
+
+        act_x = stats["activation_curve_x"]
+        act_y = stats["activation_curve_y"]
+        if act_x and act_y:
+            ax_activation.plot(act_x, act_y, marker="o", linewidth=1.2)
+        else:
+            ax_activation.text(0.5, 0.5, "no data", ha="center", va="center")
+        ax_activation.set_title(f"{label} activation curve")
+        ax_activation.set_xlabel("raw score bucket")
+        ax_activation.set_ylabel("ACT rate")
+
+        heat_pairs = [
+            (x, y)
+            for x, y in zip(stats["raw_score_future"], stats["future_signed"])
+            if math.isfinite(x) and math.isfinite(y)
+        ]
+        if heat_pairs:
+            heat_x = [x for x, _ in heat_pairs]
+            heat_y = [y for _, y in heat_pairs]
+            ax_heat.hist2d(heat_x, heat_y, bins=40)
+        else:
+            ax_heat.text(0.5, 0.5, "no data", ha="center", va="center")
+        ax_heat.set_title(f"{label} raw score vs future return")
+        ax_heat.set_xlabel("raw score")
+        ax_heat.set_ylabel(f"future ret ({args.horizon})")
     plt.tight_layout()
     plot_path = pathlib.Path(args.plot)
     plot_path.parent.mkdir(parents=True, exist_ok=True)

@@ -93,6 +93,18 @@ def main(
     shadow_kernel_residual_weight: float = 1.0,
     shadow_score_mode: str = "ratio",
     shadow_score_scale: float = 1.0,
+    shadow_score_threshold_mode: str = "fixed",
+    shadow_target_action_rate: float = 0.0,
+    shadow_score_threshold_min_history: int = 100,
+    shadow_score_threshold_history_size: int = 2000,
+    shadow_score_threshold_prefit: bool = False,
+    shadow_score_threshold_prefit_max_values: int = 20000,
+    shadow_score_threshold_prefit_family: str = "",
+    shadow_score_calibration_mode: str = "off",
+    shadow_score_threshold_source: str = "adjusted",
+    shadow_score_calibration_min_history: int = 50,
+    shadow_score_calibration_shrinkage_samples: int = 400,
+    shadow_score_calibration_std_floor: float = 0.05,
     shadow_gating_mode: str = "lex",
     shadow_kernel_label_mode: str = "fixed",
     shadow_kernel_label_threshold: float = 0.01,
@@ -225,6 +237,18 @@ def main(
                     shadow_kernel_residual_weight=shadow_kernel_residual_weight,
                     shadow_score_mode=shadow_score_mode,
                     shadow_score_scale=shadow_score_scale,
+                    shadow_score_threshold_mode=shadow_score_threshold_mode,
+                    shadow_target_action_rate=shadow_target_action_rate,
+                    shadow_score_threshold_min_history=shadow_score_threshold_min_history,
+                    shadow_score_threshold_history_size=shadow_score_threshold_history_size,
+                    shadow_score_threshold_prefit=shadow_score_threshold_prefit,
+                    shadow_score_threshold_prefit_max_values=shadow_score_threshold_prefit_max_values,
+                    shadow_score_threshold_prefit_family=shadow_score_threshold_prefit_family,
+                    shadow_score_calibration_mode=shadow_score_calibration_mode,
+                    shadow_score_threshold_source=shadow_score_threshold_source,
+                    shadow_score_calibration_min_history=shadow_score_calibration_min_history,
+                    shadow_score_calibration_shrinkage_samples=shadow_score_calibration_shrinkage_samples,
+                    shadow_score_calibration_std_floor=shadow_score_calibration_std_floor,
                     shadow_gating_mode=shadow_gating_mode,
                     shadow_kernel_label_mode=shadow_kernel_label_mode,
                     shadow_kernel_label_threshold=shadow_kernel_label_threshold,
@@ -310,6 +334,18 @@ def main(
         shadow_kernel_residual_weight=shadow_kernel_residual_weight,
         shadow_score_mode=shadow_score_mode,
         shadow_score_scale=shadow_score_scale,
+        shadow_score_threshold_mode=shadow_score_threshold_mode,
+        shadow_target_action_rate=shadow_target_action_rate,
+        shadow_score_threshold_min_history=shadow_score_threshold_min_history,
+        shadow_score_threshold_history_size=shadow_score_threshold_history_size,
+        shadow_score_threshold_prefit=shadow_score_threshold_prefit,
+        shadow_score_threshold_prefit_max_values=shadow_score_threshold_prefit_max_values,
+        shadow_score_threshold_prefit_family=shadow_score_threshold_prefit_family,
+        shadow_score_calibration_mode=shadow_score_calibration_mode,
+        shadow_score_threshold_source=shadow_score_threshold_source,
+        shadow_score_calibration_min_history=shadow_score_calibration_min_history,
+        shadow_score_calibration_shrinkage_samples=shadow_score_calibration_shrinkage_samples,
+        shadow_score_calibration_std_floor=shadow_score_calibration_std_floor,
         shadow_gating_mode=shadow_gating_mode,
         shadow_kernel_label_mode=shadow_kernel_label_mode,
         shadow_kernel_label_threshold=shadow_kernel_label_threshold,
@@ -498,6 +534,80 @@ if __name__ == "__main__":
     )
     ap.add_argument("--shadow-score-scale", type=float, default=1.0, help="Scale for score_mode 'scaled_diff' or 'logistic'.")
     ap.add_argument(
+        "--shadow-score-threshold-mode",
+        type=str,
+        default="fixed",
+        choices=["fixed", "adaptive_quantile"],
+        help="Score threshold mode: fixed threshold or adaptive per-asset quantile.",
+    )
+    ap.add_argument(
+        "--shadow-target-action-rate",
+        type=float,
+        default=0.0,
+        help="Target action rate for adaptive_quantile score threshold mode (0 disables).",
+    )
+    ap.add_argument(
+        "--shadow-score-threshold-min-history",
+        type=int,
+        default=100,
+        help="Minimum score-history length before adaptive quantile thresholding starts.",
+    )
+    ap.add_argument(
+        "--shadow-score-threshold-history-size",
+        type=int,
+        default=2000,
+        help="Rolling history size for adaptive quantile thresholding.",
+    )
+    ap.add_argument(
+        "--shadow-score-threshold-prefit",
+        action="store_true",
+        help="Prefit adaptive-quantile score threshold history from existing trading_log*.csv before live steps.",
+    )
+    ap.add_argument(
+        "--shadow-score-threshold-prefit-max-values",
+        type=int,
+        default=20000,
+        help="Maximum prefit score samples loaded per asset for adaptive quantile initialization.",
+    )
+    ap.add_argument(
+        "--shadow-score-threshold-prefit-family",
+        type=str,
+        default="",
+        help="Optional filename substring to scope prefit seed logs to a run family (e.g. prefit_005_kdirshadow_seed200).",
+    )
+    ap.add_argument(
+        "--shadow-score-calibration-mode",
+        type=str,
+        default="off",
+        choices=["off", "per_asset_zscore_shrunk"],
+        help="Optional shadow-only score calibration mode applied to raw pre-gate scores.",
+    )
+    ap.add_argument(
+        "--shadow-score-threshold-source",
+        type=str,
+        default="adjusted",
+        choices=["adjusted", "standardized_adjusted"],
+        help="Score path consumed by threshold gating: legacy adjusted score or calibrated standardized-adjusted score.",
+    )
+    ap.add_argument(
+        "--shadow-score-calibration-min-history",
+        type=int,
+        default=50,
+        help="Minimum raw-score history length before asset statistics dominate pooled shrinkage.",
+    )
+    ap.add_argument(
+        "--shadow-score-calibration-shrinkage-samples",
+        type=int,
+        default=400,
+        help="Sample count at which score calibration fully trusts per-asset history over pooled statistics.",
+    )
+    ap.add_argument(
+        "--shadow-score-calibration-std-floor",
+        type=float,
+        default=0.05,
+        help="Minimum standard deviation used by shadow raw-score standardization.",
+    )
+    ap.add_argument(
         "--shadow-gating-mode",
         type=str,
         default="lex",
@@ -552,6 +662,18 @@ if __name__ == "__main__":
         shadow_kernel_residual_weight=args.shadow_kernel_residual_weight,
         shadow_score_mode=args.shadow_score_mode,
         shadow_score_scale=args.shadow_score_scale,
+        shadow_score_threshold_mode=args.shadow_score_threshold_mode,
+        shadow_target_action_rate=args.shadow_target_action_rate,
+        shadow_score_threshold_min_history=args.shadow_score_threshold_min_history,
+        shadow_score_threshold_history_size=args.shadow_score_threshold_history_size,
+        shadow_score_threshold_prefit=args.shadow_score_threshold_prefit,
+        shadow_score_threshold_prefit_max_values=args.shadow_score_threshold_prefit_max_values,
+        shadow_score_threshold_prefit_family=args.shadow_score_threshold_prefit_family,
+        shadow_score_calibration_mode=args.shadow_score_calibration_mode,
+        shadow_score_threshold_source=args.shadow_score_threshold_source,
+        shadow_score_calibration_min_history=args.shadow_score_calibration_min_history,
+        shadow_score_calibration_shrinkage_samples=args.shadow_score_calibration_shrinkage_samples,
+        shadow_score_calibration_std_floor=args.shadow_score_calibration_std_floor,
         shadow_gating_mode=args.shadow_gating_mode,
         shadow_kernel_label_mode=args.shadow_kernel_label_mode,
         shadow_kernel_label_threshold=args.shadow_kernel_label_threshold,

@@ -77,6 +77,8 @@ by default; overwriting is not allowed.
   Command: `PYTHONPATH=. python scripts/compute_policy_distance.py --a logs/trading_log.csv --b logs/trading_log.csv`
 - `scripts/compare_trade_alignment.py`: For losing trades, find closest profitable entry inputs (z-score distance).  
   Command: `PYTHONPATH=. python scripts/compare_trade_alignment.py --log logs/trading_log.csv --trade-log logs/trade_log.csv --top-k 1`
+- `scripts/analyze_shadow_signals.py`: Compare shadow-policy runs and emit markdown/PNG diagnostics including score spread, ranking curve, activation curve, and score-vs-return heatmap.  
+  Command: `PYTHONPATH=. python scripts/analyze_shadow_signals.py --input SPY=logs/shadow/trading_log_adapt10_005_20260313T162823Z_spy.us.csv --report logs/shadow/report.md --plot logs/shadow/plot.png`
 - `scripts/merge_tower_phase8.py`: Merge Phase-8 audit readiness into a tower projection NDJSON log.  
   Command: `PYTHONPATH=. python scripts/merge_tower_phase8.py --tower-log logs/trading_log_tower.ndjson --phase8-log logs/phase8/phase8_gate.log --out logs/trading_log_tower_phase8.ndjson`
 - `scripts/phase73_horizon_sweep.py`: Phase-7.3 horizon sweep over tower logs (rho_A vs tau, robustness).  
@@ -175,6 +177,9 @@ by default; overwriting is not allowed.
 - `trading_io.logs.beam_summary_to_log_fields(...)` is attached to `engine/loop.py` and normalizes beam diagnostics for per-step CSV logging.
 - `python run_trader.py --shadow-futures` logs observe-only beam diagnostics and live/shadow intent fields into the normal per-step CSV while leaving live execution unchanged.
 - Shadow calibration flags include `--shadow-kernel-log-dir`, `--shadow-score-mode`, `--shadow-gating-mode`, curvature controls (`--shadow-curvature-threshold`, `--shadow-score-curvature-weight`), beam label-retention controls (`--shadow-beam-label-min-quota`, `--shadow-beam-label-quota-frac`), and flat-band basin classification (`--shadow-beam-flat-return-band`, `--shadow-beam-flat-cost-floor`).
+- Adaptive score-threshold prefit supports scoped seeding controls: `--shadow-score-threshold-prefit`, `--shadow-score-threshold-prefit-max-values`, and `--shadow-score-threshold-prefit-family` (restrict seed logs to a matching run-family substring, e.g. `prefit_005_kdirshadow`, to avoid cross-regime contamination).
+- Shadow score calibration now supports an optional standardized-score branch: `--shadow-score-calibration-mode per_asset_zscore_shrunk`, `--shadow-score-threshold-source standardized_adjusted`, and calibration controls for minimum history, shrinkage scale, and standard-deviation floor.
+- Recent shadow reruns indicate prefit and family-scoping affect action rates but do not yet fix the main economic selection test; SPY failure-locus reports still show usable raw-score spread and positive ranking uplift, so the next debugging branch is standardized-score A/B rather than more prefit plumbing.
 - Decision-grade BTC/SPY shadow analysis artifacts now live under `logs/shadow/` at timestamp `20260312T052900Z`; keep the earlier `20260312T042358Z` report only as a pre-fix exploratory baseline.
 - Follow-up diagnosis at `logs/shadow/shadow_signal_diagnosis_20260313T020345Z.md` concludes that the current heuristic beam is still structurally too diffuse (`shadow_hold` always true, `beam_flat_mass` always zero in the decision-grade baseline), so the next milestone is learned transition-kernel replacement rather than threshold tuning.
 - The shadow path now uses a learned transition kernel fitted from historical per-step trader logs when available, with automatic fallback to the heuristic model if no suitable logs exist.

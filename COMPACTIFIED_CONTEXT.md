@@ -40,10 +40,17 @@
 - Matched 0.05 rerun under `ent096` (`shadow_signal_report_20260313T151102Z_costband005_ent096.md`) remains near-all-act (BTC 1.0, SPY 0.9992), so the 0.05 -> 0.10 action-rate slope is still steep.
 - Smooth logistic entropy attenuation is now implemented and configurable (`mode/center/tau`) and a 3-point sweep was run (0.05/0.075/0.10) with `H0=0.955`, `tau=0.01`.
 - Result: geometry moves smoothly but action rates are still near-all-act across the sweep under current score thresholds.
-- Next step is score-threshold/adaptive-action-rate calibration on top of the smooth entropy multiplier.
+- Per-asset adaptive quantile thresholding is now implemented and tested (target action rate 10% over rolling score history).
+- Result: SPY action rates are near target (~10–11%), BTC remains high (~18–29%) on short tapes due cold-start/history effects.
+- Added offline/prefit quantile initialization hooks (seed adaptive score history from prior `trading_log*.csv` `shadow_score_adjusted` per asset), plus strict run-family seed scoping (`--shadow-score-threshold-prefit-family`) to avoid cross-regime contamination during adaptive cold-start initialization.
+- Prefit and family-scoped reruns changed activation materially, but did not reliably improve the economic selection test; the current blocker is now failure-locus diagnosis across proposal amplitude, ranking quality, and activation quality.
+- SPY is the main calibration anchor for the next branch; BTC remains secondary validation / negative-control until short-tape instability is better contained.
+- Family-scoped prefit comparison (`logs/shadow/shadow_signal_report_20260315T081325Z_prefit_family_compare.md`) showed effectively no material change vs `seed200` unscoped prefit, confirming prefit scope is no longer the highest-value lever.
+- Failure-locus smoke diagnostics now exist in `scripts/analyze_shadow_signals.py` and produce raw-score spread, ranking curve, activation curve, and score-vs-return heatmap artifacts (e.g. `logs/shadow/shadow_signal_report_20260315T082856Z_failure_locus_smoke.md`).
+- The SPY failure-locus read is now `mixed` rather than amplitude-collapsed, with non-trivial raw-score spread and positive ranking uplift, so the next implementation branch is optional raw-score standardization with pooled shrinkage before any uncertainty-block ablation.
 
 ## Next Steps (short list)
-- Implement proposal amplitude diagnostics (size/dir/score quantiles + correlations).
+- Run the standardized-score shadow A/B on SPY first and evaluate `E(|ret| | ACT) > E(|ret| | HOLD)` before using BTC as a tuning driver.
 - Decide whether to wire Phase-9 capital kernel + Meta-Witness into stream daemon.
 - Extend function coverage map + benchmark harness for dashiCORE.
 
