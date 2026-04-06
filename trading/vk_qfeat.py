@@ -417,6 +417,22 @@ def _run_vulkan_tape(
     instance = vk.vkCreateInstance(instance_info, None)
 
     physical_device = _select_physical_device(instance)
+    if timing_debug or os.environ.get("VK_QFEAT_DEBUG", "").strip() == "1":
+        props = vk.vkGetPhysicalDeviceProperties(physical_device)
+        try:
+            dev_name = props.deviceName.decode("utf-8", errors="replace")
+        except AttributeError:
+            dev_name = str(getattr(props, "deviceName", ""))
+        icd = os.environ.get("VK_ICD_FILENAMES", "")
+        print(
+            "[vk_qfeat] device:",
+            dev_name,
+            f"type={int(getattr(props, 'deviceType', 0))}",
+            f"vendor=0x{int(getattr(props, 'vendorID', 0)):04x}",
+            f"device=0x{int(getattr(props, 'deviceID', 0)):04x}",
+            f"driverVersion={int(getattr(props, 'driverVersion', 0))}",
+            f"vkIcd={icd!r}",
+        )
     queue_family_index = _find_queue_family_index(physical_device)
     enabled_features = None
     if fp64_returns:

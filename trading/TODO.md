@@ -54,9 +54,25 @@ Legend: (EXEC) implementation, (DECISION) policy decision, (ANALYSIS) analysis/v
 - [ ] (ANALYSIS) Rerun 0.05/0.075/0.10 adaptive-target sweeps with prefit enabled and compare BTC early-run action overshoot + ACT/HOLD separation.
 - [x] (EXEC) Extend `scripts/analyze_shadow_signals.py` with failure-locus diagnostics: raw-score histogram/spread, ranking curve (`score bucket -> mean |future return|`), activation curve (`score bucket -> ACT rate`), and score-vs-future-return heatmap.
 - [x] (ANALYSIS) Use the new diagnostics to classify each tape as proposal-amplitude failure, ranking failure, activation failure, or mixed failure before any further weight retuning; current SPY read is `mixed` with non-trivial raw-score spread and positive ranking uplift, so score standardization is the next branch rather than uncertainty-block ablation.
+- [x] (EXEC) Implement shadow-only per-asset raw-score standardization with pooled shrinkage and expose it as a threshold source for adaptive quantile gating; record SPY A/B evidence in a timestamped report.
+- [x] (EXEC) Implement an uncertainty-penalty ablation (`explicit` vs `merged_uncertainty`) and add analyzer metrics to detect mid-distribution activation (mean percentile of score on ACT).
+- [x] (ANALYSIS) Run SPY A/B for explicit vs merged uncertainty and confirm whether tail activation improves without changing upstream basin geometry.
+- [x] (ANALYSIS) Run SPY A/B with entropy gate disabled to test whether entropy pressure is the dominant blocker.
+- [x] (EXEC) Implement a return-term ablation (`directional` vs `abs`) to test whether the score is mostly detecting opportunity magnitude rather than direction.
+- [ ] (DECISION) Choose the next policy branch: (a) continue simplifying/retuning penalty geometry for a single scalar score or (b) implement a two-stage policy (opportunity magnitude gate, then direction selection).
+- [ ] (EXEC) If staying single-score: iterate penalty geometry (collapse correlated uncertainty terms further, remove redundant penalties, and re-evaluate ACT tail selection) until `E(|ret| | ACT) > E(|ret| | HOLD)` is stable on SPY.
+- [ ] (EXEC) If two-stage: implement magnitude-first gating (target action rate on magnitude score), then choose direction using basin edge/mass (and log both stages explicitly).
+- [ ] (ANALYSIS) Add a one-line “ACT score percentile” acceptance check (`mean percentile(score | ACT) >= 0.80`) to prevent “trading the middle” regressions during tuning.
+- [ ] (EXEC) Speed up iteration: add `--all-include/--all-exclude` filters for `run_trader.py --all` so we can run SPY-only (and small A/B matrices) without scanning/running the full corpus.
+- [x] (EXEC) Add `--all-include/--all-exclude` filters for `run_trader.py --all` so we can run SPY-only (and small A/B matrices) without scanning/running the full corpus.
+- [x] (EXEC) Add `scripts/overnight_shadow_sweep.sh` to run a reproducible SPY/BTC A/B matrix (explicit vs merged uncertainty, directional vs abs return term, adjusted vs standardized-adjusted threshold source) with per-run failure-locus reports.
+- [ ] (DOC) Document the acceleration reality: futures-shadow is CPU-only today; Vulkan GPU exists for qfeat tape generation/parity; add a scoped “GPU lane for futures shadow” plan with explicit options (Vulkan compute vs JAX/CuPy) and parity-test requirements.
+- [ ] (EXEC) Add `scripts/run_trader_all_parallel.py` to run `run_trader.py --all --all-include <tape>` jobs concurrently (no changes to `run_trader.py` execution semantics; keeps per-tape logs deterministic).
+- [ ] (EXEC) GPU lane (futures shadow): pick an approach and build a prototype that accelerates the hottest loop (beam expansion/scoring) while keeping a strict CPU fallback and a parity harness (mirroring `tools/parity_qfeat.py`).
 - [x] (EXEC) Add optional per-asset raw-score standardization with pooled shrinkage as a shadow A/B mode, using raw pre-gate score as the canonical ranking object.
 - [ ] (ANALYSIS) Evaluate SPY first against `acceptable-vs-ACT` and `E(|ret| | ACT) > E(|ret| | HOLD)` before treating BTC as a tuning driver.
-- [ ] (EXEC) Run an uncertainty-structure ablation after score diagnostics land: current explicit penalties vs merged uncertainty block.
+- [x] (EXEC) Run an uncertainty-structure ablation after score diagnostics land: current explicit penalties vs merged uncertainty block (`--shadow-score-penalty-mode {explicit,merged_uncertainty}`).
+- [ ] (ANALYSIS) Compare `explicit` vs `merged_uncertainty` on SPY (tiny kernel dir) using `mean percentile(raw score | ACT)` plus `E(|ret| | ACT)` vs `E(|ret| | HOLD)`; first partial read shows activation alignment improved (tail selection), but ACT/HOLD separation still negative.
 - [x] (DOC) Add a quant-facing inquiry note that points reviewers at the formal docs, current shadow artifacts, and the concrete tuning questions (`docs/QUANT_PROFESSIONAL_JUDGEMENT_INQUIRY.md`).
 - [ ] (EXEC) Replace confidence thresholds with explicit ternary actions (intent/exec alignment).
 - [x] (EXEC) Add losing-trade alignment script (closest profitable entry by input distance).

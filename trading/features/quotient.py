@@ -77,7 +77,7 @@ def compute_qfeat(
     Features (fixed order):
       0 vol_ratio     : std(r) / (max(r) - min(r) + eps)
       1 curvature     : log1p(std(second_diff(r)))
-      2 drawdown      : max peak-to-trough of cum log-price, normalized by total move
+      2 drawdown      : max peak-to-trough of cumulative returns, normalized by peak-to-trough range
       3 burstiness    : L1 / (L2 + eps)
       4 acorr_1       : lag-1 autocorr of returns, clipped to [-1,1]
       5 var_ratio     : std(last w1) / (std(last w2) + eps)
@@ -151,21 +151,22 @@ def compute_qfeat(
         d2_std = np.float32(math.sqrt(float(d2_var + eps32)))
         curvature = np.float32(math.log1p(float(d2_std)))
 
-    # 2) drawdown
-    s0 = np.float32(r[0])
-    s = np.float32(s0)
-    peak = np.float32(s0)
+    # 2) drawdown (stable normalization): dd / (peak_to_trough_range + eps)
+    s = np.float32(0.0)
+    peak = np.float32(0.0)
+    trough = np.float32(0.0)
     dd = np.float32(0.0)
-    for i in range(1, W):
+    for i in range(W):
         s = np.float32(s + r[i])
         if s > peak:
             peak = s
+        if s < trough:
+            trough = s
         gap = np.float32(peak - s)
         if gap > dd:
             dd = gap
-    send = s
-    norm = np.float32(abs(float(send - s0)) + float(eps32))
-    drawdown = np.float32(dd / norm)
+    rng = np.float32((peak - trough) + eps32)
+    drawdown = np.float32(dd / rng)
 
     # 3) burstiness
     l1 = np.float32(0.0)

@@ -54,84 +54,90 @@ def list_price_csvs(raw_root: pathlib.Path) -> list[pathlib.Path]:
     return sorted(p for p in raw_root.rglob("*.csv") if p.is_file())
 
 
-def load_prices(path: pathlib.Path, return_time: bool = False):
+def load_price_frame(path: pathlib.Path) -> pd.DataFrame:
     def read_basic(p):
         return pd.read_csv(p)
 
     def read_skip(p):
-        # for yfinance multi-index CSV: skip ticker header rows
         return pd.read_csv(p, skiprows=2)
+
+    def pick(col_map, *keys):
+        for key in keys:
+            if key in col_map:
+                return col_map[key]
+        return None
 
     def parse_df(df):
         col_map = {c.lower(): c for c in df.columns}
-        close_key = None
-        for key in ("close", "zamkniecie"):
-            if key in col_map:
-                close_key = col_map[key]
-                break
+        close_key = pick(col_map, "close", "zamkniecie")
         if close_key is None:
             raise ValueError(f"Close/Zamkniecie column not found in {path}")
 
-        date_key = None
-        for dk in ("date", "data", "datetime"):
-            if dk in col_map:
-                date_key = col_map[dk]
-                break
-        # yfinance exports sometimes put dates under "Price" after skipping header rows
+        date_key = pick(col_map, "date", "data", "datetime")
         if date_key is None and "price" in col_map:
             maybe_dates = pd.to_datetime(df[col_map["price"]], errors="coerce")
             if maybe_dates.notna().mean() > 0.8:
                 date_key = col_map["price"]
 
-        close_series = pd.to_numeric(df[close_key], errors="coerce")
+        out = pd.DataFrame()
+        out["close"] = pd.to_numeric(df[close_key], errors="coerce")
 
-        vol_key = None
-        for vk in ("volume", "wolumen"):
-            if vk in col_map:
-                vol_key = col_map[vk]
-                break
-        if vol_key is not None:
-            vol_series = pd.to_numeric(df[vol_key], errors="coerce")
+        open_key = pick(col_map, "open", "otwarcie")
+        high_key = pick(col_map, "high", "max", "najwyzszy")
+        low_key = pick(col_map, "low", "min", "najnizszy")
+        volume_key = pick(col_map, "volume", "wolumen")
+        bid_key = pick(col_map, "bid", "best_bid")
+        ask_key = pick(col_map, "ask", "best_ask")
+        spread_key = pick(col_map, "spread")
+
+        out["open"] = pd.to_numeric(df[open_key], errors="coerce") if open_key else out["close"]
+        out["high"] = pd.to_numeric(df[high_key], errors="coerce") if high_key else out["close"]
+        out["low"] = pd.to_numeric(df[low_key], errors="coerce") if low_key else out["close"]
+        if volume_key:
+            out["volume"] = pd.to_numeric(df[volume_key], errors="coerce")
         else:
-            vol_series = pd.Series(np.ones(len(close_series)) * 1e6)
+            out["volume"] = pd.Series(np.ones(len(out)) * 1e6)
+        out["bid"] = pd.to_numeric(df[bid_key], errors="coerce") if bid_key else np.nan
+        out["ask"] = pd.to_numeric(df[ask_key], errors="coerce") if ask_key else np.nan
+        out["spread"] = pd.to_numeric(df[spread_key], errors="coerce") if spread_key else np.nan
 
         if date_key is not None:
-            dates = pd.to_datetime(df[date_key], errors="coerce")
-            valid = (~close_series.isna()) & (~dates.isna())
-            close_series = close_series[valid]
-            vol_series = vol_series[valid]
-            dates = dates[valid]
-            order = np.argsort(dates.to_numpy())
-            close_series = close_series.iloc[order]
-            vol_series = vol_series.iloc[order]
+            out["timestamp"] = pd.to_datetime(df[date_key], errors="coerce")
+            valid = out["timestamp"].notna() & out["close"].notna()
+            out = out.loc[valid].copy()
+            out = out.sort_values("timestamp").reset_index(drop=True)
         else:
-            close_series = close_series.dropna()
-            vol_series = vol_series.loc[close_series.index]
+            out = out.loc[out["close"].notna()].reset_index(drop=True)
+            out["timestamp"] = pd.NaT
 
-        time_index = dates.to_numpy() if date_key is not None else None
-        return close_series.to_numpy(), vol_series.to_numpy(), time_index
+        pos_vol = out["volume"][np.isfinite(out["volume"]) & (out["volume"] > 0)]
+        fallback_vol = np.median(pos_vol) if pos_vol.size else 1e6
+        out["volume"] = np.where((~np.isfinite(out["volume"])) | (out["volume"] <= 0), fallback_vol, out["volume"])
 
-    # try basic read, then fallback to skiprows if too many non-numeric
+        return out
+
     for reader in (read_basic, read_skip):
         try:
             df = reader(path)
-            # handle yfinance multi-index export (ticker row, then date row)
             cols_lower = [c.lower() for c in df.columns]
             if "price" in cols_lower:
                 price_col = cols_lower.index("price")
                 head_vals = df.iloc[:2, price_col].astype(str).str.lower()
                 if head_vals.str.contains("ticker").any():
                     df = df.iloc[2:].reset_index(drop=True)
-            close, vol, ts = parse_df(df)
-            # replace nonpositive/NaN volume
-            pos_vol = vol[np.isfinite(vol) & (vol > 0)]
-            fallback_vol = np.median(pos_vol) if pos_vol.size else 1e6
-            vol = np.where((~np.isfinite(vol)) | (vol <= 0), fallback_vol, vol)
-            # require reasonable length
-            if len(close) >= 10 and np.isfinite(close).any():
-                if return_time:
-                    return close, vol, ts
-                return close, vol
+            out = parse_df(df)
+            if len(out) >= 10 and np.isfinite(out["close"]).any():
+                return out
         except Exception:
             continue
     raise ValueError(f"Could not parse prices from {path}")
+
+
+def load_prices(path: pathlib.Path, return_time: bool = False):
+    frame = load_price_frame(path)
+    close = frame["close"].to_numpy()
+    vol = frame["volume"].to_numpy()
+    ts = frame["timestamp"].to_numpy()
+    if return_time:
+        return close, vol, ts
+    return close, vol

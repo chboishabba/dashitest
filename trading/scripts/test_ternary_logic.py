@@ -77,7 +77,7 @@ def test_strategy_paradox():
     print(f"Paradox intent: target={intent.target_exposure}, reason={intent.reason}")
     assert intent.target_exposure == 0.0
     assert intent.hold == False
-    assert intent.reason == "systemic_collapse_paradox (⚡)"
+    assert intent.reason == "systemic_collapse_prohibit (⚡)"
     print("Strategy PARADOX: PASS")
 
 if __name__ == "__main__":

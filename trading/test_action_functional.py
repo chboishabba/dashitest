@@ -105,9 +105,9 @@ def test_action_functional_score_modes_compute_expected_values():
     scaled_score = 2.0 * (reward_block - penalty_block)
     logistic_score = np.tanh(2.0 * (reward_block - penalty_block))
 
-    ratio = ActionFunctional(score_mode="ratio")
-    scaled = ActionFunctional(score_mode="scaled_diff", score_scale=2.0)
-    logistic = ActionFunctional(score_mode="logistic", score_scale=2.0)
+    ratio = ActionFunctional(score_mode="ratio", penalty_mode="explicit", return_mode="directional")
+    scaled = ActionFunctional(score_mode="scaled_diff", score_scale=2.0, penalty_mode="explicit", return_mode="directional")
+    logistic = ActionFunctional(score_mode="logistic", score_scale=2.0, penalty_mode="explicit", return_mode="directional")
 
     ratio_breakdown = ratio.score_transition(current, nxt, next_exposure, step_return, step_branch_risk, step_diffusion_risk)
     scaled_breakdown = scaled.score_transition(current, nxt, next_exposure, step_return, step_branch_risk, step_diffusion_risk)
@@ -118,6 +118,82 @@ def test_action_functional_score_modes_compute_expected_values():
     assert abs(ratio_breakdown.total - ratio_score) < 1e-9
     assert abs(scaled_breakdown.total - scaled_score) < 1e-9
     assert abs(logistic_breakdown.total - logistic_score) < 1e-9
+
+
+def test_action_functional_merged_uncertainty_penalty_mode_uses_single_uncertainty_block():
+    current = CoarseState(
+        drift=0.2,
+        triadic_bias=0.1,
+        actionability=0.8,
+        stress=0.2,
+        edge=0.05,
+        contraction=0.4,
+        diffusion=0.6,
+        drawdown=0.1,
+        current_exposure=0.0,
+    )
+    nxt = CoarseState(
+        drift=0.3,
+        triadic_bias=0.2,
+        actionability=0.7,
+        stress=0.25,
+        edge=0.1,
+        contraction=0.55,
+        diffusion=0.5,
+        drawdown=0.15,
+        current_exposure=0.25,
+    )
+    step_return = 0.04
+    step_branch_risk = 0.2
+    step_diffusion_risk = 0.35
+    next_exposure = 0.5
+    weights = ActionFunctional(penalty_mode="merged_uncertainty", return_mode="directional").weights
+    branch_cost = max(0.0, step_branch_risk)
+    diffusion_cost = max(nxt.diffusion, step_diffusion_risk)
+    stress_cost = nxt.stress * abs(next_exposure)
+    drawdown_cost = nxt.drawdown * abs(next_exposure)
+    churn_cost = abs(next_exposure - current.current_exposure)
+    inventory_cost = abs(next_exposure) * max(0.0, nxt.diffusion - nxt.contraction)
+    uncertainty_cost = branch_cost + diffusion_cost + stress_cost
+    penalty_block = (
+        weights.w_uncertainty * uncertainty_cost
+        + weights.w_drawdown * drawdown_cost
+        + weights.w_churn * churn_cost
+        + weights.w_inventory * inventory_cost
+    )
+    fn = ActionFunctional(score_mode="ratio", penalty_mode="merged_uncertainty", return_mode="directional")
+    breakdown = fn.score_transition(current, nxt, next_exposure, step_return, step_branch_risk, step_diffusion_risk)
+    assert breakdown.penalty_mode == "merged_uncertainty"
+    assert abs(breakdown.penalty_block - penalty_block) < 1e-9
+
+
+def test_action_functional_abs_return_mode_uses_magnitude_reward():
+    current = CoarseState(
+        drift=0.2,
+        triadic_bias=0.1,
+        actionability=0.8,
+        stress=0.2,
+        edge=0.05,
+        contraction=0.4,
+        diffusion=0.6,
+        drawdown=0.1,
+        current_exposure=0.0,
+    )
+    nxt = CoarseState(
+        drift=0.3,
+        triadic_bias=0.2,
+        actionability=0.7,
+        stress=0.25,
+        edge=0.1,
+        contraction=0.55,
+        diffusion=0.5,
+        drawdown=0.15,
+        current_exposure=0.25,
+    )
+    fn = ActionFunctional(score_mode="ratio", penalty_mode="explicit", return_mode="abs")
+    breakdown = fn.score_transition(current, nxt, next_exposure=-0.5, step_return=-0.04, step_branch_risk=0.0, step_diffusion_risk=0.0)
+    assert breakdown.return_mode == "abs"
+    assert abs(breakdown.signed_return - (0.04 * 0.5)) < 1e-9
 
 
 def test_beam_policy_emits_directional_intent_for_constructive_state():

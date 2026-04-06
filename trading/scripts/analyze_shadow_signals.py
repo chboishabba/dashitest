@@ -158,6 +158,7 @@ def analyze(rows: list[dict[str, str]], horizon: int = 20) -> dict[str, object]:
     adjusted_future = []
     future_signed = []
     act_flags = []
+    act_score_percentiles = []
     for idx, row in enumerate(rows):
         live = row.get("live_direction", "")
         shadow = row.get("shadow_direction", "")
@@ -226,6 +227,24 @@ def analyze(rows: list[dict[str, str]], horizon: int = 20) -> dict[str, object]:
                         live_eval += 1
                         if (live_dir > 0) == (future_ret > 0):
                             live_correct += 1
+    # Mean percentile(raw_score | ACT) is a quick sanity check: healthy selectors act in the upper tail.
+    raw_clean = [x for x in raw_score_series if math.isfinite(x)]
+    raw_sorted = sorted(raw_clean)
+    if raw_sorted:
+        denom = max(1, len(raw_sorted) - 1)
+        for idx, row in enumerate(rows):
+            if idx >= len(raw_score_series):
+                break
+            if row.get("shadow_hold", "") == "1":
+                continue
+            rs = _float(row, "shadow_score_raw")
+            if not math.isfinite(rs):
+                rs = _float(row, "shadow_score_value")
+            if not math.isfinite(rs):
+                continue
+            pos = int(np.searchsorted(raw_sorted, rs, side="left"))
+            pos = max(0, min(len(raw_sorted) - 1, pos))
+            act_score_percentiles.append(pos / denom)
     raw_centers, ranking_curve = _bucket_curve(raw_future, future_abs)
     _, activation_curve = _bucket_curve(raw_future, act_flags)
     top_bucket_action_rate = activation_curve[-1] if activation_curve else float("nan")
@@ -291,6 +310,7 @@ def analyze(rows: list[dict[str, str]], horizon: int = 20) -> dict[str, object]:
         "activation_curve_y": activation_curve,
         "ranking_uplift": ranking_uplift,
         "top_bucket_action_rate": top_bucket_action_rate,
+        "act_score_percentile_mean": _mean_or_nan(act_score_percentiles),
         "action_rate": 1.0 - (hold_count / len(rows)) if rows else float("nan"),
         "action_return_mean": mean(action_future) if action_future else float("nan"),
         "hold_return_mean": mean(hold_future) if hold_future else float("nan"),
@@ -356,6 +376,7 @@ def main() -> None:
             )
             fh.write(f"- ranking uplift (top-bottom bucket, abs return): `{stats['ranking_uplift']:.6f}`\n")
             fh.write(f"- top-bucket action rate: `{stats['top_bucket_action_rate']:.6f}`\n")
+            fh.write(f"- mean percentile(raw score | ACT): `{stats['act_score_percentile_mean']:.6f}`\n")
             if stats["curvature_series"]:
                 fh.write(f"- curvature mean: `{mean(stats['curvature_series']):.6f}`\n")
             if stats["long_series"] and stats["short_series"] and stats["flat_series"]:

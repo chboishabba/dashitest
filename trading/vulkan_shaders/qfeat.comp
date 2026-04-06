@@ -227,21 +227,26 @@ void main() {
         curvature = log(1.0 + d2_std);
     }
 
-    float s_acc = r[0];
-    float peak = s_acc;
+    // 2) drawdown (stable normalization): dd / (peak_to_trough_range + eps)
+    float s_acc = 0.0;
+    float peak = 0.0;
+    float trough = 0.0;
     float dd = 0.0;
-    for (uint i = 1u; i < W; ++i) {
+    for (uint i = 0u; i < W; ++i) {
         s_acc += r[i];
         if (s_acc > peak) {
             peak = s_acc;
+        }
+        if (s_acc < trough) {
+            trough = s_acc;
         }
         float gap = peak - s_acc;
         if (gap > dd) {
             dd = gap;
         }
     }
-    float norm = abs(s_acc - r[0]) + eps;
-    float drawdown = dd / norm;
+    float rng = (peak - trough) + eps;
+    float drawdown = dd / rng;
 
     float l1 = 0.0;
     float l2s = 0.0;

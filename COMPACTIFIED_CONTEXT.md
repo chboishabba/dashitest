@@ -8,6 +8,12 @@
 - Keep trading stack epistemic gating PnL-free; evaluation = precision/recall on acceptable vs ACT.
 - Keep CA/benchmark work as research-lab outputs, not trading inputs.
 - Maintain reproducibility: timestamped outputs and documented run artifacts.
+- Keep the mirrored `dashifine` quantum utilities framed as classical,
+  quantum-faithful simulations; the bridge/internalization formalism now belongs
+  in sibling repo `dashiQ`, not in the root `dashitest` benchmark backlog.
+- This wording is now also backed by the local archive threads
+  `P-adic quantum systems` and `Quarter turn in quantum`, which sharpen the
+  distinction between formal/simulator work and actual hardware claims.
 
 ## Implemented (high-signal)
 - Trading stack: `state → TriadicStrategy → Intent → Execution → Log → Dashboard`.
@@ -47,12 +53,19 @@
 - SPY is the main calibration anchor for the next branch; BTC remains secondary validation / negative-control until short-tape instability is better contained.
 - Family-scoped prefit comparison (`logs/shadow/shadow_signal_report_20260315T081325Z_prefit_family_compare.md`) showed effectively no material change vs `seed200` unscoped prefit, confirming prefit scope is no longer the highest-value lever.
 - Failure-locus smoke diagnostics now exist in `scripts/analyze_shadow_signals.py` and produce raw-score spread, ranking curve, activation curve, and score-vs-return heatmap artifacts (e.g. `logs/shadow/shadow_signal_report_20260315T082856Z_failure_locus_smoke.md`).
-- The SPY failure-locus read is now `mixed` rather than amplitude-collapsed, with non-trivial raw-score spread and positive ranking uplift, so the next implementation branch is optional raw-score standardization with pooled shrinkage before any uncertainty-block ablation.
+- Implemented shadow-only per-asset score standardization with pooled shrinkage (`per_asset_zscore_shrunk`) and ran SPY diagnostics (`logs/shadow/shadow_signal_report_20260315T094904Z_spy_scorecal_long.md`): score scaling stabilized mechanically, but the economic selection test still failed (`E(|ret| | ACT) <= E(|ret| | HOLD)`), so calibration alone is not the blocker.
+- Implemented an uncertainty-penalty ablation (`explicit` vs `merged_uncertainty`) and ran SPY partial A/B (`logs/shadow/shadow_signal_report_20260315T120127Z_spy_uncertainty_ab_partial.md`): merged uncertainty improves tail-activation alignment (top bucket starts activating), but ACT vs HOLD separation is still not reliably positive.
+- Verified entropy attenuation is not the primary blocker by A/B with entropy gate disabled (`logs/shadow/shadow_signal_report_20260315T121652Z_spy_uncertainty_ab_entoff.md`): selection quality remains weak.
+- Ran an action-functional return-mode ablation (`directional` vs `abs`) under merged uncertainty (`logs/shadow/shadow_signal_report_20260315T121923Z_spy_absmerge.md`): treating the return term as magnitude does not yet flip ACT vs HOLD on its own.
+- Current best diagnosis on SPY: nonzero ranking signal exists but is weak; activation alignment depends on penalty geometry; the next branch is score-structure tuning (penalty-block simplification and/or two-stage policy: gate on opportunity magnitude, then pick direction separately).
 
 ## Next Steps (short list)
-- Run the standardized-score shadow A/B on SPY first and evaluate `E(|ret| | ACT) > E(|ret| | HOLD)` before using BTC as a tuning driver.
+- Use the failure-locus plots (amplitude/ranking/activation) to decide whether to (a) simplify penalty geometry further or (b) implement a two-stage policy (opportunity magnitude gate + separate direction choice). Keep SPY as primary anchor and BTC as secondary.
 - Decide whether to wire Phase-9 capital kernel + Meta-Witness into stream daemon.
 - Extend function coverage map + benchmark harness for dashiCORE.
+- Keep the root docs aligned with the current quantum scope split:
+  - `dashitest/dashifine` mirrors classical quantum-faithful experiments
+  - `dashiQ` owns the bridge/simulator formalism
 
 ## Assumptions
 - Python 3.11+, NumPy + PyTest are available.

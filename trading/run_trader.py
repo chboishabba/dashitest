@@ -46,6 +46,31 @@ from engine.loop import (
 from signals.triadic import compute_triadic_state
 from trading_io.prices import find_btc_csv, find_stooq_csv, list_price_csvs, load_prices
 
+# Backward-compatible re-exports used by `test_thesis_memory.py` and older scripts.
+try:
+    from trading.policy.thesis import (  # type: ignore
+        ThesisDerived,
+        ThesisInputs,
+        ThesisParams,
+        ThesisState,
+        apply_thesis_constraints,
+        step_thesis_memory,
+    )
+except ModuleNotFoundError:
+    from policy.thesis import (  # type: ignore
+        ThesisDerived,
+        ThesisInputs,
+        ThesisParams,
+        ThesisState,
+        apply_thesis_constraints,
+        step_thesis_memory,
+    )
+
+try:
+    from trading.engine.loop import compute_regret_reward  # type: ignore
+except ModuleNotFoundError:
+    from engine.loop import compute_regret_reward  # type: ignore
+
 def main(
     max_steps=None,
     max_trades=None,
@@ -64,6 +89,8 @@ def main(
     log_level: str = "info",
     run_all: bool = False,
     raw_root: str = "data/raw",
+    all_include: list[str] | None = None,
+    all_exclude: list[str] | None = None,
     log_prefix: str = "logs/trading_log",
     inter_run_sleep: float = 0.5,
     log_combined: bool = False,
@@ -93,6 +120,8 @@ def main(
     shadow_kernel_residual_weight: float = 1.0,
     shadow_score_mode: str = "ratio",
     shadow_score_scale: float = 1.0,
+    shadow_score_penalty_mode: str = "explicit",
+    shadow_score_return_mode: str = "directional",
     shadow_score_threshold_mode: str = "fixed",
     shadow_target_action_rate: float = 0.0,
     shadow_score_threshold_min_history: int = 100,
@@ -167,10 +196,34 @@ def main(
     source = "stooq"
     try:
         if run_all:
+            import re
+
             raw_root_path = pathlib.Path(raw_root)
             csv_paths = list_price_csvs(raw_root_path)
             if not csv_paths:
                 raise FileNotFoundError(f"No CSVs found under {raw_root_path}.")
+
+            include = [p for p in (all_include or []) if p]
+            exclude = [p for p in (all_exclude or []) if p]
+            if include or exclude:
+                compiled_include = [re.compile(p) for p in include]
+                compiled_exclude = [re.compile(p) for p in exclude]
+
+                filtered: list[pathlib.Path] = []
+                for p in csv_paths:
+                    rel = str(p.relative_to(raw_root_path))
+                    if compiled_exclude and any(rx.search(rel) for rx in compiled_exclude):
+                        continue
+                    if compiled_include and not any(rx.search(rel) for rx in compiled_include):
+                        continue
+                    filtered.append(p)
+                csv_paths = filtered
+
+            if not csv_paths:
+                raise FileNotFoundError(
+                    f"No CSVs matched under {raw_root_path} after filters "
+                    f"(include={include!r}, exclude={exclude!r})."
+                )
             combined_path = None
             if log_combined:
                 combined_path = pathlib.Path(f"{log_prefix}_all.csv")
@@ -237,6 +290,8 @@ def main(
                     shadow_kernel_residual_weight=shadow_kernel_residual_weight,
                     shadow_score_mode=shadow_score_mode,
                     shadow_score_scale=shadow_score_scale,
+                    shadow_score_penalty_mode=shadow_score_penalty_mode,
+                    shadow_score_return_mode=shadow_score_return_mode,
                     shadow_score_threshold_mode=shadow_score_threshold_mode,
                     shadow_target_action_rate=shadow_target_action_rate,
                     shadow_score_threshold_min_history=shadow_score_threshold_min_history,
@@ -334,6 +389,8 @@ def main(
         shadow_kernel_residual_weight=shadow_kernel_residual_weight,
         shadow_score_mode=shadow_score_mode,
         shadow_score_scale=shadow_score_scale,
+        shadow_score_penalty_mode=shadow_score_penalty_mode,
+        shadow_score_return_mode=shadow_score_return_mode,
         shadow_score_threshold_mode=shadow_score_threshold_mode,
         shadow_target_action_rate=shadow_target_action_rate,
         shadow_score_threshold_min_history=shadow_score_threshold_min_history,
@@ -383,6 +440,18 @@ if __name__ == "__main__":
     ap.add_argument("--progress-every", type=int, default=0, help="Print progress every N steps.")
     ap.add_argument("--all", action="store_true", help="Run over all CSVs under data/raw.")
     ap.add_argument("--raw-root", type=str, default="data/raw", help="Root directory to scan when --all set.")
+    ap.add_argument(
+        "--all-include",
+        action="append",
+        default=[],
+        help="When --all is set, only run CSVs whose relative path matches ANY of these regexes (repeatable).",
+    )
+    ap.add_argument(
+        "--all-exclude",
+        action="append",
+        default=[],
+        help="When --all is set, skip CSVs whose relative path matches ANY of these regexes (repeatable).",
+    )
     ap.add_argument(
         "--log-prefix",
         type=str,
@@ -475,8 +544,8 @@ if __name__ == "__main__":
         "--shadow-entropy-gate-mode",
         type=str,
         default="logistic",
-        choices=["hard", "logistic"],
-        help="Entropy gating mode: hard cutoff or smooth logistic attenuation.",
+        choices=["off", "hard", "logistic"],
+        help="Entropy gating mode: off, hard cutoff, or smooth logistic attenuation.",
     )
     ap.add_argument(
         "--shadow-entropy-gate-center",
@@ -533,6 +602,20 @@ if __name__ == "__main__":
         help="Score aggregation mode for the futures action functional.",
     )
     ap.add_argument("--shadow-score-scale", type=float, default=1.0, help="Scale for score_mode 'scaled_diff' or 'logistic'.")
+    ap.add_argument(
+        "--shadow-score-penalty-mode",
+        type=str,
+        default="explicit",
+        choices=["explicit", "merged_uncertainty"],
+        help="Penalty structure for the shadow futures action functional.",
+    )
+    ap.add_argument(
+        "--shadow-score-return-mode",
+        type=str,
+        default="directional",
+        choices=["directional", "abs"],
+        help="Return reward mode for the shadow futures action functional.",
+    )
     ap.add_argument(
         "--shadow-score-threshold-mode",
         type=str,
@@ -633,6 +716,8 @@ if __name__ == "__main__":
         log_level=args.log_level,
         run_all=args.all,
         raw_root=args.raw_root,
+        all_include=args.all_include,
+        all_exclude=args.all_exclude,
         log_prefix=args.log_prefix,
         inter_run_sleep=args.inter_run_sleep,
         log_combined=args.log_combined,
@@ -662,6 +747,8 @@ if __name__ == "__main__":
         shadow_kernel_residual_weight=args.shadow_kernel_residual_weight,
         shadow_score_mode=args.shadow_score_mode,
         shadow_score_scale=args.shadow_score_scale,
+        shadow_score_penalty_mode=args.shadow_score_penalty_mode,
+        shadow_score_return_mode=args.shadow_score_return_mode,
         shadow_score_threshold_mode=args.shadow_score_threshold_mode,
         shadow_target_action_rate=args.shadow_target_action_rate,
         shadow_score_threshold_min_history=args.shadow_score_threshold_min_history,

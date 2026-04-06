@@ -1,6 +1,12 @@
 # Changelog
 
 ## Unreleased
+- Synced root docs/TODO/context with the current quantum scope split: mirrored
+  `dashifine` quantum utilities are documented as classical, quantum-faithful
+  simulations, while the bridge/internalization formalism is now assigned to
+  sibling repo `dashiQ`.
+- Noted that the quantum wording is now backed by local archive resolution of
+  the relevant canonical chats rather than only repo-memory paraphrase.
 - Added a documentation index to `README.md` so the main specs and notes are easy to find.
 - Synced CONTEXT files to the canonical chat archive and recorded the archive path in `references/context-sources.md`.
 - Added `docs/phase3_quotient_learning.md` describing the Phase-3 plan-equivalence + MDL loss, label-entropy corrections, and the rationale for stopping the observer ladder once the quotient is enforced (`CONTEXT.md#L39825-L40230`).

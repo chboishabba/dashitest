@@ -403,6 +403,8 @@ def run_trading_loop(
     shadow_kernel_residual_weight: float = 1.0,
     shadow_score_mode: str = "ratio",
     shadow_score_scale: float = 1.0,
+    shadow_score_penalty_mode: str = "explicit",
+    shadow_score_return_mode: str = "directional",
     shadow_score_threshold_mode: str = "fixed",
     shadow_target_action_rate: float = 0.0,
     shadow_score_threshold_min_history: int = 100,
@@ -521,6 +523,8 @@ def run_trading_loop(
                     action_functional=ActionFunctional(
                         score_mode=shadow_score_mode,
                         score_scale=shadow_score_scale,
+                        penalty_mode=shadow_score_penalty_mode,
+                        return_mode=shadow_score_return_mode,
                     ),
                     transition_model=build_transition_model_from_logs(
                         symbol_name=symbol_name,

@@ -106,12 +106,29 @@ def main():
                 "events": len(events),
                 "top_codes": top_codes,
                 "mean_tone": mean_tone,
+                "contextual_label": top_codes or "news_window",
+                "contextual_source": f"emit_news_windows:{args.provider}",
                 "path": fname,
             }
         )
         print(f"[window {idx:03d}] {w_start} → {w_end} | triggers={(trigger_ts >= start).sum()} | events={len(events)} -> {fname.name}")
 
     summary_df = pd.DataFrame(summaries)
+    if not summary_df.empty:
+        events_scale = float(summary_df["events"].quantile(0.95)) if len(summary_df) > 1 else float(summary_df["events"].iloc[0])
+        trigger_scale = float(summary_df["triggers"].quantile(0.95)) if len(summary_df) > 1 else float(summary_df["triggers"].iloc[0])
+        tone_pressure = (-pd.to_numeric(summary_df["mean_tone"], errors="coerce").fillna(0.0)).clip(lower=0.0)
+        tone_scale = float(tone_pressure.quantile(0.95)) if len(tone_pressure) > 1 else float(tone_pressure.iloc[0]) if len(tone_pressure) else 0.0
+        events_scale = max(events_scale, 1.0)
+        trigger_scale = max(trigger_scale, 1.0)
+        tone_scale = max(tone_scale, 1e-9)
+        summary_df["contextual_hazard"] = (
+            0.55 * (summary_df["events"].fillna(0.0).astype(float) / events_scale).clip(lower=0.0, upper=1.0)
+            + 0.25 * (summary_df["triggers"].fillna(0.0).astype(float) / trigger_scale).clip(lower=0.0, upper=1.0)
+            + 0.20 * (tone_pressure / tone_scale).clip(lower=0.0, upper=1.0)
+        ).clip(lower=0.0, upper=1.0)
+        summary_df["start_ms"] = pd.to_datetime(summary_df["start"], utc=True, errors="coerce").astype("int64") // 1_000_000
+        summary_df["end_ms"] = pd.to_datetime(summary_df["end"], utc=True, errors="coerce").astype("int64") // 1_000_000
     summary_path = args.out_dir / "events_summary.csv"
     summary_df.to_csv(summary_path, index=False)
     print(f"Wrote summary to {summary_path}")

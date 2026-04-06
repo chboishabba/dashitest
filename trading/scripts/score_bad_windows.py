@@ -20,7 +20,7 @@ def compute_synthetic_bad(df, k_sigma=3.0, dd_slope_thr=0.001):
     # returns
     df = df.copy()
     df["ret"] = df["price"].pct_change().fillna(0.0)
-    sigma = df["ret"].rolling(50).std().fillna(method="bfill").fillna(0.0)
+    sigma = df["ret"].rolling(50).std().bfill().fillna(0.0)
     df["dd"] = df["pnl"].cummax() - df["pnl"]
     dd_slope = df["dd"].diff().fillna(0.0)
     df["synthetic_bad"] = (
@@ -60,6 +60,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--log", type=pathlib.Path, default=pathlib.Path("logs/trading_log.csv"))
     ap.add_argument("--out", type=pathlib.Path, default=pathlib.Path("logs/bad_windows.csv"))
+    ap.add_argument("--out-contextual-hazard", type=pathlib.Path, default=None, help="Optional canonical contextual hazard CSV consumable by run_nashi.py --contextual-hazard-csv.")
     ap.add_argument("--window", type=int, default=500, help="Window length (bars) to aggregate severity.")
     ap.add_argument("--top", type=int, default=20, help="Top-N windows to keep.")
     ap.add_argument("--p-bad-thr", type=float, default=0.7, help="Threshold for bad_flag; informational.")
@@ -76,8 +77,34 @@ def main():
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     top.to_csv(args.out, index=False)
+    if args.out_contextual_hazard is not None:
+        contextual = top.copy()
+        sev = contextual["sev_sum_p_bad"].fillna(0.0).astype(float)
+        scale = float(sev.quantile(0.95)) if len(sev) > 1 else float(abs(sev.iloc[0])) if len(sev) else 1.0
+        scale = max(scale, 1e-9)
+        contextual["contextual_hazard"] = (sev / scale).clip(lower=0.0, upper=1.0)
+        contextual["contextual_label"] = "bad_window"
+        contextual["contextual_source"] = "score_bad_windows"
+        contextual["start_ms"] = pd.to_datetime(contextual["ts_start"], utc=True, errors="coerce").astype("int64") // 1_000_000
+        contextual["end_ms"] = pd.to_datetime(contextual["ts_end"], utc=True, errors="coerce").astype("int64") // 1_000_000
+        out_context = contextual[[
+            "start_ms",
+            "end_ms",
+            "contextual_hazard",
+            "contextual_label",
+            "contextual_source",
+            "sev_sum_p_bad",
+            "p_bad_mean",
+            "p_bad_max",
+            "bad_rate",
+            "synthetic_bad_rate",
+        ]].copy()
+        args.out_contextual_hazard.parent.mkdir(parents=True, exist_ok=True)
+        out_context.to_csv(args.out_contextual_hazard, index=False)
     print(top.to_string(index=False))
     print(f"Wrote top-{args.top} windows to {args.out}")
+    if args.out_contextual_hazard is not None:
+        print(f"Wrote contextual hazard windows to {args.out_contextual_hazard}")
 
 
 if __name__ == "__main__":

@@ -82,3 +82,11 @@ Implemented optional shadow-only score calibration via per-asset z-score standar
 Extended beam decision diagnostics/logging so shadow rows now expose explicit raw, standardized, and adjusted score stages plus effective calibration mean/std/weight.
 Updated the shadow signal analyzer to read the explicit raw/standardized score fields and report standardized-score spread alongside the existing failure-locus diagnostics.
 Recorded the current branch decision in docs/context: SPY failure-locus reports show usable raw-score spread and positive ranking uplift, so score standardization is now the next A/B branch and uncertainty-block ablation remains deferred.
+
+Implemented an uncertainty-penalty ablation for the futures action functional (`--shadow-score-penalty-mode {explicit,merged_uncertainty}`) to collapse correlated uncertainty penalties (branch/diffusion/stress) into a single block before score attenuation/gating, and logged the selected penalty mode in shadow rows.
+Extended the shadow analyzer with `mean percentile(raw score | ACT)` to directly detect mid-distribution activation vs tail selection.
+Added an entropy-gate off switch (`--shadow-entropy-gate-mode off`) to support direct A/B tests of whether entropy attenuation is a dominant blocker.
+Implemented an action-functional return-term ablation (`--shadow-score-return-mode {directional,abs}`) to test whether the current score is primarily detecting opportunity magnitude rather than direction; logged the selected return mode in shadow rows and reports.
+Fixed Vulkan quotient feature parity by aligning drawdown normalization in both CPU and shader paths (peak-to-trough range normalization with a small epsilon); `tools/parity_qfeat.py` now lands under the default tolerance on SPY.
+Added `run_trader.py --all-include/--all-exclude` regex filters so iteration runs can target a single tape (e.g. SPY-only) without running the entire `--all` corpus.
+Added p-adic path utilities for futures shadow beams (`futures/padic_paths.py`) and wired a stable integer `path_id` into beam nodes; this enables prefix-bucket compaction (default off) and defines the ABI for future batched/Vulkan acceleration.

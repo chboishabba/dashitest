@@ -148,10 +148,20 @@ Latest branch decision:
 - The first failure-locus reports on SPY are not consistent with pure
   amplitude collapse: raw-score spread remains non-trivial and ranking uplift
   is positive.
-- The next implementation branch is therefore optional raw-score
-  standardization with pooled shrinkage, still shadow-only and still judged
-  against `E(|ret| | ACT) > E(|ret| | HOLD)` before any uncertainty-block
-  simplification.
+- Score standardization with pooled shrinkage was implemented and tested; it
+  stabilizes score scale mechanically but does not by itself flip the economic
+  selection test (`E(|ret| | ACT) > E(|ret| | HOLD)`).
+- A penalty-geometry ablation (explicit vs merged uncertainty) improves
+  tail-activation alignment (top score bucket activates under merged
+  uncertainty), but ACT vs HOLD separation remains weak.
+- Entropy attenuation is no longer the dominant lever: disabling the entropy
+  gate does not restore positive ACT vs HOLD separation.
+- A return-term ablation (directional vs magnitude/abs) under merged
+  uncertainty does not yet flip ACT vs HOLD on its own.
+
+Current working hypothesis: the remaining blocker is score-structure quality
+and activation alignment rather than cold-start seeding, label plumbing, or
+simple normalization.
 
 ## What we need from quant reviewers now
 
@@ -218,6 +228,86 @@ Which metric should block rollout first?
 Recommended default:
 
 `A -> B`.
+
+### 6. Penalty geometry vs two-stage policy
+
+Now that the basin is tri-modal and the failure locus is no longer structural,
+we need to decide the next structural policy move:
+
+- A. continue with a single scalar score and simplify the penalty geometry
+  until ACT selects the correct tail
+- B. implement a two-stage policy: gate on opportunity magnitude, then choose
+  direction separately (basin mass / edge) to avoid conflating volatility and
+  direction in one scalar
+- C. pursue both as an ablation, with SPY as the anchor tape
+
+Recommended default:
+
+`C`, but implement `A` first because it is the minimal delta. If `A` cannot
+produce stable positive ACT vs HOLD separation on SPY, move to `B`.
+
+## Fast iteration workflow (non-hour runs)
+
+Full `--all` corpus runs can take ~1 hour. For iteration, prefer SPY-only
+short runs and reuse a tiny kernel-log directory. Note: the futures shadow loop
+is currently CPU-only; Vulkan/GPU acceleration exists for quotient feature tape
+generation (qfeat), but not yet for beam search / scoring / gating.
+
+Example (SPY short run, 1500 steps):
+
+```bash
+cd trading
+PYTHONPATH=. ../venv/bin/python run_trader.py \\
+  --max-steps 1500 \\
+  --all --raw-root ../data/raw/stooq --all-include spy.us.csv \\
+  --shadow-futures \\
+  --shadow-kernel-mode shrinkage \\
+  --shadow-kernel-log-dir ../logs/shadow \\
+  --shadow-kernel-label-mode fixed --shadow-kernel-label-threshold 0.05 \\
+  --shadow-score-mode logistic --shadow-score-scale 2.0 \\
+  --shadow-gating-mode lex --shadow-entropy-gate-mode logistic \\
+  --shadow-entropy-gate-center 0.955 --shadow-entropy-gate-tau 0.01 \\
+  --shadow-score-threshold-mode adaptive_quantile --shadow-target-action-rate 0.10 \\
+  --shadow-score-threshold-min-history 50 --shadow-score-threshold-history-size 400 \\
+  --log-level quiet --no-geometry-plots --no-tower-log
+```
+
+### Acceleration lanes (current vs planned)
+
+Current (available now):
+
+- **Tape filtering**: `run_trader.py --all-include/--all-exclude` to avoid
+  scanning/running the full corpus.
+- **Parallel tape execution**: `scripts/run_trader_all_parallel.py --jobs N` to run
+  multiple CSV tapes concurrently (wall time usually drops roughly with cores).
+- **Budgeted runtime**: `--max-steps` / `--max-seconds` to cap each tape during
+  A/B debugging.
+- **GPU parity tooling (qfeat only)**: `tools/parity_qfeat.py` proves Vulkan
+  qfeat runs on the discrete GPU when `VK_ICD_FILENAMES` is set; this is useful
+  for feature-tape generation but does not accelerate futures shadow today.
+
+Planned (true GPU lane for futures shadow):
+
+- **Option A (Vulkan compute)**: batch-evaluate beam node scoring and/or kernel
+  transition queries in a compute shader, keeping a strict CPU/GPU parity test
+  harness (like qfeat parity) and a deterministic CPU fallback.
+- **Option B (JAX/CuPy/Torch)**: introduce a GPU array runtime and rewrite the
+  beam expansion/scoring path to operate on batched tensors.
+
+The project venv currently does not include JAX/CuPy/Torch/Numba, so Option B
+requires a deliberate dependency decision. Option A avoids Python ML deps but
+requires shader + buffer plumbing.
+
+Then analyze:
+
+```bash
+cd trading
+TS=$(date -u +%Y%m%dT%H%M%SZ)
+PYTHONPATH=. ../venv/bin/python scripts/analyze_shadow_signals.py \\
+  --input SPY=../logs/shadow/<your_log>_spy.us.csv \\
+  --report ../logs/shadow/shadow_signal_report_${TS}_spy.md \\
+  --plot ../logs/shadow/shadow_signal_plots_${TS}_spy.png
+```
 
 ### 6. Penalty structure
 

@@ -4,6 +4,8 @@ import math
 from dataclasses import dataclass, field
 from typing import Iterable
 
+import numpy as np
+
 try:
     from trading.intent import Intent
 except ModuleNotFoundError:
@@ -11,6 +13,7 @@ except ModuleNotFoundError:
 
 from .action_functional import ActionFunctional, ActionScoreBreakdown
 from .basin import BasinClassifier, BasinMass, normalized_entropy
+from .padic_paths import action_to_digit, pow3_upto, prefix_bucket, push_digit
 from .state import CoarseState
 
 
@@ -24,6 +27,12 @@ class BeamConfig:
     beam_width: int = 12
     label_min_quota: int = 1
     label_quota_frac: float = 0.25
+    # Optional branch compaction: keep only the best node per prefix bucket.
+    # Uses the p-adic path encoding (base 3). 0 disables.
+    merge_prefix_depth: int = 0
+    # Batched scoring: score all candidate transitions in one vectorized call and only
+    # materialize BeamNodes for selected survivors. Default off for safety.
+    batched_scoring: bool = False
     flat_return_band: float = 0.02
     flat_cost_floor: float = 0.0
     exposure_step: float = 0.25
@@ -91,6 +100,8 @@ class BeamDecisionDiagnostics:
     score_penalty: float
     score_adjusted: float
     score_mode: str
+    score_penalty_mode: str
+    score_return_mode: str
     score_calibration_mode: str
     score_threshold_source: str
     score_calibration_mean: float
@@ -134,6 +145,8 @@ class BeamDecisionDiagnostics:
             "shadow_score_penalty": self.score_penalty,
             "shadow_score_adjusted": self.score_adjusted,
             "shadow_score_mode": self.score_mode,
+            "shadow_score_penalty_mode": self.score_penalty_mode,
+            "shadow_score_return_mode": self.score_return_mode,
             "shadow_score_calibration_mode": self.score_calibration_mode,
             "shadow_score_threshold_source": self.score_threshold_source,
             "shadow_score_calibration_mean": self.score_calibration_mean,
@@ -170,6 +183,7 @@ class BeamNode:
     depth: int
     cumulative_score: float
     cumulative_log_prob: float
+    path_id: int = 0
     action_history: list[int] = field(default_factory=list)
     exposure_history: list[float] = field(default_factory=list)
     labels: list[str] = field(default_factory=list)
@@ -298,20 +312,25 @@ class FutureBeamSearch:
         self.last_step_counts: list[dict[str, int]] = []
 
     def search(self, initial_state: CoarseState) -> list[BeamNode]:
+        pow3 = pow3_upto(self.beam_config.horizon + 1)
         beam = [
             BeamNode(
                 state=initial_state,
                 depth=0,
                 cumulative_score=0.0,
                 cumulative_log_prob=0.0,
+                path_id=0,
             )
         ]
         cfg = self.beam_config
+        if cfg.batched_scoring:
+            return self._search_batched(initial_state=initial_state, pow3=pow3)
         for depth in range(cfg.horizon):
             next_beam: list[BeamNode] = []
             for node in beam:
                 for action in cfg.action_grid:
                     next_exposure = _clip(node.state.current_exposure + action * cfg.exposure_step, -1.0, 1.0)
+                    next_path_id = push_digit(node.path_id, depth, action_to_digit(action), pow3=pow3)
                     for candidate in self.transition_model.expand(node.state, action, next_exposure):
                         if candidate.probability < cfg.probability_floor:
                             continue
@@ -329,6 +348,7 @@ class FutureBeamSearch:
                                 depth=depth + 1,
                                 cumulative_score=node.cumulative_score + breakdown.total,
                                 cumulative_log_prob=node.cumulative_log_prob + math.log(candidate.probability),
+                                path_id=next_path_id,
                                 action_history=node.action_history + [action],
                                 exposure_history=node.exposure_history + [next_exposure],
                                 labels=node.labels + [candidate.label],
@@ -340,12 +360,245 @@ class FutureBeamSearch:
                                 last_label=candidate.label,
                             )
                         )
+            if cfg.merge_prefix_depth > 0 and next_beam:
+                # Compact by prefix buckets before quota pruning. This preserves support
+                # across branch families while reducing candidate multiplicity.
+                k = min(int(cfg.merge_prefix_depth), depth + 1)
+                if k > 0:
+                    merged: dict[int, BeamNode] = {}
+                    for node in next_beam:
+                        key = prefix_bucket(node.path_id, depth=k, pow3=pow3)
+                        prev = merged.get(key)
+                        if prev is None or (node.cumulative_score, node.cumulative_log_prob) > (
+                            prev.cumulative_score,
+                            prev.cumulative_log_prob,
+                        ):
+                            merged[key] = node
+                    next_beam = list(merged.values())
             next_beam = self._select_diverse_beam(next_beam, cfg)
             beam = next_beam
             self.last_step_counts.append(self._count_labels(beam, depth=depth + 1))
             if not beam:
                 break
         return beam
+
+    def _search_batched(self, *, initial_state: CoarseState, pow3: list[int]) -> list[BeamNode]:
+        """
+        Batched variant of search() that vectorizes ActionFunctional scoring.
+
+        This keeps the exact transition-model interface (Python generator) but avoids:
+        - per-candidate BeamNode allocations
+        - per-candidate scalar math in Python
+        """
+        beam = [
+            BeamNode(
+                state=initial_state,
+                depth=0,
+                cumulative_score=0.0,
+                cumulative_log_prob=0.0,
+                path_id=0,
+            )
+        ]
+        cfg = self.beam_config
+        for depth in range(cfg.horizon):
+            cand_parent_idx: list[int] = []
+            cand_action: list[int] = []
+            cand_next_exposure: list[float] = []
+            cand_prob: list[float] = []
+            cand_label: list[str] = []
+            cand_label_bucket: list[int] = []
+            cand_path_id: list[int] = []
+            cand_next_state: list[CoarseState] = []
+            cand_step_return: list[float] = []
+            cand_branch_risk: list[float] = []
+            cand_diffusion_risk: list[float] = []
+
+            cur_contraction: list[float] = []
+            cur_exposure: list[float] = []
+            cur_cum_score: list[float] = []
+            cur_cum_log_prob: list[float] = []
+
+            nxt_triadic_bias: list[float] = []
+            nxt_actionability: list[float] = []
+            nxt_contraction: list[float] = []
+            nxt_diffusion: list[float] = []
+            nxt_stress: list[float] = []
+            nxt_drawdown: list[float] = []
+
+            for parent_i, node in enumerate(beam):
+                for action in cfg.action_grid:
+                    next_exposure = _clip(node.state.current_exposure + action * cfg.exposure_step, -1.0, 1.0)
+                    next_path_id = push_digit(node.path_id, depth, action_to_digit(action), pow3=pow3)
+                    for candidate in self.transition_model.expand(node.state, action, next_exposure):
+                        if candidate.probability < cfg.probability_floor:
+                            continue
+                        cand_parent_idx.append(parent_i)
+                        cand_action.append(action)
+                        cand_next_exposure.append(next_exposure)
+                        cand_prob.append(candidate.probability)
+                        cand_label.append(candidate.label)
+                        bucket = self._label_bucket(candidate.label)
+                        cand_label_bucket.append(0 if bucket == "long" else 1 if bucket == "short" else 2)
+                        cand_path_id.append(next_path_id)
+                        cand_next_state.append(candidate.next_state)
+                        cand_step_return.append(candidate.step_return)
+                        cand_branch_risk.append(candidate.step_branch_risk)
+                        cand_diffusion_risk.append(candidate.step_diffusion_risk)
+
+                        cur_contraction.append(node.state.contraction)
+                        cur_exposure.append(node.state.current_exposure)
+                        cur_cum_score.append(node.cumulative_score)
+                        cur_cum_log_prob.append(node.cumulative_log_prob)
+
+                        nxt_triadic_bias.append(candidate.next_state.triadic_bias)
+                        nxt_actionability.append(candidate.next_state.actionability)
+                        nxt_contraction.append(candidate.next_state.contraction)
+                        nxt_diffusion.append(candidate.next_state.diffusion)
+                        nxt_stress.append(candidate.next_state.stress)
+                        nxt_drawdown.append(candidate.next_state.drawdown)
+
+            if not cand_prob:
+                break
+
+            comps = self.action_functional.score_transition_batch(
+                current_contraction=np.asarray(cur_contraction, dtype=np.float32),
+                current_exposure=np.asarray(cur_exposure, dtype=np.float32),
+                nxt_triadic_bias=np.asarray(nxt_triadic_bias, dtype=np.float32),
+                nxt_actionability=np.asarray(nxt_actionability, dtype=np.float32),
+                nxt_contraction=np.asarray(nxt_contraction, dtype=np.float32),
+                nxt_diffusion=np.asarray(nxt_diffusion, dtype=np.float32),
+                nxt_stress=np.asarray(nxt_stress, dtype=np.float32),
+                nxt_drawdown=np.asarray(nxt_drawdown, dtype=np.float32),
+                next_exposure=np.asarray(cand_next_exposure, dtype=np.float32),
+                step_return=np.asarray(cand_step_return, dtype=np.float32),
+                step_branch_risk=np.asarray(cand_branch_risk, dtype=np.float32),
+                step_diffusion_risk=np.asarray(cand_diffusion_risk, dtype=np.float32),
+            )
+            total = comps["total"].astype(np.float32)
+            prob = np.asarray(cand_prob, dtype=np.float32)
+            cum_score = np.asarray(cur_cum_score, dtype=np.float32) + total
+            cum_log_prob = np.asarray(cur_cum_log_prob, dtype=np.float32) + np.log(np.maximum(prob, 1e-12))
+            label_bucket = np.asarray(cand_label_bucket, dtype=np.int8)
+            path_id = np.asarray(cand_path_id, dtype=np.int64)
+
+            # Optional prefix merge at this depth (pick best per prefix bucket).
+            if cfg.merge_prefix_depth > 0:
+                k = min(int(cfg.merge_prefix_depth), depth + 1)
+                merged: dict[int, int] = {}
+                for idx in range(int(cum_score.size)):
+                    key = prefix_bucket(int(path_id[idx]), depth=k, pow3=pow3)
+                    prev_idx = merged.get(key)
+                    if prev_idx is None:
+                        merged[key] = idx
+                        continue
+                    if (cum_score[idx], cum_log_prob[idx]) > (cum_score[prev_idx], cum_log_prob[prev_idx]):
+                        merged[key] = idx
+                keep_idx = np.fromiter(merged.values(), dtype=np.int32)
+                cum_score = cum_score[keep_idx]
+                cum_log_prob = cum_log_prob[keep_idx]
+                label_bucket = label_bucket[keep_idx]
+                path_id = path_id[keep_idx]
+                # For node materialization we also need to subset python-side lists.
+                keep = keep_idx.tolist()
+                cand_parent_idx = [cand_parent_idx[i] for i in keep]
+                cand_action = [cand_action[i] for i in keep]
+                cand_next_exposure = [cand_next_exposure[i] for i in keep]
+                cand_label = [cand_label[i] for i in keep]
+                cand_next_state = [cand_next_state[i] for i in keep]
+                cand_step_return = [cand_step_return[i] for i in keep]
+                cand_branch_risk = [cand_branch_risk[i] for i in keep]
+                cand_diffusion_risk = [cand_diffusion_risk[i] for i in keep]
+                for key in list(comps.keys()):
+                    comps[key] = comps[key][keep_idx]
+
+            selected = self._select_diverse_indices(
+                cum_score=cum_score,
+                cum_log_prob=cum_log_prob,
+                label_bucket=label_bucket,
+                beam_width=cfg.beam_width,
+                quota=max(int(cfg.label_min_quota), int(math.floor(cfg.label_quota_frac * int(cfg.beam_width)))),
+            )
+
+            next_beam: list[BeamNode] = []
+            for idx in selected:
+                parent = beam[cand_parent_idx[idx]]
+                next_state = cand_next_state[idx]
+                breakdown = ActionScoreBreakdown(
+                    signed_return=float(comps["signed_return"][idx]),
+                    return_mode=str(self.action_functional.return_mode),
+                    alignment=float(comps["alignment"][idx]),
+                    actionability=float(comps["actionability"][idx]),
+                    contraction_gain=float(comps["contraction_gain"][idx]),
+                    branch_cost=float(comps["branch_cost"][idx]),
+                    diffusion_cost=float(comps["diffusion_cost"][idx]),
+                    stress_cost=float(comps["stress_cost"][idx]),
+                    drawdown_cost=float(comps["drawdown_cost"][idx]),
+                    churn_cost=float(comps["churn_cost"][idx]),
+                    inventory_cost=float(comps["inventory_cost"][idx]),
+                    reward_block=float(comps["reward_block"][idx]),
+                    penalty_block=float(comps["penalty_block"][idx]),
+                    score_mode=str(self.action_functional.score_mode),
+                    penalty_mode=str(self.action_functional.penalty_mode),
+                    total=float(total[idx] if isinstance(total, np.ndarray) else cum_score[idx] - parent.cumulative_score),
+                )
+                next_beam.append(
+                    BeamNode(
+                        state=next_state,
+                        depth=depth + 1,
+                        cumulative_score=float(cum_score[idx]),
+                        cumulative_log_prob=float(cum_log_prob[idx]),
+                        path_id=int(path_id[idx]),
+                        action_history=parent.action_history + [cand_action[idx]],
+                        exposure_history=parent.exposure_history + [float(cand_next_exposure[idx])],
+                        labels=parent.labels + [cand_label[idx]],
+                        breakdowns=parent.breakdowns + [breakdown],
+                        return_history=parent.return_history + [float(cand_step_return[idx])],
+                        branch_risk_history=parent.branch_risk_history + [float(cand_branch_risk[idx])],
+                        diffusion_risk_history=parent.diffusion_risk_history + [float(cand_diffusion_risk[idx])],
+                        label_history=parent.label_history + [cand_label[idx]],
+                        last_label=cand_label[idx],
+                    )
+                )
+
+            beam = next_beam
+            self.last_step_counts.append(self._count_labels(beam, depth=depth + 1))
+            if not beam:
+                break
+        return beam
+
+    @staticmethod
+    def _select_diverse_indices(
+        *,
+        cum_score: np.ndarray,
+        cum_log_prob: np.ndarray,
+        label_bucket: np.ndarray,
+        beam_width: int,
+        quota: int,
+    ) -> list[int]:
+        if cum_score.size == 0:
+            return []
+        beam_width = int(beam_width)
+        quota = max(1, int(quota))
+        # Sort by (score, log_prob) descending.
+        order = np.lexsort((cum_log_prob, cum_score))[::-1]
+        selected: list[int] = []
+        selected_set: set[int] = set()
+        for bucket in (0, 1, 2):
+            bucket_idx = order[label_bucket[order] == bucket]
+            take = int(min(quota, bucket_idx.size))
+            for idx in bucket_idx[:take]:
+                selected.append(int(idx))
+                selected_set.add(int(idx))
+        if len(selected) < beam_width:
+            for idx in order:
+                i = int(idx)
+                if i in selected_set:
+                    continue
+                selected.append(i)
+                selected_set.add(i)
+                if len(selected) >= beam_width:
+                    break
+        return selected[:beam_width]
 
     @staticmethod
     def _label_bucket(label: str) -> str:
@@ -510,6 +763,8 @@ class BeamIntentPolicy:
                 self._push_score_history(numeric)
 
     def _entropy_weight(self, entropy: float) -> float:
+        if self.entropy_gate_mode == "off":
+            return 1.0
         if self.entropy_gate_mode == "hard":
             return 0.0 if entropy > self.entropy_threshold else 1.0
         center = self.entropy_gate_center
@@ -611,6 +866,7 @@ class BeamIntentPolicy:
         score_calibration_mean: float = 0.0,
         score_calibration_std: float = 1.0,
         score_calibration_weight: float = 1.0,
+        score_penalty_mode: str = "",
     ) -> BeamDecisionDiagnostics:
         kernel = self._kernel_metadata()
         directional_mass = max(summary.long_mass, summary.short_mass)
@@ -634,6 +890,9 @@ class BeamIntentPolicy:
             score_penalty=score_penalty,
             score_adjusted=score_adjusted,
             score_mode=str(getattr(self.search.action_functional, "score_mode", "unknown")),
+            score_penalty_mode=score_penalty_mode
+            or str(getattr(self.search.action_functional, "penalty_mode", "explicit")),
+            score_return_mode=str(getattr(self.search.action_functional, "return_mode", "directional")),
             score_calibration_mode=self.score_calibration_mode,
             score_threshold_source=self.score_threshold_source,
             score_calibration_mean=score_calibration_mean,
@@ -688,6 +947,7 @@ class BeamIntentPolicy:
         score_calibration_mean: float = 0.0,
         score_calibration_std: float = 1.0,
         score_calibration_weight: float = 1.0,
+        score_penalty_mode: str = "",
     ) -> BeamPolicyStep:
         intent = Intent(
             ts=int(ts),
@@ -716,6 +976,7 @@ class BeamIntentPolicy:
                 score_calibration_mean=score_calibration_mean,
                 score_calibration_std=score_calibration_std,
                 score_calibration_weight=score_calibration_weight,
+                score_penalty_mode=score_penalty_mode,
             ),
         )
 
@@ -734,10 +995,12 @@ class BeamIntentPolicy:
         best = beam[0]
         score_reward = 0.0
         score_penalty = 0.0
+        score_penalty_mode = str(getattr(self.search.action_functional, "penalty_mode", "explicit"))
         if best.breakdowns:
             last_breakdown = best.breakdowns[-1]
             score_reward = float(getattr(last_breakdown, "reward_block", 0.0))
             score_penalty = float(getattr(last_breakdown, "penalty_block", 0.0))
+            score_penalty_mode = str(getattr(last_breakdown, "penalty_mode", score_penalty_mode))
         directional_mass = max(summary.long_mass, summary.short_mass)
         directional_margin = abs(summary.long_mass - summary.short_mass)
         score_raw = float(best.cumulative_score)
@@ -769,6 +1032,7 @@ class BeamIntentPolicy:
                     score_calibration_mean=score_calibration_mean,
                     score_calibration_std=score_calibration_std,
                     score_calibration_weight=score_calibration_weight,
+                    score_penalty_mode=score_penalty_mode,
                 )
         elif self.gating_mode == "lex":
             if self.curvature_threshold > 0.0 and summary.curvature < self.curvature_threshold:
@@ -787,6 +1051,7 @@ class BeamIntentPolicy:
                     score_calibration_mean=score_calibration_mean,
                     score_calibration_std=score_calibration_std,
                     score_calibration_weight=score_calibration_weight,
+                    score_penalty_mode=score_penalty_mode,
                 )
             if self.entropy_gate_mode == "hard" and summary.entropy > self.entropy_threshold:
                 return self._hold_step(
@@ -803,6 +1068,7 @@ class BeamIntentPolicy:
                     score_calibration_mean=score_calibration_mean,
                     score_calibration_std=score_calibration_std,
                     score_calibration_weight=score_calibration_weight,
+                    score_penalty_mode=score_penalty_mode,
                 )
             if directional_mass < self.directional_mass_threshold or directional_margin < self.directional_margin_threshold:
                 return self._hold_step(
@@ -823,6 +1089,7 @@ class BeamIntentPolicy:
                     score_calibration_mean=score_calibration_mean,
                     score_calibration_std=score_calibration_std,
                     score_calibration_weight=score_calibration_weight,
+                    score_penalty_mode=score_penalty_mode,
                 )
             if score_adjusted <= score_threshold_used:
                 return self._hold_step(
@@ -840,6 +1107,7 @@ class BeamIntentPolicy:
                     score_calibration_mean=score_calibration_mean,
                     score_calibration_std=score_calibration_std,
                     score_calibration_weight=score_calibration_weight,
+                    score_penalty_mode=score_penalty_mode,
                 )
         else:
             if (
@@ -867,6 +1135,7 @@ class BeamIntentPolicy:
                     score_calibration_mean=score_calibration_mean,
                     score_calibration_std=score_calibration_std,
                     score_calibration_weight=score_calibration_weight,
+                    score_penalty_mode=score_penalty_mode,
                 )
             if summary.flat_mass >= self.flat_mass_threshold and score_adjusted < self.flat_score_threshold:
                 return self._hold_step(
@@ -884,6 +1153,7 @@ class BeamIntentPolicy:
                     score_calibration_mean=score_calibration_mean,
                     score_calibration_std=score_calibration_std,
                     score_calibration_weight=score_calibration_weight,
+                    score_penalty_mode=score_penalty_mode,
                 )
             if score_adjusted <= score_threshold_used:
                 return self._hold_step(
@@ -901,6 +1171,7 @@ class BeamIntentPolicy:
                     score_calibration_mean=score_calibration_mean,
                     score_calibration_std=score_calibration_std,
                     score_calibration_weight=score_calibration_weight,
+                    score_penalty_mode=score_penalty_mode,
                 )
             if directional_mass < self.directional_mass_threshold or directional_margin < self.directional_margin_threshold:
                 return self._hold_step(
@@ -921,6 +1192,7 @@ class BeamIntentPolicy:
                     score_calibration_mean=score_calibration_mean,
                     score_calibration_std=score_calibration_std,
                     score_calibration_weight=score_calibration_weight,
+                    score_penalty_mode=score_penalty_mode,
                 )
         if summary.long_mass > summary.short_mass:
             direction = 1
@@ -958,6 +1230,7 @@ class BeamIntentPolicy:
                 score_calibration_mean=score_calibration_mean,
                 score_calibration_std=score_calibration_std,
                 score_calibration_weight=score_calibration_weight,
+                score_penalty_mode=score_penalty_mode,
             ),
         )
 

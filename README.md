@@ -29,9 +29,14 @@
 - `docs/grayscott_quotient.md`: Gray-Scott quotient-space rollout metrics and targets.
 - `docs/valuation_primes_plan.md`: Valuation/primes benchmark plan and hierarchy-aligned targets.
 - `docs/compression_bench.md`: Compression benchmark spec and reporting expectations.
+- `compression/README.md`: Local guide to the compression research directory, active scripts, and prototypes.
 - `docs/energy_landscape_vis.md`: Energy landscape visualization guidance for dashifine outputs.
 - `docs/bad_day.md`: Bad-day detection semantics and trading posture policy.
 - `docs/vulkan_jax_parity.md`: Vulkan/JAX parity map and first-kernel target.
+- `dashitest/dashifine/newtest/`: mirrored classical quantum-faithful utilities
+  (CHSH, qutrit, SSH/lattice, quantum-defect demos). Treat these as simulator
+  / lattice-realization tools; bridge/internalization formalism lives in
+  sibling repo `dashiQ`.
 
 ## Full file index (every file/test)
 - `CHANGELOG.md`: Change history and release notes.
@@ -66,6 +71,7 @@
 - `compression/gpt4.py`: Compression experiment notes (gpt4).
 - `compression/naieve_i_think.py`: Sketch/notes for naive compression idea.
 - `compression/rans.py`: Range coder with rANS-like API.
+- `compression/README.md`: Package-level overview of the compression experiments and file roles.
 - `compression/triadic_pipeline.md`: Notes on triadic pipeline + per-plane Z2 quotient.
 - `compression/video_bench.py`: Video compression benchmark runner.
 - `confusion.png`: Generated plot asset (confusion surface).

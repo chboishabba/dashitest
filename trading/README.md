@@ -7,6 +7,7 @@ Minimal triadic trading research sandbox with synthetic/real data runs, dashboar
 Run from this directory:
 
 - `python run_trader.py` to execute the core loop on cached data (or synthetic fallback).
+- `python run_nashi.py` to execute the new contract-first Nashi loop and emit CSV + NDJSON + DuckDB artifacts for the existing dashboards.
 - `python run_all.py` to run across all cached markets.
 - `python training_dashboard.py --log logs/trading_log.csv --refresh 0.5` for a live matplotlib view.
 - `python training_dashboard_pg.py --log logs/trading_log.csv --refresh 1.0` for the PyQtGraph dashboard.
@@ -35,11 +36,14 @@ PYTHONPATH=. python run_all_two_pointO.py \
 - `regime.py`: Regime acceptance utilities (run-length, flip-rate, vol gates).
 - `runner.py`: Strategy/executor glue; builds bar dataframes and logs execution traces.
 - `run_trader.py`: Core trading loop, triadic state computation, stress/bad-flag logic, log writer.
-  - `python run_trader.py --all` runs all CSVs under `data/raw` sequentially (per-file logs).
+  - `python run_trader.py --all` runs all CSVs under `data/raw` (per-file logs).
+  - Use `--all-include/--all-exclude` to filter to a small tape set (e.g. SPY-only).
+  - For concurrent multi-tape runs, use `scripts/run_trader_all_parallel.py --jobs N` (spawns N worker processes).
 - `run_all.py`: Multi-market runner (with optional live dashboard).
 - `run_all_two_pointO.py`: Orchestrator for market summaries, tau sweeps, CA tape preview, and news windows.
 - `docs/decision_alignment_check.md`: Spec for closest-profitable alignment checks on losing trades.
 - `docs/discrete_action_functional.md`: Optional beam-search futures policy for the current trader (coarse state, action score, beam search, intent selection).
+- `docs/nashi_cross_asset_forensics.md`: Current stop condition for the `nashi` cross-asset warning/response branch, including what has been falsified and what data changes are still required before reopening it.
 - `docs/QUANT_PROFESSIONAL_JUDGEMENT_INQUIRY.md`: Quant-facing review packet for the futures shadow policy, current math framing, and tuning questions.
 - `docs/quotient_integration.md`: Quotient-invariant integration plan for learner-gated trader behavior.
 - `docs/tower_projection_dashboard.md`: Spec for tower-aligned M1-M9 projection dashboard (PyQtGraph internals view; diagnostic only).
@@ -56,6 +60,9 @@ PYTHONPATH=. python run_all_two_pointO.py \
 - `scripts/`: Analysis, plotting, and sweep utilities (see catalog below).
 - `strategy/triadic_strategy.py`: Deterministic triadic strategy that emits `Intent`.
 - `strategy/__init__.py`: Strategy package marker.
+- `nashi/`: new Agda-formalism-based trader scaffold with contract-first runtime primitives.
+- `run_nashi.py`: root entrypoint for the new `nashi` runner; writes dashboard-compatible CSV logs plus stream-dashboard NDJSON/DuckDB mirrors.
+  - Includes a first Phase-9 layer: capital kernel, meta-witness clamp, and justification-chain fields in the emitted step log.
 
 ## Core runtime flow
 
@@ -63,6 +70,14 @@ PYTHONPATH=. python run_all_two_pointO.py \
 2) `strategy.triadic_strategy.TriadicStrategy` turns state into `Intent`.
 3) `bar_exec.BarExecution` (or `hft_exec.LOBReplayExecution`) executes intents and returns fills.
 4) `training_dashboard.py` / `training_dashboard_pg.py` visualize `logs/trading_log.csv`.
+
+For `nashi`:
+
+1) `run_nashi.py` loads cached price data and builds canonical closure embeddings.
+2) `nashi.policy.NashiPolicyRuntime` enforces admissibility before execution.
+3) `bar_exec.BarExecution` executes the resulting repo `Intent`.
+4) `training_dashboard_pg.py --log logs/nashi/trading_log_nashi.csv` visualizes the per-step run.
+5) `scripts/plot_stream_dashboard_pg.py --ndjson logs/nashi/trading_log_nashi_decisions.ndjson --ohlc-ndjson logs/nashi/trading_log_nashi_ohlc.ndjson --ohlc-symbol BTCUSDT` visualizes the same run through the live decision/OHLC path.
 
 ## Script catalog (analysis + plotting)
 
@@ -153,6 +168,10 @@ by default; overwriting is not allowed.
 - `data/raw/stooq/`: Stooq CSVs, BTC intraday, and any downloaded market data.
 - `data/run_history.csv`: Append-only run summaries from `run_trader`.
 - `logs/trading_log.csv`: Primary log for dashboards and analysis scripts.
+- `logs/nashi/trading_log_nashi.csv`: Primary per-step `nashi` log for the existing dashboards.
+- `logs/nashi/trading_log_nashi_decisions.ndjson`: `nashi` decision stream for `scripts/plot_stream_dashboard_pg.py`.
+- `logs/nashi/trading_log_nashi_ohlc.ndjson`: `nashi` OHLC stream for `scripts/plot_stream_dashboard_pg.py`.
+- `logs/research/nashi.duckdb`: DuckDB mirror with `stream_actions`, `stream_actions_latest`, `ohlc_1s`, and `nashi_steps`.
 - `logs/trading_log_trades_*.csv`: Per-trade logs (one row per closed trade).
 - `logs/trading_log*_tower.ndjson`: Tower projection log (typed M1-M9 projections).
 - `logs/news_events/`: News slices fetched by `emit_news_windows` and `run_all_two_pointO`.
@@ -166,6 +185,7 @@ by default; overwriting is not allowed.
 - `run_trader.py` supports verbosity controls via `--log-level {quiet,info,trades,verbose}` and `--progress-every N`.
 - `run_trader.py` supports multi-tape logging with `--all` and `--log-combined` (writes `logs/trading_log_all.csv`).
 - `run_trader.py` supports `--max-steps`, `--max-seconds`, and `--max-trades` (counts closed trades; see `TRADER_CONTEXT.md:98401`).
+- `scripts/run_trader_all_parallel.py` can run multiple tapes concurrently (wall-time reduction on multi-core).
 - `run_trader.py` logs edge metrics (`edge_raw`, `edge_ema`); optional cap gate with `--edge-gate --edge-decay --edge-alpha`.
 - `run_trader.py` uses a bounded thesis memory counter (`--thesis-depth-max`) to delay soft-veto exits.
 - `run_trader.py` exposes goal/MDL tuning (`--goal-cash-x --goal-eps --est-tax-rate --mdl-noise-mult --mdl-switch-penalty --mdl-trade-penalty`).
@@ -179,6 +199,7 @@ by default; overwriting is not allowed.
 - Shadow calibration flags include `--shadow-kernel-log-dir`, `--shadow-score-mode`, `--shadow-gating-mode`, curvature controls (`--shadow-curvature-threshold`, `--shadow-score-curvature-weight`), beam label-retention controls (`--shadow-beam-label-min-quota`, `--shadow-beam-label-quota-frac`), and flat-band basin classification (`--shadow-beam-flat-return-band`, `--shadow-beam-flat-cost-floor`).
 - Adaptive score-threshold prefit supports scoped seeding controls: `--shadow-score-threshold-prefit`, `--shadow-score-threshold-prefit-max-values`, and `--shadow-score-threshold-prefit-family` (restrict seed logs to a matching run-family substring, e.g. `prefit_005_kdirshadow`, to avoid cross-regime contamination).
 - Shadow score calibration now supports an optional standardized-score branch: `--shadow-score-calibration-mode per_asset_zscore_shrunk`, `--shadow-score-threshold-source standardized_adjusted`, and calibration controls for minimum history, shrinkage scale, and standard-deviation floor.
+- Shadow score penalty ablation is available via `--shadow-score-penalty-mode {explicit,merged_uncertainty}` to collapse correlated uncertainty penalties before score attenuation/gating.
 - Recent shadow reruns indicate prefit and family-scoping affect action rates but do not yet fix the main economic selection test; SPY failure-locus reports still show usable raw-score spread and positive ranking uplift, so the next debugging branch is standardized-score A/B rather than more prefit plumbing.
 - Decision-grade BTC/SPY shadow analysis artifacts now live under `logs/shadow/` at timestamp `20260312T052900Z`; keep the earlier `20260312T042358Z` report only as a pre-fix exploratory baseline.
 - Follow-up diagnosis at `logs/shadow/shadow_signal_diagnosis_20260313T020345Z.md` concludes that the current heuristic beam is still structurally too diffuse (`shadow_hold` always true, `beam_flat_mass` always zero in the decision-grade baseline), so the next milestone is learned transition-kernel replacement rather than threshold tuning.

@@ -32,6 +32,13 @@
   - Keep it bitset-only; no lane compaction in the hot loop.
 
 - **Wave kernel benchmark follow-ups**
+  - Quantum-formalism sync:
+    - keep mirrored `dashifine/newtest` quantum utilities documented as
+      classical simulation / lattice-realization tools, not quantum hardware
+      work
+    - point bridge/internalization planning to sibling repo `dashiQ`
+    - avoid mixing this documentation task into the root benchmark acceptance
+      criteria
   - Decide whether to include a DC bias term in the dashifine spectral kernel.
   - Confirm the wave-domain periodicity handling vs Euclidean baselines.
   - Add a projection stress test (mask or subsample the input domain).

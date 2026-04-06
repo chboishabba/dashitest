@@ -42,6 +42,7 @@ _last_request_yahoo = 0.0
 BINANCE_BASE = "https://api.binance.com"
 BINANCE_KLINES = f"{BINANCE_BASE}/api/v3/klines"
 BINANCE_AGG_TRADES = f"{BINANCE_BASE}/api/v3/aggTrades"
+BINANCE_DEPTH = f"{BINANCE_BASE}/api/v3/depth"
 BINANCE_LIMIT = 1000  # max rows per request
 BINANCE_FAPI = "https://fapi.binance.com"
 BINANCE_PREMIUM = f"{BINANCE_FAPI}/fapi/v1/premiumIndex"
@@ -193,6 +194,50 @@ def _binance_klines(symbol, interval, limit=500, start_time=None):
     if start_time is not None:
         params["startTime"] = int(start_time)
     return _binance_get(BINANCE_KLINES, params)
+
+
+def fetch_binance_depth_snapshot(symbol="BTCUSDT", limit=100):
+    """
+    Fetch a single public Binance order-book snapshot.
+
+    Returns a dict with the raw Binance payload plus normalized metadata:
+      {
+        "timestamp": "...Z",
+        "symbol": "BTCUSDT",
+        "limit": 100,
+        "lastUpdateId": ...,
+        "bids": [[price, size], ...],
+        "asks": [[price, size], ...],
+      }
+    """
+    valid_limits = {5, 10, 20, 50, 100, 500, 1000, 5000}
+    limit = int(limit)
+    if limit not in valid_limits:
+        raise ValueError(f"Unsupported Binance depth limit: {limit}")
+
+    payload = _binance_get(
+        BINANCE_DEPTH,
+        {"symbol": symbol.upper(), "limit": limit},
+    )
+    if not isinstance(payload, dict):
+        raise RuntimeError("Unexpected Binance depth payload")
+
+    def _normalize_side(entries):
+        normalized = []
+        for entry in entries or []:
+            if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+                continue
+            normalized.append([str(entry[0]), str(entry[1])])
+        return normalized
+
+    return {
+        "timestamp": pd.Timestamp.utcnow().isoformat().replace("+00:00", "Z"),
+        "symbol": symbol.upper(),
+        "limit": limit,
+        "lastUpdateId": payload.get("lastUpdateId"),
+        "bids": _normalize_side(payload.get("bids")),
+        "asks": _normalize_side(payload.get("asks")),
+    }
 
 
 def _klines_to_df(klines, include_close=True):
